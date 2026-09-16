@@ -13,12 +13,22 @@ from pydantic import BaseModel
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import InMemorySaver
+from langsmith.wrappers import wrap_openai
 
 from data import pdm_operations, pdm_telemetry
+from rag.pump_manual import SIGNAL_TO_COMPONENT, ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES
+from core.harness import check_output_forbidden_words
+
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+def initialize_agent(langsmith_client) -> None:
+    """main.py의 lifespan에서 호출: main.py와 같은 LangSmith Client(PII 익명화 포함)로
+    이 모듈의 OpenAI 클라이언트를 감싼다. - 별도 Client를 새로 만들지 않고 재사용.
+    """
+    global client
+    client = wrap_openai(client, tracing_extra={"client": langsmith_client})
 
 class SupervisorState(BaseModel):
     user_message: str
@@ -26,8 +36,13 @@ class SupervisorState(BaseModel):
     machine_id: int | None = None
     severity: str | None = None
     diagnosis: str | None = None
+    involved_components: list[str] = []
+    component_evidence: dict[str, str] = {}
+    component_manuals: dict[str, str] = {}   # 부품별 매뉴얼 증상 설명
+    component_actions: dict[str, str] = {}   # 부품별 표준 조치사항
     perspectives: Annotated[list[str], operator.add] = []
     approved: bool | None = None
+    work_order: str | None = None
     result: str | None = None
 
 
@@ -62,9 +77,10 @@ def route_node(state: SupervisorState) -> dict:
     print(f"[라우터] {decision.category}")
     return {"category": decision.category}
 
-
 def diagnosis_node(state: SupervisorState) -> dict:
-    """설비 번호를 추출하고, 실제 이력 데이터 + 텔레메트리 이상탐지 + 기종별 통계로 진단한다."""
+    """설비 번호를 추출하고, 실제 이력 데이터 + 텔레메트리 이상탐지 + 기종별 통계로 진단한다.
+    관련 부품(involved_components)과 부품별 근거(component_evidence)를 코드로 확정해서,
+    이후 단계가 LLM 판단 없이 정확히 매칭하게 만든다."""
     completion = client.chat.completions.parse(
         model="gpt-4o-mini",
         messages=[
@@ -76,6 +92,14 @@ def diagnosis_node(state: SupervisorState) -> dict:
     machine_id = completion.choices[0].message.parsed.machine_id
 
     machine_info = pdm_operations.get_machine_info(machine_id)
+    if "error" in machine_info:
+        print(f"[진단] machine #{machine_id} -> 존재하지 않는 설비")
+        return {
+            "machine_id": machine_id,
+            "diagnosis": "등록되지 않은 번호입니다 (1~100번 설비만 존재).",
+            "severity": "일반",
+        }
+
     recent_errors = pdm_operations.get_recent_errors(machine_id, limit=3)
     failure = pdm_operations.check_recent_failure(machine_id, within_days=30)
     anomaly = pdm_telemetry.detect_anomaly(machine_id)
@@ -101,6 +125,24 @@ def diagnosis_node(state: SupervisorState) -> dict:
                 f"{top['component']}({top['component_description']}) 고장이 가장 잦음"
             )
 
+    # 부품별 근거를 코드로 확정 - LLM이 "어느 증상이 어느 부품 것인지" 추론할 필요가 없게 만든다
+    component_evidence: dict[str, list[str]] = {}
+    for e in recent_errors:
+        comp = ERROR_TO_COMPONENT.get(e["errorID"])
+        if comp:
+            component_evidence.setdefault(comp, []).append(f"{e['datetime']} {e['errorID']}({e['description']})")
+    if failure:
+        component_evidence.setdefault(failure["component"], []).append(
+            f"실제 고장 발생: {failure['datetime']} {failure['description']}"
+        )
+    if anomaly.get("has_anomaly"):
+        for signal in anomaly["flagged_signals"]:
+            comp = SIGNAL_TO_COMPONENT.get(signal)
+            if comp:
+                component_evidence.setdefault(comp, []).append(
+                    f"텔레메트리 이상(사전 경보): {signal} 신호가 통계적으로 벗어남"
+                )
+
     if failure:
         severity = "긴급"
     elif anomaly.get("has_anomaly"):
@@ -108,7 +150,13 @@ def diagnosis_node(state: SupervisorState) -> dict:
     else:
         severity = "일반"
     print(f"[진단] machine #{machine_id} -> {severity}")
-    return {"machine_id": machine_id, "diagnosis": diagnosis_text, "severity": severity}
+    return {
+        "machine_id": machine_id,
+        "diagnosis": diagnosis_text,
+        "severity": severity,
+        "involved_components": list(component_evidence.keys()),
+        "component_evidence": {comp: "; ".join(v) for comp, v in component_evidence.items()},
+    }
 
 
 def schedule_node(state: SupervisorState) -> dict:
@@ -126,7 +174,12 @@ def schedule_node(state: SupervisorState) -> dict:
     completion2 = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": f"설비 #{machine_id}의 정비 이력 데이터: {schedule_info}\n이 정보를 바탕으로 답하세요."},
+            {"role": "system", "content": (
+                f"설비 #{machine_id}의 정비 이력 데이터: {schedule_info}\n"
+                "이 정보를 바탕으로 답하세요. 실제 오늘 날짜가 언제인지는 알 수 없으니, "
+                "'현재 날짜'나 '오늘 기준으로' 같은 표현으로 임의의 날짜를 추측하거나 언급하지 마세요. "
+                "데이터에 있는 마지막 점검일과 다음 점검 예정일만 그대로 전달하세요."
+            )},
             {"role": "user", "content": state.user_message},
         ],
     )
@@ -142,6 +195,38 @@ def general_node(state: SupervisorState) -> dict:
         ],
     )
     return {"result": completion.choices[0].message.content}
+
+def manual_lookup_node(state: SupervisorState) -> dict:
+    """부품별 표준 매뉴얼 근거(증상 설명)와 조치사항을 코드로 직접 조회한다. 매뉴얼 문서가
+    작아 RAG 검색이 부품을 정밀하게 구분하지 못하는 문제가 있어, 이미 정확히 알고 있는 데이터
+    (PUMP_MAINTENANCE_PROCEDURES)를 직접 사용한다."""
+    component_manuals = {}
+    component_actions = {}
+    for comp in state.involved_components:
+        procedure = PUMP_MAINTENANCE_PROCEDURES.get(comp, {})
+        component_manuals[comp] = procedure.get("symptom", "")
+        steps = procedure.get("steps", [])
+        component_actions[comp] = " ".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
+    return {"component_manuals": component_manuals, "component_actions": component_actions}
+
+
+
+def work_order_node(state: SupervisorState) -> dict:
+    """부품별 작업지시서 블록을 코드로 결정론적으로 조립한다. [증상]은 diagnosis_node가 이미
+    확정한 실제 근거(component_evidence)를, [매뉴얼 근거]/[조치사항]은 manual_lookup_node가
+    조회해둔 표준 절차 데이터를 그대로 사용한다 - LLM이 사실을 재서술하지 않으므로
+    사실 왜곡(hallucination)이 구조적으로 발생할 수 없다."""
+    def build_section(component: str) -> str:
+        return (
+            f"[부품] {component}\n"
+            f"[증상] {state.component_evidence.get(component, '')}\n"
+            f"[매뉴얼 근거] {state.component_manuals.get(component, '')}\n"
+            f"[조치사항] {state.component_actions.get(component, '')}\n"
+            f"[긴급도] {state.severity}"
+        )
+
+    blocks = [build_section(comp) for comp in state.involved_components]
+    return {"work_order": f"설비 #{state.machine_id}\n\n" + "\n\n".join(blocks)}
 
 
 def safety_perspective_node(state: SupervisorState) -> dict:
@@ -178,12 +263,13 @@ def maintenance_perspective_node(state: SupervisorState) -> dict:
 
 
 def approval_node(state: SupervisorState) -> dict:
-    """HITL 체크포인트: 병렬로 모인 3개 관점을 같이 보여주고 승인을 기다린다."""
-    perspectives_text = "\n".join(state.perspectives)
+    """HITL 체크포인트: 작성된 작업지시서 초안 + 관점 의견을 보여주고 승인을 기다린다."""
+    perspectives_text = "\n".join(state.perspectives) if state.perspectives else ""
+    extra = f"\n\n[관련 관점 의견]\n{perspectives_text}" if perspectives_text else ""
     decision = interrupt({
-        "message": f"[승인 필요] 설비 #{state.machine_id}에서 긴급 상황 발생.\n\n{state.diagnosis}\n\n{perspectives_text}\n\n"
-                   f"현장 책임자에게 즉시 보고를 진행할까요?",
-        "diagnosis": state.diagnosis,
+        "message": f"[승인 필요] 설비 #{state.machine_id}에서 긴급 상황 발생.\n\n{state.work_order}{extra}\n\n"
+                   f"이 작업지시서로 현장 책임자에게 즉시 보고를 진행할까요?",
+        "work_order": state.work_order,
     })
     print(f"[승인 재개] 사람의 결정: {decision}")
     return {"approved": decision}
@@ -192,9 +278,11 @@ def approval_node(state: SupervisorState) -> dict:
 def finalize_node(state: SupervisorState) -> dict:
     if state.severity == "긴급":
         if state.approved:
-            result = f"[긴급 승인됨] 설비 #{state.machine_id}: {state.diagnosis} -> 현장 책임자에게 즉시 보고되었습니다."
+            result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 현장 책임자에게 즉시 보고되었습니다."
         else:
-            result = f"[긴급 반려됨] 설비 #{state.machine_id}: {state.diagnosis} -> 보고가 보류되었습니다."
+            result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 보고가 보류되었습니다."
+    elif state.severity == "주의":
+        result = f"[사전 경보 - 예방 조치 권장]\n{state.work_order}"
     else:
         result = f"설비 #{state.machine_id}: {state.diagnosis}"
     return {"result": result}
@@ -204,9 +292,19 @@ def route_condition(state: SupervisorState) -> str:
     return {"오류_진단": "diagnosis", "정비_일정": "schedule", "일반_문의": "general"}[state.category]
 
 
-def severity_condition(state: SupervisorState) -> list[str]:
-    """긴급이면 3개 관점 평가로 팬아웃, 아니면 바로 finalize."""
-    return ["safety", "production", "maintenance"] if state.severity == "긴급" else ["finalize"]
+def severity_condition(state: SupervisorState) -> str:
+    """긴급/주의는 매뉴얼 조회를 거치고, 일반/미등록은 바로 종료."""
+    return "manual_lookup" if state.severity in ("긴급", "주의") else "finalize"
+
+
+def after_manual_condition(state: SupervisorState) -> list[str]:
+    """긴급만 3관점 병렬 평가로 팬아웃, 주의는 바로 작업지시서로."""
+    return ["safety", "production", "maintenance"] if state.severity == "긴급" else ["work_order"]
+
+def needs_approval_condition(state: SupervisorState) -> str:
+    """긴급(실제 고장 근거)만 사람 승인을 거친다."""
+    return "approval" if state.severity == "긴급" else "finalize"
+
 
 
 graph = StateGraph(SupervisorState)
@@ -214,6 +312,8 @@ graph.add_node("route", route_node)
 graph.add_node("diagnosis", diagnosis_node)
 graph.add_node("schedule", schedule_node)
 graph.add_node("general", general_node)
+graph.add_node("manual_lookup", manual_lookup_node)
+graph.add_node("work_order", work_order_node)
 graph.add_node("approval", approval_node)
 graph.add_node("finalize", finalize_node)
 graph.add_node("safety", safety_perspective_node)
@@ -226,29 +326,50 @@ graph.add_conditional_edges("route", route_condition, {
     "diagnosis": "diagnosis", "schedule": "schedule", "general": "general",
 })
 graph.add_conditional_edges("diagnosis", severity_condition, {
-    "safety": "safety", "production": "production", "maintenance": "maintenance", "finalize": "finalize",
+    "manual_lookup": "manual_lookup", "finalize": "finalize",
+})
+graph.add_conditional_edges("manual_lookup", after_manual_condition, {
+    "safety": "safety", "production": "production", "maintenance": "maintenance", "work_order": "work_order",
 })
 graph.add_edge("safety", "merge_perspectives")
 graph.add_edge("production", "merge_perspectives")
 graph.add_edge("maintenance", "merge_perspectives")
-graph.add_edge("merge_perspectives", "approval")
+graph.add_edge("merge_perspectives", "work_order")
+graph.add_conditional_edges("work_order", needs_approval_condition, {
+    "approval": "approval", "finalize": "finalize",
+})
 graph.add_edge("approval", "finalize")
 graph.add_edge("finalize", END)
 graph.add_edge("schedule", END)
 graph.add_edge("general", END)
 
+
 app = graph.compile(checkpointer=InMemorySaver())
+
+
+def _validate_work_order(state_dict: dict) -> None:
+    """작업지시서(긴급/주의)에도 최소한의 하네스 검증을 적용한다. 내용이 전부 결정론적으로
+    조립되므로(component_evidence + PUMP_MAINTENANCE_PROCEDURES) 지어낼 여지가 없어
+    Faithfulness/안전성 judge는 불필요한 지연·비용·불안정성만 추가한다. PII 형식 검사만 남긴다."""
+    work_order = state_dict.get("work_order")
+    if not work_order:
+        return
+    check_output_forbidden_words(work_order)
 
 
 def start_agent(user_message: str, thread_id: str) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
     result = app.invoke(SupervisorState(user_message=user_message), config=config)
     if "__interrupt__" in result:
-        return {"status": "pending_approval", "message": result["__interrupt__"][0].value["message"]}
-    return {"status": "done", "result": result["result"]}
+        payload = result["__interrupt__"][0].value
+        _validate_work_order(payload)
+        return {"status": "pending_approval", "message": payload["message"], "work_order": payload.get("work_order")}
+    _validate_work_order(result)
+    return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}
 
 
 def resume_agent(thread_id: str, approved: bool) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
     result = app.invoke(Command(resume=approved), config=config)
-    return {"status": "done", "result": result["result"]}
+    _validate_work_order(result)
+    return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}

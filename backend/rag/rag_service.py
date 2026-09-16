@@ -41,6 +41,7 @@ _rag_chain = None  # 서버 시작 시 1회만 구축해서 재사용 (요청마
 _retriever = None
 _tracer = None # LangSmith 익명화 트레이서 (initialize_rag에서 설정)
 
+
 def _load_documents() -> list[Document]:
     """docs/ 폴더의 모든 .txt 파일을 읽어 Document 리스트로 반환."""
     documents = []
@@ -58,8 +59,6 @@ def initialize_rag(openai_api_key: str, model_name: str, langsmith_client=None) 
 
     if langsmith_client is not None:
         _tracer = LangChainTracer(client=langsmith_client)
-
-    raw_documents = _load_documents()
 
     raw_documents = _load_documents()
     logger.info(f"RAG용 원본 문서 {len(raw_documents)}개 로드")
@@ -87,7 +86,7 @@ def initialize_rag(openai_api_key: str, model_name: str, langsmith_client=None) 
     # Multi-Query가 하이브리드 검색기를 감싼다: 재작성된 질문마다 Dense+Sparse를 함께 수행
     retriever = MultiQueryRetriever.from_llm(retriever=hybrid_retriever, llm=model)
     _retriever = retriever  # get_context()에서도 재작성된 검색 결과를 그대로 재사용
-
+    
     rag_prompt = ChatPromptTemplate([
         ("system", "당신은 주어진 [문맥]만 근거로 답하는 어시스턴트입니다. "
                    "문맥에 없는 내용은 모른다고 답하세요.\n\n[문맥]\n{context}"),

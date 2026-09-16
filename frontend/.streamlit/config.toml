@@ -1,3 +1,7 @@
 [theme]
 # Hanwha Orange (Pantone 1585 C) - 한화 계열사 공통 브랜드 컬러
 primaryColor = "#F96D17"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F1F3F6"
+textColor = "#1E293B"
+font = "sans serif"

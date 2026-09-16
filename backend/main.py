@@ -1,22 +1,8 @@
 """
-FastAPI 백엔드 - OpenAI 호환 버전
-
-project_edu/fastapi의 Gemini(google-genai) 기반 버전을 OpenAI Python SDK로 포팅한
-버전이다. 구조(세션 관리, 하네스 3단계 검증, RAG)는 동일하고, LLM 호출 계층만
-OpenAI 방식으로 교체했다.
-
-핵심 차이점 (Gemini -> OpenAI):
-- google-genai는 client.chats.create()로 "상태를 가진 채팅 세션" 객체를 만들어주고,
-  그 객체가 대화 히스토리를 알아서 누적한다.
-- OpenAI Chat Completions API는 완전히 무상태(stateless)다. 매 호출마다
-  messages=[...] 리스트 전체(시스템 프롬프트 + 지금까지의 대화)를 직접 넘겨야 한다.
-  그래서 이 버전은 chat_sessions에 "메시지 리스트"를 직접 관리한다.
+FastAPI 백엔드
 
 실행 방법:
     uvicorn main:app --reload --port 8000
-
-필요 패키지:
-    pip install fastapi uvicorn python-dotenv openai pydantic
 """
 
 import os
@@ -86,6 +72,7 @@ chat_sessions: dict[str, dict] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     rag_service.initialize_rag(OPENAI_API_KEY, DEFAULT_MODEL, langsmith_client)
+    agent_service.initialize_agent(langsmith_client)  # <- 추가
     yield
     chat_sessions.clear()
 
@@ -186,6 +173,8 @@ class RAGRequest(BaseModel):
 class RAGResponse(BaseModel):
     question: str
     answer: str
+    context: str | None = None
+
 
 class AgentQueryRequest(BaseModel):
     message: str
@@ -194,6 +183,17 @@ class AgentQueryRequest(BaseModel):
 class AgentResumeRequest(BaseModel):
     thread_id: str
     approved: bool
+
+class AgentQueryRequest(BaseModel):
+    message: str
+    thread_id: str
+
+    @field_validator("message")
+    @classmethod
+    def message_must_not_be_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("message는 빈 문자열이거나 공백만으로 구성될 수 없습니다.")
+        return v
 
 
 # ---------- 유틸 ----------
@@ -311,7 +311,6 @@ def delete_session(session_id: str):
 @traceable(name="rag_query", client=langsmith_client)
 def rag_query(req: RAGRequest):
     """docs/ 폴더에 적재된 문서를 근거로 질문에 답한다 (RAG)."""
-    # 1단계: Self-RAG 라우팅 - 검색이 필요 없으면 RAG 파이프라인 자체를 생략, 검증 (하네스) - computational
     validate_input(req.question)
 
     if not should_retrieve(client, req.question):
@@ -323,27 +322,23 @@ def rag_query(req: RAGRequest):
             ]
         )
         answer = completion.choices[0].message.content
-        return RAGResponse(question=req.question, answer=answer)
+        return RAGResponse(question=req.question, answer=answer, context=None)
 
-    # 2단계: 제안 (RAG 파이프라인 - 검색 1회 + 생성)
     try:
         context, answer = rag_service.answer_with_context(req.question)
     except Exception as e:
         raise LLMAPIError(str(e))
 
-
-    # 3단계: 검증 (하네스) - computational
     check_output_forbidden_words(answer)
 
-    # 3.5단계: 검증 (하네스) - inferential (Faithfulness)
     faithfulness_result = judge_faithfulness(client, context, answer)
     if not faithfulness_result.get("pass", True):
         raise HarnessRejectedError(
             f"RAG 답변이 검색 문맥에 근거하지 않음(hallucination 의심): {faithfulness_result.get('reason')}"
         )
 
-    # 4단계: 실행
-    return RAGResponse(question=req.question, answer=answer)
+    return RAGResponse(question=req.question, answer=answer, context=context)
+
 
 
 @app.post("/agent/query")

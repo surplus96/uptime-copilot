@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-MAX_INPUT_LENGHT = 2000
+MAX_INPUT_LENGTH = 2000
 # 단어 목록 대신 "형식"을 잡는 정규식 패턴 (computational check에 적합한 이유: 결정론적으로 판정 가능)
 PII_PATTERNS = {
     "주민등록번호": re.compile(r"\d{6}[-\s]?[1-4]\d{6}"),
@@ -36,7 +36,7 @@ class HarnessRejectedError(Exception):
 
 def validate_input(message: str) -> None:
     """입력 길이를 검사한다 (computational check)."""
-    if len(message) > MAX_INPUT_LENGHT:
+    if len(message) > MAX_INPUT_LENGTH:
         raise HarnessRejectedError(
             f"입력이 너무 깁니다 ({len(message)}자, 최대 {MAX_INPUT_LENGHT}자)"
         )
@@ -217,5 +217,3 @@ def should_retrieve(client, question: str) -> bool:
     except Exception as e:
         logger.warning(f"검색 필요 판정 실패, 기본값(검색 필요)으로 진행: {e}")
         return True # 판단 자체가 실패하면 안전하게 "검색한다" 쪽으로 (fail-open)
-
-    
