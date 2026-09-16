@@ -14,7 +14,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import InMemorySaver
 
-from data import pdm_operations
+from data import pdm_operations, pdm_telemetry
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -64,7 +64,7 @@ def route_node(state: SupervisorState) -> dict:
 
 
 def diagnosis_node(state: SupervisorState) -> dict:
-    """설비 번호를 추출하고, 실제 이력 데이터에서 최근 오류/고장 여부를 조회한다."""
+    """설비 번호를 추출하고, 실제 이력 데이터 + 텔레메트리 이상탐지 + 기종별 통계로 진단한다."""
     completion = client.chat.completions.parse(
         model="gpt-4o-mini",
         messages=[
@@ -75,8 +75,10 @@ def diagnosis_node(state: SupervisorState) -> dict:
     )
     machine_id = completion.choices[0].message.parsed.machine_id
 
+    machine_info = pdm_operations.get_machine_info(machine_id)
     recent_errors = pdm_operations.get_recent_errors(machine_id, limit=3)
     failure = pdm_operations.check_recent_failure(machine_id, within_days=30)
+    anomaly = pdm_telemetry.detect_anomaly(machine_id)
 
     error_summary = (
         "; ".join(f"{e['datetime']} {e['errorID']}({e['description']})" for e in recent_errors)
@@ -85,8 +87,26 @@ def diagnosis_node(state: SupervisorState) -> dict:
     diagnosis_text = f"최근 오류 이력: {error_summary}"
     if failure:
         diagnosis_text += f" / 실제 고장 이력: {failure['datetime']} {failure['component']}({failure['description']})"
+    if anomaly.get("has_anomaly"):
+        flagged_desc = ", ".join(anomaly["flagged_signals"])
+        diagnosis_text += f" / 텔레메트리 이상 감지(사전 경보): {flagged_desc} 신호가 평소 대비 통계적으로 벗어남"
 
-    severity = "긴급" if failure else "일반"
+    model = machine_info.get("model")
+    if model:
+        vulnerable = pdm_operations.get_component_failure_stats(model)
+        if vulnerable:
+            top = vulnerable[0]
+            diagnosis_text += (
+                f" / 참고: {model} 기종은 설비당 평균 {top['failures_per_machine']}회로 "
+                f"{top['component']}({top['component_description']}) 고장이 가장 잦음"
+            )
+
+    if failure:
+        severity = "긴급"
+    elif anomaly.get("has_anomaly"):
+        severity = "주의"
+    else:
+        severity = "일반"
     print(f"[진단] machine #{machine_id} -> {severity}")
     return {"machine_id": machine_id, "diagnosis": diagnosis_text, "severity": severity}
 
