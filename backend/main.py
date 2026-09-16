@@ -34,6 +34,7 @@ from core.harness import (
 )
 from rag import rag_service
 from agent import agent_service
+from data import event_simulator, event_store
 
 
 load_dotenv()
@@ -72,7 +73,8 @@ chat_sessions: dict[str, dict] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     rag_service.initialize_rag(OPENAI_API_KEY, DEFAULT_MODEL, langsmith_client)
-    agent_service.initialize_agent(langsmith_client)  # <- 추가
+    agent_service.initialize_agent(langsmith_client)
+    event_store.init_event_table()  # <- 추가
     yield
     chat_sessions.clear()
 
@@ -352,3 +354,36 @@ def agent_query(req: AgentQueryRequest):
 def agent_resume(req: AgentResumeRequest):
     """승인 대기 중인 요청에 사람의 결정을 전달해서 재개한다."""
     return agent_service.resume_agent(req.thread_id, req.approved)
+
+@app.post("/simulate/tick")
+def simulate_tick(hours: int = 1):
+    """실시간 런타임 시뮬레이터: hours시간 분량의 텔레메트리 + 소확률 오류/고장 이벤트를 생성한다."""
+    return event_simulator.generate_tick(hours=hours)
+
+@app.post("/scan")
+def scan_machines():
+    """전체 설비를 스캔해서 긴급/주의로 판정된 설비를 이벤트 저장소에 적재한다."""
+    detected = agent_service.scan_all_machines()
+    return {"detected_count": len(detected), "events": detected}
+
+
+class EventIdsRequest(BaseModel):
+    machine_ids: list[int]
+
+
+@app.get("/events")
+def get_events(limit: int = 10):
+    return event_store.list_events(limit=limit)
+
+
+@app.post("/events/complete")
+def complete_events(req: EventIdsRequest):
+    count = event_store.complete_events(req.machine_ids)
+    return {"completed_count": count}
+
+
+@app.post("/events/delete")
+def delete_events(req: EventIdsRequest):
+    count = event_store.delete_events(req.machine_ids)
+    return {"deleted_count": count}
+

@@ -52,7 +52,6 @@ def get_recent_errors(machine_id: int, limit: int = 3) -> list[dict]:
         for _, r in df.iterrows()
     ]
 
-
 def check_recent_failure(machine_id: int, within_days: int = 30) -> dict | None:
     """최근 N일 내 실제 고장(failures) 기록이 있으면 반환한다 - HITL '긴급' 판정 기준."""
     df = _query_df(
@@ -62,8 +61,8 @@ def check_recent_failure(machine_id: int, within_days: int = 30) -> dict | None:
     if df.empty:
         return None
     latest = df.iloc[0]
-    now_df = _query_df("SELECT MAX(datetime) as max_dt FROM failures")
-    dataset_now = now_df["max_dt"].iloc[0]
+    now_df = _query_df("SELECT MAX(datetime) as datetime FROM failures")  # <- max_dt -> datetime으로 별칭 수정
+    dataset_now = now_df["datetime"].iloc[0]
     days_ago = (dataset_now - latest["datetime"]).days
     if days_ago > within_days:
         return None

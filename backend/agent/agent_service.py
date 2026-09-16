@@ -77,27 +77,17 @@ def route_node(state: SupervisorState) -> dict:
     print(f"[라우터] {decision.category}")
     return {"category": decision.category}
 
-def diagnosis_node(state: SupervisorState) -> dict:
-    """설비 번호를 추출하고, 실제 이력 데이터 + 텔레메트리 이상탐지 + 기종별 통계로 진단한다.
-    관련 부품(involved_components)과 부품별 근거(component_evidence)를 코드로 확정해서,
-    이후 단계가 LLM 판단 없이 정확히 매칭하게 만든다."""
-    completion = client.chat.completions.parse(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
-            {"role": "user", "content": state.user_message},
-        ],
-        response_format=IncidentExtraction,
-    )
-    machine_id = completion.choices[0].message.parsed.machine_id
-
+def _diagnose_machine(machine_id: int) -> dict:
+    """machine_id가 이미 확정된 상태에서 순수 데이터로 진단한다.
+    diagnosis_node(자연어 질문 경로)와 scan_all_machines(자동 스캔 경로)가 이 함수를 공유한다."""
     machine_info = pdm_operations.get_machine_info(machine_id)
     if "error" in machine_info:
-        print(f"[진단] machine #{machine_id} -> 존재하지 않는 설비")
         return {
             "machine_id": machine_id,
             "diagnosis": "등록되지 않은 번호입니다 (1~100번 설비만 존재).",
             "severity": "일반",
+            "involved_components": [],
+            "component_evidence": {},
         }
 
     recent_errors = pdm_operations.get_recent_errors(machine_id, limit=3)
@@ -125,7 +115,6 @@ def diagnosis_node(state: SupervisorState) -> dict:
                 f"{top['component']}({top['component_description']}) 고장이 가장 잦음"
             )
 
-    # 부품별 근거를 코드로 확정 - LLM이 "어느 증상이 어느 부품 것인지" 추론할 필요가 없게 만든다
     component_evidence: dict[str, list[str]] = {}
     for e in recent_errors:
         comp = ERROR_TO_COMPONENT.get(e["errorID"])
@@ -149,7 +138,7 @@ def diagnosis_node(state: SupervisorState) -> dict:
         severity = "주의"
     else:
         severity = "일반"
-    print(f"[진단] machine #{machine_id} -> {severity}")
+
     return {
         "machine_id": machine_id,
         "diagnosis": diagnosis_text,
@@ -157,6 +146,37 @@ def diagnosis_node(state: SupervisorState) -> dict:
         "involved_components": list(component_evidence.keys()),
         "component_evidence": {comp: "; ".join(v) for comp, v in component_evidence.items()},
     }
+
+
+def diagnosis_node(state: SupervisorState) -> dict:
+    """자연어 질문에서 설비 번호를 추출한 뒤 _diagnose_machine()으로 진단한다."""
+    completion = client.chat.completions.parse(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
+            {"role": "user", "content": state.user_message},
+        ],
+        response_format=IncidentExtraction,
+    )
+    machine_id = completion.choices[0].message.parsed.machine_id
+    result = _diagnose_machine(machine_id)
+    print(f"[진단] machine #{machine_id} -> {result['severity']}")
+    return result
+
+
+def scan_all_machines() -> list[dict]:
+    """전체 100대 설비를 LLM 없이 순수 데이터로 스캔해서, 긴급/주의로 판정된 설비를
+    이벤트 저장소에 적재한다."""
+    from data import event_store
+
+    detected = []
+    for machine_id in range(1, 101):
+        result = _diagnose_machine(machine_id)
+        if result["severity"] in ("긴급", "주의"):
+            event_store.save_event(machine_id, result["severity"], result["diagnosis"])
+            detected.append(result)
+    return detected
+
 
 
 def schedule_node(state: SupervisorState) -> dict:
