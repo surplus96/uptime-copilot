@@ -12,7 +12,6 @@ from openai import OpenAI
 from pydantic import BaseModel
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt, Command
-from langgraph.checkpoint.memory import InMemorySaver
 from langsmith.wrappers import wrap_openai
 
 from data import pdm_operations, pdm_telemetry
@@ -23,12 +22,19 @@ from core.harness import check_output_forbidden_words
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def initialize_agent(langsmith_client) -> None:
+# 라우팅/추출/판정 계열 노드 전부가 참조하는 단일 모델 상수. main.py의 DEFAULT_MODEL과
+# 같은 OPENAI_MODEL 환경변수를 읽어서, .env 값 하나만 바꾸면 코드 수정 없이 전체가 바뀐다.
+MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+
+def initialize_agent(langsmith_client, checkpointer) -> None:
     """main.py의 lifespan에서 호출: main.py와 같은 LangSmith Client(PII 익명화 포함)로
-    이 모듈의 OpenAI 클라이언트를 감싼다. - 별도 Client를 새로 만들지 않고 재사용.
+    이 모듈의 OpenAI 클라이언트를 감싸고, HITL 승인 대기 상태를 담을 체크포인터로 그래프를
+    컴파일한다. InMemorySaver(프로세스 메모리)는 `uvicorn --reload`나 재시작마다 대기 중인
+    승인이 전부 사라지므로, main.py가 넘겨주는 디스크 기반 SqliteSaver로 교체함.
     """
-    global client
+    global client, app
     client = wrap_openai(client, tracing_extra={"client": langsmith_client})
+    app = graph.compile(checkpointer=checkpointer)
 
 class SupervisorState(BaseModel):
     user_message: str
@@ -57,7 +63,7 @@ class IncidentExtraction(BaseModel):
 
 def route_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.parse(
-        model="gpt-4o-mini",
+        model=MODEL,
         messages=[
             {"role": "system", "content": (
                 "사용자 문의를 아래 세 카테고리 중 하나로 분류하세요.\n"
@@ -77,9 +83,8 @@ def route_node(state: SupervisorState) -> dict:
     print(f"[라우터] {decision.category}")
     return {"category": decision.category}
 
-def _diagnose_machine(machine_id: int) -> dict:
-    """machine_id가 이미 확정된 상태에서 순수 데이터로 진단한다.
-    diagnosis_node(자연어 질문 경로)와 scan_all_machines(자동 스캔 경로)가 이 함수를 공유한다."""
+
+def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     machine_info = pdm_operations.get_machine_info(machine_id)
     if "error" in machine_info:
         return {
@@ -88,10 +93,11 @@ def _diagnose_machine(machine_id: int) -> dict:
             "severity": "일반",
             "involved_components": [],
             "component_evidence": {},
+            "evidence_at": None,
         }
 
     recent_errors = pdm_operations.get_recent_errors(machine_id, limit=3)
-    failure = pdm_operations.check_recent_failure(machine_id, within_days=30)
+    failure = pdm_operations.check_recent_failure(machine_id, within_days=within_days)
     anomaly = pdm_telemetry.detect_anomaly(machine_id)
 
     error_summary = (
@@ -139,19 +145,30 @@ def _diagnose_machine(machine_id: int) -> dict:
     else:
         severity = "일반"
 
+    # 근거시각: 실제로 severity 판정에 쓰인 것들 중 가장 최근 것
+    evidence_times = []
+    if recent_errors:
+        evidence_times.append(recent_errors[0]["datetime"])   # 이미 최신순 정렬됨
+    if failure:
+        evidence_times.append(failure["datetime"])
+    if anomaly.get("has_anomaly"):
+        evidence_times.append(anomaly["as_of"])
+    evidence_at = max(evidence_times) if evidence_times else None
+
     return {
         "machine_id": machine_id,
         "diagnosis": diagnosis_text,
         "severity": severity,
         "involved_components": list(component_evidence.keys()),
         "component_evidence": {comp: "; ".join(v) for comp, v in component_evidence.items()},
+        "evidence_at": evidence_at,
     }
 
 
 def diagnosis_node(state: SupervisorState) -> dict:
     """자연어 질문에서 설비 번호를 추출한 뒤 _diagnose_machine()으로 진단한다."""
     completion = client.chat.completions.parse(
-        model="gpt-4o-mini",
+        model=MODEL,
         messages=[
             {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
             {"role": "user", "content": state.user_message},
@@ -161,27 +178,32 @@ def diagnosis_node(state: SupervisorState) -> dict:
     machine_id = completion.choices[0].message.parsed.machine_id
     result = _diagnose_machine(machine_id)
     print(f"[진단] machine #{machine_id} -> {result['severity']}")
-    return result
+    return {k: v for k, v in result.items() if k != "evidence_at"}
 
 
 def scan_all_machines() -> list[dict]:
-    """전체 100대 설비를 LLM 없이 순수 데이터로 스캔해서, 긴급/주의로 판정된 설비를
-    이벤트 저장소에 적재한다."""
+    """전체 100대 설비를 LLM 없이 순수 데이터로 스캔한다. 완료 처리된 설비는
+    그 이후 실제로 새 근거(evidence_at)가 생긴 경우에만 재등장한다."""
     from data import event_store
 
+    completed_at_map = event_store.get_completed_at_map()
     detected = []
     for machine_id in range(1, 101):
-        result = _diagnose_machine(machine_id)
-        if result["severity"] in ("긴급", "주의"):
-            event_store.save_event(machine_id, result["severity"], result["diagnosis"])
-            detected.append(result)
+        result = _diagnose_machine(machine_id, within_days=1)
+        if result["severity"] not in ("긴급", "주의"):
+            continue
+        completed_at = completed_at_map.get(machine_id)
+        if completed_at and result["evidence_at"] and result["evidence_at"] <= completed_at:
+            continue  # 완료 처리 이후 새 근거 없음 - 재등장 안 시킴
+        event_store.save_event(machine_id, result["severity"], result["diagnosis"])
+        detected.append(result)
     return detected
 
 
 
 def schedule_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.parse(
-        model="gpt-4o-mini",
+        model=MODEL,
         messages=[
             {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
             {"role": "user", "content": state.user_message},
@@ -192,7 +214,7 @@ def schedule_node(state: SupervisorState) -> dict:
     schedule_info = pdm_operations.estimate_next_maintenance(machine_id)
 
     completion2 = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
         messages=[
             {"role": "system", "content": (
                 f"설비 #{machine_id}의 정비 이력 데이터: {schedule_info}\n"
@@ -208,7 +230,7 @@ def schedule_node(state: SupervisorState) -> dict:
 
 def general_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
         messages=[
             {"role": "system", "content": "제조 설비 관련 일반적인 질문에 간단히 답하세요."},
             {"role": "user", "content": state.user_message},
@@ -251,7 +273,7 @@ def work_order_node(state: SupervisorState) -> dict:
 
 def safety_perspective_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
         messages=[
             {"role": "system", "content": "당신은 현장 안전 담당자입니다. 아래 사고 상황의 안전 위험도를 2문장 이내로 평가하세요."},
             {"role": "user", "content": state.diagnosis},
@@ -262,7 +284,7 @@ def safety_perspective_node(state: SupervisorState) -> dict:
 
 def production_perspective_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
         messages=[
             {"role": "system", "content": "당신은 생산 관리자입니다. 아래 사고 상황이 생산에 미치는 영향을 2문장 이내로 평가하세요."},
             {"role": "user", "content": state.diagnosis},
@@ -273,7 +295,7 @@ def production_perspective_node(state: SupervisorState) -> dict:
 
 def maintenance_perspective_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
         messages=[
             {"role": "system", "content": "당신은 정비 기술자입니다. 아래 사고 상황의 수리 난이도를 2문장 이내로 평가하세요."},
             {"role": "user", "content": state.diagnosis},
@@ -298,9 +320,9 @@ def approval_node(state: SupervisorState) -> dict:
 def finalize_node(state: SupervisorState) -> dict:
     if state.severity == "긴급":
         if state.approved:
-            result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 현장 책임자에게 즉시 보고되었습니다."
+            result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 승인 처리되었습니다. 현장 책임자에게는 별도로 알려야 합니다."
         else:
-            result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 보고가 보류되었습니다."
+            result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 반려 처리되었습니다. 별도 조치는 이루어지지 않았습니다."
     elif state.severity == "주의":
         result = f"[사전 경보 - 예방 조치 권장]\n{state.work_order}"
     else:
@@ -364,7 +386,7 @@ graph.add_edge("schedule", END)
 graph.add_edge("general", END)
 
 
-app = graph.compile(checkpointer=InMemorySaver())
+app = None  # main.py의 lifespan이 initialize_agent()를 호출할 때 SqliteSaver로 컴파일됨
 
 
 def _validate_work_order(state_dict: dict) -> None:

@@ -1,0 +1,283 @@
+{
+  "version": "2.0",
+  "lastUpdated": "2026-09-17T02:43:03.598Z",
+  "activeFeatures": [
+    "core",
+    "agent",
+    "backend",
+    "rag",
+    "frontend"
+  ],
+  "primaryFeature": "core",
+  "features": {
+    "core": {
+      "phase": "do",
+      "phaseNumber": 3,
+      "matchRate": null,
+      "iterationCount": 0,
+      "requirements": [],
+      "documents": {},
+      "timestamps": {
+        "started": "2026-09-17T02:24:01.196Z",
+        "lastUpdated": "2026-09-17T02:41:09.187Z"
+      },
+      "lastFile": "/Users/surplus96/projects/uptime-copilot/backend/core/harness.py"
+    },
+    "agent": {
+      "phase": "do",
+      "phaseNumber": 3,
+      "matchRate": null,
+      "iterationCount": 0,
+      "requirements": [],
+      "documents": {},
+      "timestamps": {
+        "started": "2026-09-17T02:24:11.698Z",
+        "lastUpdated": "2026-09-17T02:40:04.529Z"
+      },
+      "lastFile": "/Users/surplus96/projects/uptime-copilot/backend/agent/agent_service.py"
+    },
+    "backend": {
+      "phase": "do",
+      "phaseNumber": 3,
+      "matchRate": null,
+      "iterationCount": 0,
+      "requirements": [],
+      "documents": {},
+      "timestamps": {
+        "started": "2026-09-17T02:24:40.368Z",
+        "lastUpdated": "2026-09-17T02:37:47.944Z"
+      },
+      "lastFile": "/Users/surplus96/projects/uptime-copilot/backend/main.py"
+    },
+    "rag": {
+      "phase": "do",
+      "phaseNumber": 3,
+      "matchRate": null,
+      "iterationCount": 0,
+      "requirements": [],
+      "documents": {},
+      "timestamps": {
+        "started": "2026-09-17T02:25:03.236Z",
+        "lastUpdated": "2026-09-17T02:25:11.185Z"
+      },
+      "lastFile": "/Users/surplus96/projects/uptime-copilot/backend/rag/generate_docs.py"
+    },
+    "frontend": {
+      "phase": "do",
+      "phaseNumber": 3,
+      "matchRate": null,
+      "iterationCount": 0,
+      "requirements": [],
+      "documents": {},
+      "timestamps": {
+        "started": "2026-09-17T02:26:27.816Z",
+        "lastUpdated": "2026-09-17T02:43:03.598Z"
+      },
+      "lastFile": "/Users/surplus96/projects/uptime-copilot/frontend/streamlit_app.py"
+    }
+  },
+  "pipeline": {
+    "currentPhase": 1,
+    "level": "Dynamic",
+    "phaseHistory": []
+  },
+  "session": {
+    "startedAt": "2026-09-17T00:23:40.587Z",
+    "onboardingCompleted": false,
+    "lastActivity": "2026-09-17T02:43:03.598Z"
+  },
+  "history": [
+    {
+      "timestamp": "2026-09-17T02:24:01.196Z",
+      "feature": "core",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:24:11.698Z",
+      "feature": "agent",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:24:20.491Z",
+      "feature": "agent",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:24:26.261Z",
+      "feature": "agent",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:24:33.106Z",
+      "feature": "agent",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:24:40.368Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:24:47.351Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:24:56.393Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:25:03.236Z",
+      "feature": "rag",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:25:11.185Z",
+      "feature": "rag",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:26:27.816Z",
+      "feature": "frontend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:26:37.467Z",
+      "feature": "frontend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:26:44.591Z",
+      "feature": "frontend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:26:51.222Z",
+      "feature": "frontend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:26:56.828Z",
+      "feature": "frontend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:27:37.000Z",
+      "feature": "frontend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:34:37.683Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:34:47.577Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:34:53.698Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:34:58.672Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:35:04.900Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:35:11.395Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:35:26.110Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:37:26.199Z",
+      "feature": "agent",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:37:36.193Z",
+      "feature": "agent",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:37:42.751Z",
+      "feature": "core",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:37:47.944Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:40:04.529Z",
+      "feature": "agent",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:40:10.435Z",
+      "feature": "core",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:40:16.960Z",
+      "feature": "core",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:41:09.187Z",
+      "feature": "core",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-09-17T02:43:03.598Z",
+      "feature": "frontend",
+      "phase": "do",
+      "action": "updated"
+    }
+  ]
+}

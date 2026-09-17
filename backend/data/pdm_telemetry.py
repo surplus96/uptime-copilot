@@ -62,4 +62,5 @@ def detect_anomaly(machine_id: int, recent_hours: int = 24, z_threshold: float =
         "has_anomaly": len(flagged) > 0,
         "flagged_signals": flagged,
         "details": anomalies,
+        "as_of": str(df["datetime"].iloc[-1]),  # 이 설비의 가장 최근 텔레메트리 시각(데이터셋 타임라인 기준)
     }

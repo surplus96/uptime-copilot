@@ -54,6 +54,15 @@ def list_events(limit: int = 10) -> dict:
     conn.close()
     return {"total": total, "events": [dict(r) for r in rows]}
 
+def _dataset_now() -> str:
+    """실제 벽시계가 아니라, 시뮬레이터가 매 틱 전진시키는 telemetry 자체의 최신 시각을
+    '지금'의 기준으로 삼는다 - check_recent_failure에서 이미 겪었던 것과 같은
+    데이터셋시간 vs 벽시계 혼동 함정을 피하기 위함."""
+    conn = sqlite3.connect(DB_PATH)
+    now = conn.execute("SELECT MAX(datetime) FROM telemetry").fetchone()[0]
+    conn.close()
+    return now
+
 
 def complete_events(machine_ids: list[int]) -> int:
     """선택된 이벤트를 완료 기록(completed_events)으로 옮기고 대기 목록에서 제거한다."""
@@ -65,7 +74,7 @@ def complete_events(machine_ids: list[int]) -> int:
     rows = conn.execute(
         f"SELECT * FROM detected_events WHERE machine_id IN ({placeholders})", machine_ids
     ).fetchall()
-    now = datetime.now().isoformat(timespec="seconds")
+    now = _dataset_now()   # <- datetime.now() 였던 부분을 데이터셋 자체 시각으로 교체
     for r in rows:
         conn.execute(
             "INSERT INTO completed_events (machine_id, severity, diagnosis, detected_at, completed_at) VALUES (?, ?, ?, ?, ?)",
@@ -75,6 +84,16 @@ def complete_events(machine_ids: list[int]) -> int:
     conn.commit()
     conn.close()
     return len(rows)
+
+
+def get_completed_at_map() -> dict[int, str]:
+    """설비별 '가장 최근' 완료 처리 시각 - 그 이후 새 근거가 생긴 경우에만 재등장시키기 위한 기준점."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT machine_id, MAX(completed_at) as completed_at FROM completed_events GROUP BY machine_id"
+    ).fetchall()
+    conn.close()
+    return {r[0]: r[1] for r in rows}
 
 
 def delete_events(machine_ids: list[int]) -> int:

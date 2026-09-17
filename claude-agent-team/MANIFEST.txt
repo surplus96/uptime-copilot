@@ -1,0 +1,17 @@
+Claude Code agent team -- file manifest
+Generated: 2026-09-17T01:36:39Z
+Source: surplus96/Langgraph-MCP-Agent  .claude/agents/
+Source commit: dc8e17eb3b98bc73c18451ae4d9ee74b5cdd32b8
+
+sha256 of each agent definition (byte-identical to the source repository):
+
+4af77b723a64cc27b0bb376cf3992b6c5904b27225ef0d184d18d1cf8f0095b5  README.md
+6dcad9f4721e1ae80f8f3552e143af8d35a494b7ad91cf9942f2338616c3a26f  build-doctor.md
+f0128d49a1d0e38adf0ed0436a8794c13a95e6fb018cdfc9b064afa00c010f62  code-quality-reviewer.md
+eb5d0f6bd3ea1f28052e49e2394c2bf032ce20d19aaf67095bc307623381e6c0  debugger.md
+53253285e9b0c48d33c811ec13ee90fac41f7beda0ce44a11f2d2bff8ac003b6  docs-reviewer.md
+5d5d1ae138d8969acd5ef782b5d0dc9b6c3d1e56710802e76d4bdeb517c7a9c2  interface-reviewer.md
+6ca34cd5414cfb48de0b26d84e0ca31fe63b816392ce93b72ece974951ab85c3  performance-profiler.md
+cbbd8ca635b76357db0eaadbe9c757239d0a98186092f8141e307c42cf72ad3e  pipeline-optimizer.md
+ebf73143412718ad516833b736867c3ddbd067e444c1cc1db8377c95d298ca16  security-reviewer.md
+3c514c81947e66a86b26b2bc918d902685e320db97ff849178ace115d19899a6  test-engineer.md

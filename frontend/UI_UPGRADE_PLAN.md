@@ -1,107 +1,61 @@
-# Frontend UI Upgrade Plan
+# Frontend UI Upgrade Plan (re-audited 2026-09-17)
 
-Planning document for the next work session on `frontend/streamlit_app.py`. Covers both
-functional coverage gaps (the UI only exposes 2 of 8 backend endpoints) and a visual
-design pass, since the two should be built together rather than sequentially.
+This plan originally described a single-mode Phase 1 chat prototype that wired up only
+`/session` + `/chat/stream`. That version no longer exists — `streamlit_app.py` has since
+been rebuilt into three modes (설비 에이전트 / 매뉴얼 검색 / 이상감지 이벤트) covering RAG,
+the full multi-agent + HITL flow, and the event scanner. Re-checked line-by-line against
+the current file; almost everything below the "Done" line has since shipped. Only the
+genuinely still-open items remain listed.
 
-## Current State Assessment
+## Done
 
-`streamlit_app.py` is still the original Phase 1 chat prototype. It wires up only
-`POST /session` and `POST /chat/stream`. None of the backend capabilities built since
-then are reachable from the UI:
+- Sidebar mode switcher (`st.sidebar.radio`) across all three modes — RAG, agent+HITL, and
+  event scanner are all reachable from the UI.
+- Full HITL approval flow: `pending_approval` renders as a bordered, warning-styled
+  `st.container` (not a normal chat bubble), with 승인/반려 buttons calling `/agent/resume`;
+  `thread_id` is tracked explicitly in `st.session_state` and reused only while an approval
+  is pending.
+- Structured error bodies (`harness_rejected`, `llm_api_error`) are parsed into Korean
+  labels instead of raw exception text, including FastAPI's list-typed 422 `detail`.
+- Empty-state guidance: a "무엇을 도와드릴까요?" card with three clickable example questions
+  when the agent conversation is empty.
+- Title/branding: `st.set_page_config(page_title="Uptime Copilot", page_icon="🛡️")`,
+  page title "Uptime Copilot" throughout.
+- RAG mode wired to `/rag/query`, including a collapsed `st.expander` for the retrieved
+  source context.
+- Event scanner mode: scan-result feedback ("N건 발견"/"이상 없음"), distinct empty states
+  for "never scanned" vs. "scanned and clean", severity badge legend, and confirmation
+  messages (with counts) on 완료 처리 / 삭제.
+- Theme: `.streamlit/config.toml` sets `primaryColor`, `backgroundColor`,
+  `secondaryBackgroundColor`, `textColor`, and `font` (Hanwha Orange, Pantone 1585 C —
+  re-verify against an official brand guide if this ships externally).
+- Discarding a pending HITL approval now requires an explicit confirmation checkbox
+  before "새 진단 시작" is enabled.
+- Approval/rejection outcome (승인됨/반려됨) is now surfaced directly above the work-order
+  card via `st.success`/`st.warning`, not hidden inside a collapsed expander.
 
-| Backend capability | Wired into UI? |
-|---|---|
-| `/session`, `/chat/stream` | Yes (Phase 1 baseline) |
-| `DELETE /session/{id}` | No — no "new chat" control |
-| `/rag/query` | No — no RAG mode |
-| `/agent/query`, `/agent/resume` | **No — the biggest gap.** The multi-agent + HITL approval flow, the session's main deliverable, has no UI path at all. |
+## Still Open
 
-Other completeness/polish issues:
-- No mode switcher — the app is hard-wired to plain chat.
-- Structured error bodies (`harness_rejected`, `llm_api_error`) are shown as raw
-  exception text instead of a readable message.
-- Page title/branding still reads "AI Chatbot (OpenAI backend)" — doesn't reflect the
-  "Uptime Copilot" name or the equipment-maintenance domain.
-- No visible `session_id` / `thread_id`, which makes debugging the agent's HITL flow
-  (tied to `thread_id`) harder than it needs to be.
-- Default Streamlit look throughout: no page icon, no chat avatars, no empty-state
-  guidance, default blue theme (already partially addressed — see "Done" below).
+1. **Mode switcher**: `st.radio` → `st.tabs` (or a segmented control). Each mode's hint
+   text/example questions could live on its own tab instead of a sidebar radio list.
+2. **Per-mode chat avatars**: `st.chat_message(role, avatar=...)` is not used anywhere —
+   all messages render with Streamlit's default avatar regardless of mode.
+3. **Side-by-side perspective columns**: the three parallel safety/production/maintenance
+   evaluations (`agent_service.py`'s `perspectives` list) are only visible inside the
+   pending-approval message's collapsed "원본 메시지 보기" expander, as a single text block —
+   never rendered as distinct cards. `st.columns(3)` would make the three viewpoints
+   scannable at a glance instead of requiring the user to open the expander and parse
+   `[안전]`/`[생산]`/`[정비]` prefixes out of running text.
+4. **Per-message mode badge**: no visual indicator on an assistant message showing which
+   mode (agent / RAG / general) produced it — only relevant if modes are ever merged into
+   one conversation view; not needed while each mode has its own separate panel.
+5. **`layout="wide"`** was never added to `st.set_page_config` — low priority, worth
+   revisiting if the work-order cards or event list feel cramped.
 
-## Done Already
+## Suggested Order
 
-- `frontend/.streamlit/config.toml` created with `primaryColor = "#F96D17"`
-  (Hanwha Orange, Pantone 1585 C). Only `primaryColor` was set; the rest of the theme
-  is still Streamlit's default and is in scope for the design pass below.
-
-## Functional Plan
-
-**P0 — Core feature coverage**
-1. Sidebar mode switcher: `General Chat` / `Document Search (RAG)` / `Equipment Agent`.
-2. Wire up RAG mode via `/rag/query`. Note: the current response only returns `answer`,
-   not the retrieved `context` — decide whether to surface source context in the UI,
-   which would require extending the backend response schema first.
-3. Wire up Agent mode via `/agent/query` + `/agent/resume`, including the **HITL approval
-   UI** — this is the hardest part. A `pending_approval` response needs a distinct UI
-   state (not a normal chat bubble) with Approve/Reject controls that call
-   `/agent/resume`. Track the pending `thread_id` explicitly in `st.session_state`,
-   since Streamlit reruns the whole script on every interaction.
-
-**P1 — Reliability / quality**
-4. Parse structured error bodies (`error`, `reason`/`detail`) into a readable message
-   instead of the raw exception string.
-5. "New chat" button — resets the session and calls `DELETE /session/{id}`.
-6. Update title/copy to "Uptime Copilot" and the equipment-maintenance domain.
-
-**P2 — Nice to have**
-7. Manage `thread_id` for Agent mode explicitly (distinct concept from chat's
-   `session_id`).
-8. Expandable source-context panel for RAG mode.
-9. Small badge on each assistant message showing which mode produced it.
-
-## Design Plan
-
-**D0 — Skeleton (do first, cheap and immediately visible)**
-1. `st.set_page_config(page_title="Uptime Copilot", page_icon="🛡️", layout="wide")`.
-2. Extend `.streamlit/config.toml` beyond `primaryColor` — background/secondary
-   background/text colors and font, ideally consistent with the palette already used in
-   the build-log artifact (steel blue + copper accent) for a unified brand feel across
-   docs and app.
-3. Empty-state screen: when there are no messages yet, show a short "what this agent can
-   do" card plus a few example-question buttons that submit directly.
-
-**D1 — Per-mode visual distinction (build alongside P0)**
-4. Replace the mode `st.radio` with `st.tabs` or a segmented control; each tab carries
-   its own hint text / example questions.
-5. Distinct `st.chat_message(role, avatar=...)` per mode (e.g., 🤖 general, 📄 RAG,
-   🏭 agent) so the response source is visible at a glance.
-6. Small mode badge next to each assistant message (ties to P2 item 9).
-
-**D2 — Dedicated HITL approval styling (build together with P0 item 3)**
-7. Render `pending_approval` as a bordered `st.container` with warning styling —
-   visually distinct from a chat bubble, since it represents a decision point, not a
-   conversational turn.
-8. Render the three parallel perspectives (safety / production / maintenance) side by
-   side with `st.columns(3)` instead of as a single block of text.
-
-**D3 — Loading / feedback states**
-9. Agent mode responses are not streamed and can take several seconds (parallel
-   perspective calls on urgent cases) — use `st.spinner(...)` with domain-specific copy
-   (e.g., "Checking maintenance history...") rather than a generic loading message.
-10. Wrap RAG source context in `st.expander("📄 View source documents")`, collapsed by
-    default.
-
-## Suggested Execution Order
-
-| Step | Work |
-|---|---|
-| 1 | D0 (skeleton) — fast, immediately visible |
-| 2 | P0 (RAG + Agent wiring) together with D1 (per-mode visuals) — build function and style together, not in separate passes |
-| 3 | P0 item 3 (HITL) together with D2 (approval card styling) — the most challenging piece of the session |
-| 4 | P1 (error handling, new chat) together with D3 (loading states) |
-| 5 | Remaining P2 / D items if time allows |
-
-**Guiding principle**: don't build all functionality first and style it later — build each
-piece of functionality with its styling in the same pass, especially for the HITL flow,
-where the interaction pattern itself demands a visual treatment different from a normal
-chat turn.
+Items 1–2 are cheap and independent — do them together. Item 3 is the most valuable
+remaining one (the perspectives are real diagnostic content currently hidden behind an
+extra click) and should be scoped on its own since it touches how `agent_service.py`'s
+`interrupt()` payload is shaped, not just the render call. Items 4–5 are cosmetic;
+pick up opportunistically.

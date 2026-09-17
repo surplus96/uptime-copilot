@@ -9,17 +9,28 @@ st.title("Uptime Copilot")
 BACKEND_URL = "http://localhost:8000"
 
 
+ERROR_LABELS = {
+    "llm_api_error": "AI 응답 실패",
+    "harness_rejected": "요청 거부됨",
+}
+
+
 def _extract_error_message(exc: requests.exceptions.RequestException) -> str:
     """main.py의 구조화된 에러 응답(harness_rejected 등)이 있으면 그 사유를 보여주고,
-    없으면 원본 예외 문자열을 그대로 보여준다."""
+    없으면 원본 예외 문자열을 그대로 보여준다. 내부 에러 코드는 한국어 라벨로 바꿔서 표시한다."""
     response = getattr(exc, "response", None)
     if response is not None:
         try:
             body = response.json()
+            label = ERROR_LABELS.get(body.get("error"), body.get("error", "오류"))
             if "reason" in body:
-                return f"{body.get('error', '오류')}: {body['reason']}"
+                return f"{label}: {body['reason']}"
             if "detail" in body:
-                return f"{body.get('error', '오류')}: {body['detail']}"
+                detail = body["detail"]
+                if isinstance(detail, list):
+                    # FastAPI 422 검증 에러는 detail이 딕셔너리 리스트로 옴
+                    detail = "; ".join(d.get("msg", str(d)) for d in detail)
+                return f"{label}: {detail}"
         except ValueError:
             pass
     return str(exc)
@@ -70,7 +81,12 @@ if mode == "설비 에이전트":
     if "pending_approval" not in st.session_state:
         st.session_state.pending_approval = None
 
-    if st.sidebar.button("새 진단 시작"):
+    reset_confirmed = True
+    if st.session_state.pending_approval:
+        reset_confirmed = st.sidebar.checkbox(
+            "⚠️ 승인 대기 중인 항목이 있습니다 - 포기하고 새로 시작하기",
+        )
+    if st.sidebar.button("새 진단 시작", disabled=not reset_confirmed):
         st.session_state.agent_thread_id = str(uuid.uuid4())
         st.session_state.agent_messages = []
         st.session_state.pending_approval = None
@@ -98,9 +114,14 @@ if mode == "설비 에이전트":
     for message in st.session_state.agent_messages:
         with st.chat_message(message["role"]):
             if message["role"] == "assistant" and message.get("work_order"):
+                content = message["content"]
+                if content.startswith("[긴급 승인됨]"):
+                    st.success("✅ 승인됨 — 현장 책임자에게는 별도로 알려야 합니다.")
+                elif content.startswith("[긴급 반려됨]"):
+                    st.warning("🚫 반려됨 — 별도 조치는 이루어지지 않았습니다.")
                 render_work_order(message["work_order"])
-                with st.expander("원본 텍스트 보기"):
-                    st.text(message["content"])
+                with st.expander("처리 결과 상세"):
+                    st.text(content)
             else:
                 st.markdown(message["content"])
 
@@ -143,7 +164,7 @@ if mode == "설비 에이전트":
         if not prompt and "pending_example" in st.session_state:
             prompt = st.session_state.pop("pending_example")
 
-        if prompt:
+        if prompt and prompt.strip():
             thread_id = str(uuid.uuid4())  # 질문마다 새 스레드 - 이전 진단 상태가 새 질문에 남지 않게
             st.session_state.agent_thread_id = thread_id  # 승인 대기 시 재사용하기 위해 저장
 
@@ -179,7 +200,10 @@ elif mode == "매뉴얼 검색":
     st.caption("예: \"comp3 부품은 어떤 증상과 관련있어?\", \"error5는 무슨 뜻이야?\"")
 
     query = st.text_input("궁금한 내용을 입력하세요")
-    if st.button("검색") and query.strip():
+    search_clicked = st.button("검색")
+    if search_clicked and not query.strip():
+        st.warning("검색어를 입력해주세요.")
+    elif search_clicked:
         with st.spinner("검색 중..."):
             try:
                 res = requests.post(f"{BACKEND_URL}/rag/query", json={"question": query}, timeout=60)
@@ -199,15 +223,24 @@ elif mode == "매뉴얼 검색":
 else:
     st.subheader("🔔 감지된 이상 이벤트")
     st.caption("전체 설비를 스캔해서 긴급/주의로 판정된 설비 목록입니다. 확인이 필요하면 '설비 에이전트' 탭에서 직접 조회하세요.")
+    st.caption("🔴 긴급: 실제 고장 이력 확인됨 · 🟡 주의: 통계적 이상 징후(사전 경보), 고장 확정 아님")
+
+    if "event_feedback" in st.session_state:
+        st.success(st.session_state.pop("event_feedback"))
 
     if st.button("지금 전체 스캔하기"):
         with st.spinner("100대 설비 스캔 중..."):
             try:
                 res = requests.post(f"{BACKEND_URL}/scan", timeout=120)
                 res.raise_for_status()
+                detected_count = res.json()["detected_count"]
             except requests.exceptions.RequestException as e:
                 st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
                 st.stop()
+        st.session_state.has_scanned = True
+        st.session_state.event_feedback = (
+            f"스캔 완료: {detected_count}건 발견" if detected_count else "스캔 완료: 이상 없음"
+        )
         st.rerun()
 
     try:
@@ -224,10 +257,13 @@ else:
         st.caption(f"전체 {total}건 중 긴급/최신순 상위 {len(events)}건만 표시합니다.")
 
     if not events:
-        st.info("감지된 이벤트가 없습니다.")
+        if st.session_state.get("has_scanned"):
+            st.info("스캔 결과 감지된 이벤트가 없습니다.")
+        else:
+            st.info("아직 스캔한 적이 없습니다. 위 '지금 전체 스캔하기'를 눌러 확인하세요.")
     else:
         col_all1, col_all2 = st.columns(2)
-        select_all = col_all1.button("전체 선택")
+        select_all = col_all1.button("표시된 항목 전체 선택")
         clear_all = col_all2.button("전체 해제")
 
         for ev in events:
@@ -240,24 +276,35 @@ else:
                 badge = "🔴" if ev["severity"] == "긴급" else "🟡"
                 col1, col2 = st.columns([1, 9])
                 col1.checkbox("선택", key=key, label_visibility="collapsed")
-                col2.markdown(f"{badge} **설비 #{ev['machine_id']}** · {ev['severity']} · 감지: {ev['detected_at']}")
+                # detected_at은 근거 발생 시각이 아니라 이 스캔 버튼을 누른 시각(벽시계)이다.
+                col2.markdown(f"{badge} **설비 #{ev['machine_id']}** · {ev['severity']} · 마지막 스캔: {ev['detected_at']}")
                 col2.caption(ev["diagnosis"])
 
         selected = [ev["machine_id"] for ev in events if st.session_state.get(f"chk_{ev['machine_id']}", False)]
 
         st.divider()
+        st.caption(
+            "완료 처리: 이 목록에서만 숨기고 설비 상태 자체는 바뀌지 않습니다 (새 근거가 생기면 재등장). "
+            "삭제: 기록을 남기지 않아, 같은 조건이면 다음 스캔에 바로 다시 나타날 수 있습니다."
+        )
         col_a, col_b = st.columns(2)
-        if col_a.button(f"처리완료 처리 ({len(selected)}건)", disabled=not selected):
+        if col_a.button(f"완료 처리 ({len(selected)}건)", disabled=not selected):
             try:
-                requests.post(f"{BACKEND_URL}/events/complete", json={"machine_ids": selected}, timeout=30)
+                res = requests.post(f"{BACKEND_URL}/events/complete", json={"machine_ids": selected}, timeout=30)
+                res.raise_for_status()
+                completed_count = res.json()["completed_count"]
             except requests.exceptions.RequestException as e:
                 st.error(f"처리 실패: {_extract_error_message(e)}")
                 st.stop()
+            st.session_state.event_feedback = f"{completed_count}건 완료 처리했습니다."
             st.rerun()
         if col_b.button(f"선택 삭제 ({len(selected)}건)", disabled=not selected):
             try:
-                requests.post(f"{BACKEND_URL}/events/delete", json={"machine_ids": selected}, timeout=30)
+                res = requests.post(f"{BACKEND_URL}/events/delete", json={"machine_ids": selected}, timeout=30)
+                res.raise_for_status()
+                deleted_count = res.json()["deleted_count"]
             except requests.exceptions.RequestException as e:
                 st.error(f"삭제 실패: {_extract_error_message(e)}")
                 st.stop()
+            st.session_state.event_feedback = f"{deleted_count}건 삭제했습니다."
             st.rerun()
