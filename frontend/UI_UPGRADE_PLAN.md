@@ -1,4 +1,4 @@
-# Frontend UI Upgrade Plan (re-audited 2026-09-17)
+# Frontend UI Upgrade Plan (re-audited 2026-09-17, updated same day after items 1-3 shipped)
 
 This plan originally described a single-mode Phase 1 chat prototype that wired up only
 `/session` + `/chat/stream`. That version no longer exists — `streamlit_app.py` has since
@@ -9,8 +9,34 @@ genuinely still-open items remain listed.
 
 ## Done
 
-- Sidebar mode switcher (`st.sidebar.radio`) across all three modes — RAG, agent+HITL, and
-  event scanner are all reachable from the UI.
+- **Mode switcher: `st.radio` → `st.tabs`** (2026-09-17) — top-level mode switching moved
+  from a sidebar radio (a widget semantically meant for settings/filters, not page
+  navigation) to `st.tabs(["설비 에이전트", "매뉴얼 검색", "이상감지 이벤트"])`. Purely
+  mechanical change (`if/elif/else` → `with tab1/tab2/tab3:`, same indentation level, no
+  body changes needed). Noted trade-off: unlike the radio version (only the selected
+  branch executed per rerun), all three tab bodies now execute on every rerun regardless
+  of which tab is visible — the 이상감지 이벤트 tab's unconditional `GET /events` call now
+  fires on every interaction anywhere in the app, not just when that tab is open. Left
+  as-is (SQLite read, negligible local cost); revisit with `@st.cache_data` if it ever
+  matters.
+- **Per-mode (role-based) chat avatars** (2026-09-17) — `CHAT_AVATARS = {"user": "🧑‍🔧",
+  "assistant": "🛡️"}` (assistant icon matches the app's own `page_icon`), applied to both
+  `st.chat_message()` call sites in 설비 에이전트 mode. 매뉴얼 검색 mode has no chat UI at
+  all (plain `st.markdown` Q&A), so this item only applies to one mode in practice.
+- **Side-by-side perspective columns** (2026-09-17) — the safety/production/maintenance
+  HITL opinions render as three `st.columns(3)` cards (🛡️ 안전 관점 / 🏭 생산 관점 /
+  🛠️ 정비 관점) above the raw-text "원본 메시지 보기" expander (kept as a fallback, matching
+  the file's existing "structured view + raw fallback" convention). Required a backend
+  change: `agent_service.approval_node()`'s `interrupt()` payload and `start_agent()`'s
+  `pending_approval` response now carry a `perspectives` field, which the earlier `message`
+  string alone didn't expose structurally. Fixed-roster rendering (not a bare `zip` over
+  the raw list) so a missing perspective shows "의견을 가져오지 못했습니다." instead of
+  silently vanishing; a heading distinguishes this as unverified LLM opinion vs. the
+  deterministically-assembled work order above it. Caught and fixed along the way: a
+  `NameError` in `start_agent()`'s non-interrupt return path (a stray edit had it reference
+  an out-of-scope `payload` variable and return the wrong `status`), which had been
+  silently breaking every non-approval agent response (일반 문의 / 정비 일정 / 진단 without
+  approval) until caught by `interface-reviewer` + direct review.
 - Full HITL approval flow: `pending_approval` renders as a bordered, warning-styled
   `st.container` (not a normal chat bubble), with 승인/반려 buttons calling `/agent/resume`;
   `thread_id` is tracked explicitly in `st.session_state` and reused only while an approval
@@ -33,29 +59,22 @@ genuinely still-open items remain listed.
   before "새 진단 시작" is enabled.
 - Approval/rejection outcome (승인됨/반려됨) is now surfaced directly above the work-order
   card via `st.success`/`st.warning`, not hidden inside a collapsed expander.
+- **`layout="wide"`** added to `st.set_page_config` (2026-09-17) — more headroom for the
+  work-order cards, the 3-column perspective row, and the event list.
 
 ## Still Open
 
-1. **Mode switcher**: `st.radio` → `st.tabs` (or a segmented control). Each mode's hint
-   text/example questions could live on its own tab instead of a sidebar radio list.
-2. **Per-mode chat avatars**: `st.chat_message(role, avatar=...)` is not used anywhere —
-   all messages render with Streamlit's default avatar regardless of mode.
-3. **Side-by-side perspective columns**: the three parallel safety/production/maintenance
-   evaluations (`agent_service.py`'s `perspectives` list) are only visible inside the
-   pending-approval message's collapsed "원본 메시지 보기" expander, as a single text block —
-   never rendered as distinct cards. `st.columns(3)` would make the three viewpoints
-   scannable at a glance instead of requiring the user to open the expander and parse
-   `[안전]`/`[생산]`/`[정비]` prefixes out of running text.
-4. **Per-message mode badge**: no visual indicator on an assistant message showing which
-   mode (agent / RAG / general) produced it — only relevant if modes are ever merged into
-   one conversation view; not needed while each mode has its own separate panel.
-5. **`layout="wide"`** was never added to `st.set_page_config` — low priority, worth
-   revisiting if the work-order cards or event list feel cramped.
+None. All items shipped or explicitly decided against (see below).
+
+## Decided against (not a gap)
+
+- **Per-message mode badge**: no visual indicator on an assistant message showing which
+  mode (agent / RAG / general) produced it. Re-evaluated after moving to `st.tabs` — still
+  not needed, since each mode remains a fully separate panel/tab rather than a merged
+  conversation view. Revisit only if modes are ever merged into one timeline.
 
 ## Suggested Order
 
-Items 1–2 are cheap and independent — do them together. Item 3 is the most valuable
-remaining one (the perspectives are real diagnostic content currently hidden behind an
-extra click) and should be scoped on its own since it touches how `agent_service.py`'s
-`interrupt()` payload is shaped, not just the render call. Items 4–5 are cosmetic;
-pick up opportunistically.
+All non-cosmetic items have shipped (2026-09-17). Only `layout="wide"` remains, and it's
+a one-line, low-stakes change — pick it up opportunistically whenever the layout is being
+touched for something else anyway, no need to scope it separately.

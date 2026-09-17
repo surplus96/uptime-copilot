@@ -15,3 +15,5 @@ langsmith
 rank_bm25
 langchain-community
 langgraph-checkpoint-sqlite
+requests
+

@@ -3,7 +3,9 @@ import requests
 import uuid
 import re
 
-st.set_page_config(page_title="Uptime Copilot", page_icon="🛡️")
+CHAT_AVATARS = {"user": "🧑‍🔧", "assistant": "🛡️"}
+
+st.set_page_config(page_title="Uptime Copilot", page_icon="🛡️", layout="wide")
 st.title("Uptime Copilot")
 
 BACKEND_URL = "http://localhost:8000"
@@ -70,10 +72,10 @@ def render_work_order(work_order_text: str):
             st.markdown(f"**조치사항**: {block['조치사항']}")
 
 
-mode = st.sidebar.radio("모드 선택", ["설비 에이전트", "매뉴얼 검색", "이상감지 이벤트"])
+tab1, tab2, tab3 = st.tabs(["설비 에이전트", "매뉴얼 검색", "이상감지 이벤트"])
 
 # ---------- 설비 에이전트 모드 ----------
-if mode == "설비 에이전트":
+with tab1:
     if "agent_thread_id" not in st.session_state:
         st.session_state.agent_thread_id = str(uuid.uuid4())
     if "agent_messages" not in st.session_state:
@@ -112,7 +114,7 @@ if mode == "설비 에이전트":
                     st.rerun()
 
     for message in st.session_state.agent_messages:
-        with st.chat_message(message["role"]):
+        with st.chat_message(message["role"], avatar=CHAT_AVATARS.get(message["role"])):
             if message["role"] == "assistant" and message.get("work_order"):
                 content = message["content"]
                 if content.startswith("[긴급 승인됨]"):
@@ -133,6 +135,29 @@ if mode == "설비 에이전트":
                 render_work_order(wo)
             else:
                 st.markdown(st.session_state.pending_approval["message"])
+
+            PERSPECTIVE_ORDER = ["안전", "생산", "정비"]
+            ICONS = {"안전": "🛡️", "생산": "🏭", "정비": "🛠️"}
+
+            perspectives = st.session_state.pending_approval.get("perspectives") or []
+            parsed = {}
+            for p in perspectives:
+                label, sep, text = p.partition("] ")
+                label = label.lstrip("[") if sep else ""
+                parsed.setdefault(label, (text or p).strip())
+
+            if parsed:
+                st.markdown("**🤖 3개 관점 AI 의견** (참고용 — 매뉴얼로 검증된 작업지시서와 달리 근거 확인 없이 생성됨)")
+                cols = st.columns(len(PERSPECTIVE_ORDER))
+                for col, name in zip(cols, PERSPECTIVE_ORDER):
+                    with col:
+                        with st.container(border=True):
+                            st.markdown(f"**{ICONS[name]} {name} 관점**")
+                            text = parsed.get(name)
+                            st.caption(text if text and text != "None" else "의견을 가져오지 못했습니다.")
+            else:
+                st.caption("⚠️ 안전·생산·정비 3개 관점 의견을 불러오지 못했습니다. 승인 전에 아래 '원본 메시지 보기'를 확인하세요.")
+            
             with st.expander("원본 메시지 보기"):
                 st.text(st.session_state.pending_approval["message"])
 
@@ -169,8 +194,9 @@ if mode == "설비 에이전트":
             st.session_state.agent_thread_id = thread_id  # 승인 대기 시 재사용하기 위해 저장
 
             st.session_state.agent_messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
+            with st.chat_message("user", avatar=CHAT_AVATARS["user"]):
                 st.markdown(prompt)
+
 
             with st.spinner("진단 중..."):
                 try:
@@ -186,7 +212,12 @@ if mode == "설비 에이전트":
                     st.stop()
 
             if data["status"] == "pending_approval":
-                st.session_state.pending_approval = {"message": data["message"], "work_order": data.get("work_order")}
+                st.session_state.pending_approval = {
+                    "message": data["message"],
+                    "work_order": data.get("work_order"),
+                    "perspectives": data.get("perspectives", []),   # ← 추가
+                }
+
             else:
                 st.session_state.agent_messages.append(
                     {"role": "assistant", "content": data["result"], "work_order": data.get("work_order")}
@@ -195,7 +226,7 @@ if mode == "설비 에이전트":
 
 
 # ---------- 매뉴얼 검색 모드 ----------
-elif mode == "매뉴얼 검색":
+with tab2:
     st.subheader("📄 정비 매뉴얼 검색")
     st.caption("예: \"comp3 부품은 어떤 증상과 관련있어?\", \"error5는 무슨 뜻이야?\"")
 
@@ -220,11 +251,16 @@ elif mode == "매뉴얼 검색":
 
 
 # ---------- 이상감지 이벤트 모드 ----------
-else:
+with tab3:
     st.subheader("🔔 감지된 이상 이벤트")
     st.caption("전체 설비를 스캔해서 긴급/주의로 판정된 설비 목록입니다. 확인이 필요하면 '설비 에이전트' 탭에서 직접 조회하세요.")
     st.caption("🔴 긴급: 실제 고장 이력 확인됨 · 🟡 주의: 통계적 이상 징후(사전 경보), 고장 확정 아님")
-
+    st.caption(
+        "⏱️ 진단 내용의 날짜(예: 2016-01-01)는 오늘 날짜가 아니라 시뮬레이션 데이터셋 자체의 시각입니다 "
+        "(Azure PdM 데이터셋 2014~2016년 + `/simulate/tick`으로 전진시킨 시간). "
+        "'마지막 스캔'만 실제 스캔 버튼을 누른 오늘 시각입니다."
+    )
+    
     if "event_feedback" in st.session_state:
         st.success(st.session_state.pop("event_feedback"))
 

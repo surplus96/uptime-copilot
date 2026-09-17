@@ -17,7 +17,7 @@ from langsmith.wrappers import wrap_openai
 from data import pdm_operations, pdm_telemetry
 from rag.pump_manual import SIGNAL_TO_COMPONENT, ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES
 from core.harness import check_output_forbidden_words
-
+import notify
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -186,16 +186,17 @@ def scan_all_machines() -> list[dict]:
     그 이후 실제로 새 근거(evidence_at)가 생긴 경우에만 재등장한다."""
     from data import event_store
 
-    completed_at_map = event_store.get_completed_at_map()
+    completed_evidence_map = event_store.get_completed_evidence_map()
     detected = []
     for machine_id in range(1, 101):
         result = _diagnose_machine(machine_id, within_days=1)
         if result["severity"] not in ("긴급", "주의"):
             continue
-        completed_at = completed_at_map.get(machine_id)
-        if completed_at and result["evidence_at"] and result["evidence_at"] <= completed_at:
-            continue  # 완료 처리 이후 새 근거 없음 - 재등장 안 시킴
-        event_store.save_event(machine_id, result["severity"], result["diagnosis"])
+        completed_evidence_at = completed_evidence_map.get(machine_id)
+        if completed_evidence_at and result["evidence_at"] and result["evidence_at"] <= completed_evidence_at:
+            continue  # 완료 처리 당시 근거보다 새 근거가 없음 - 재등장 안 시킴
+        event_store.save_event(machine_id, result["severity"], result["diagnosis"], result["evidence_at"])
+        notify.send_alert(f"[{result['severity']}] 설비 #{machine_id} 이상 감지\n{result['diagnosis']}")
         detected.append(result)
     return detected
 
@@ -310,9 +311,11 @@ def approval_node(state: SupervisorState) -> dict:
     extra = f"\n\n[관련 관점 의견]\n{perspectives_text}" if perspectives_text else ""
     decision = interrupt({
         "message": f"[승인 필요] 설비 #{state.machine_id}에서 긴급 상황 발생.\n\n{state.work_order}{extra}\n\n"
-                   f"이 작업지시서로 현장 책임자에게 즉시 보고를 진행할까요?",
+                f"이 작업지시서로 현장 책임자에게 즉시 보고를 진행할까요?",
         "work_order": state.work_order,
+        "perspectives": state.perspectives,   # ← 추가
     })
+
     print(f"[승인 재개] 사람의 결정: {decision}")
     return {"approved": decision}
 
@@ -321,6 +324,7 @@ def finalize_node(state: SupervisorState) -> dict:
     if state.severity == "긴급":
         if state.approved:
             result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 승인 처리되었습니다. 현장 책임자에게는 별도로 알려야 합니다."
+            notify.send_alert(f"[긴급 승인] 설비 #{state.machine_id} 작업지시서 승인됨\n{state.work_order}")
         else:
             result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 반려 처리되었습니다. 별도 조치는 이루어지지 않았습니다."
     elif state.severity == "주의":
@@ -405,7 +409,12 @@ def start_agent(user_message: str, thread_id: str) -> dict:
     if "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
         _validate_work_order(payload)
-        return {"status": "pending_approval", "message": payload["message"], "work_order": payload.get("work_order")}
+        return {
+            "status": "pending_approval",
+            "message": payload["message"],
+            "work_order": payload.get("work_order"),
+            "perspectives": payload.get("perspectives", []),
+        }
     _validate_work_order(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}
 
