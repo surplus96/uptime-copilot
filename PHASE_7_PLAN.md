@@ -75,9 +75,14 @@ posted 3 real detections (설비 #5 주의, #34/#84 긴급) in the exact `[sever
 `[긴급 승인] 설비 #84 작업지시서 승인됨\n{work_order}` message with the full parsed
 `[부품]/[증상]/[매뉴얼 근거]/[조치사항]/[긴급도]` blocks intact. `requests` added to
 `backend/requirements.txt` (was only a transitive dependency before, now pinned
-explicitly). Failure-swallowing behavior (`try/except` around the webhook POST) not yet
-exercised against an actual failure (e.g. invalid URL) — low risk, same pattern already
-proven safe in this codebase's error-handling conventions.
+explicitly). **Failure-swallowing behavior tested live 2026-09-18**: a truly unreachable
+host correctly timed out at 5s and logged `[알림 실패]` — fine as originally written. But
+a webhook Slack itself rejects (bad path, still a real HTTP response) was **silently
+swallowed with no log at all**: `requests.post()` doesn't raise on a non-2xx status
+without `.raise_for_status()`, so the `except requests.exceptions.RequestException`
+never triggered. Fixed same day: added `response.raise_for_status()` before the
+implicit success return, re-verified both the now-logged rejection case and that the
+real, valid webhook still succeeds with no exception.
 
 Side finding while testing: the 이상감지 이벤트 list's "마지막 스캔" timestamp is real
 wall-clock (`datetime.now()`, e.g. `2026-09-17T16:09:40`) while the diagnosis/work-order
@@ -185,23 +190,68 @@ This is the stage that actually implements the Microsoft reference pattern
        and what looks like a birthdate) rather than a random throwaway value, despite the
        explicit "dedicated throwaway account, password never reused" condition from the
        security review. Recommended generating one with `openssl rand -base64 18` instead.
-2. **Add an MCP client to the graph** — this project has no MCP client today (the old
-   `langchain-mcp-adapters` dependency was removed as dead weight; re-adding a client
-   library is legitimate here because there's now a real endpoint to call, which is the
-   condition that was missing before). Likely shape: a new LangGraph node,
-   `cmms_push_node`, wired in only on the 긴급 + approved path, after `finalize_node`.
-3. **Field mapping**: our work order is currently only available as one flattened string
-   (`[부품]/[증상]/[매뉴얼 근거]/[조치사항]/[긴급도]`, parsed back apart by the frontend's
-   `parse_work_order()`). Before this stage, that parsing needs a backend-side equivalent
-   (or `work_order_node` should keep the structured fields around instead of flattening
-   them first) so `cmms_push_node` can map them onto Atlas's actual work-order creation
-   tool schema — discover that schema live via the MCP `list_tools` call once connected,
-   don't guess it in advance.
-4. **Verify**: approve a 긴급 diagnosis end-to-end and confirm a real work order appears
-   in Atlas's own UI with the evidence field populated (not just a title).
-5. **Failure handling**: decide what happens if the CMMS push fails — the existing
-   approval flow must not be blocked or lost because an external system is down. Likely:
-   log + Stage-1 alert as a fallback notification, don't fail `resume_agent()` itself.
+2. **Add an MCP client to the graph — ✅ Done (2026-09-18).** Not a new LangGraph node in
+   the end (simpler than originally planned): `backend/cmms_client.py` added
+   (`push_work_order()`, using the official `mcp` Python SDK's `ClientSession` +
+   `streamablehttp_client` directly — verified against the real installed `mcp==1.30.0`
+   API before writing the guidance, since two different web sources disagreed on the
+   client's shape and only one matched what's actually installed). Called inline from
+   `finalize_node()`'s existing `if state.approved:` branch, same location as Stage 1's
+   `notify.send_alert(...)` — no separate graph node needed since no agent decision is
+   involved (`priority` is unconditionally `"HIGH"`, matching the fact this path only
+   ever runs for 긴급+approved). `mcp` added to `backend/requirements.txt`;
+   `CMMS_MCP_URL`/`CMMS_MCP_TOKEN` added to `backend/.env.example` (the token must match
+   `atlas-mcp/.env`'s `MCP_AUTH_TOKEN` exactly).
+3. **Field mapping — turned out to need none.** `work_order_node` already keeps
+   `state.work_order` as one deterministic, evidence-grounded string (see its docstring);
+   `push_work_order()` just reuses it verbatim as the `description` argument to
+   `create-work-order`, no re-parsing of `[부품]/[증상]/...` needed. `title` is
+   synthesized separately (`설비 #{machine_id} 긴급 정비`). Real tool schema discovered
+   live via `tools/list` (see Stage 2 step 1 above) confirmed only `title`/`description`
+   are required. `MACHINE_ID_TO_ASSET_ID = {84: 1}` is a hardcoded single-entry stand-in
+   for a real machine-id → Atlas-assetId mapping — fine for this prototype, a real
+   integration needs a proper lookup/mapping table.
+4. **Verify — ✅ Done (2026-09-18), twice.** First a standalone script
+   (`asyncio.run`-based, same shape as the final code) confirmed the whole path end-to-end
+   before handing the pattern over as guidance — created `WO000001`. Then the actual
+   `finalize_node` code path was exercised live through the real app: 84번 설비 긴급
+   진단 → 3-관점 카드 → 승인 → backend log shows 4 clean `POST .../mcp` calls (200/202,
+   no `[CMMS push 실패]`) → Slack got the Stage 1 alert → **Atlas CMMS UI shows a second,
+   genuinely new work order, `WO000002`**, created `09/18/26 10:25` (matches the backend
+   log's `[승인 재개]` timestamp to the second), `Asset: Machine #84`, `HIGH PRIORITY`,
+   full `comp3`+`comp1` evidence blocks intact, `Created By: Taeyoung Choi` (the Atlas
+   service account) — confirmed via screenshot, not just log inference.
+5. **Failure handling — ✅ Done, tested live 2026-09-18.** `finalize_node`'s call is
+   wrapped in `try/except Exception` with a `print(f"[CMMS push 실패] {e}")` fallback.
+   Unlike `notify.py`, `cmms_client.push_work_order()` has no internal try/except of its
+   own — it relies entirely on the caller. Verified both real failure modes directly
+   against `push_work_order()` (not just read the code):
+   - **Atlas-MCP actually stopped** (`docker compose stop`): raises an `anyio`
+     `ExceptionGroup` (from the `TaskGroup` inside `streamablehttp_client`) — confirmed
+     `except Exception` in `finalize_node` catches it fine (`ExceptionGroup` subclasses
+     `Exception`, not `BaseException`, when every sub-exception is itself an `Exception`).
+     Logged as `[CMMS push 실패] unhandled errors in a TaskGroup (1 sub-exception)` — a
+     real if not very legible message; worth wrapping with more context if this gets
+     revisited, not urgent for a demo.
+   - **Wrong `CMMS_MCP_TOKEN`**: same graceful path; Atlas-MCP's own hardening logged
+     "Rejected /mcp request with missing or invalid bearer token" on its side too — the
+     421/401 hardening from Stage 2 step 1 is doing its job against our own client, not
+     just a hypothetical attacker.
+   - **`machine_id` with no `MACHINE_ID_TO_ASSET_ID` entry** (tested with 84 → 15): work
+     order created successfully with `"asset": null`, confirmed via `list-work-orders`
+     (`WO000004`) — no exception, exactly the intended degrade-gracefully behavior.
+
+**Stage 2 verdict: prototype complete, proven with real data, and its failure paths are
+now proven too** (not just asserted) — within its stated scope (demo-only, `assetId`
+hardcoded to one test machine, no real vendor). Remaining before this could be anything
+beyond a demo: a real `machine_id → assetId` mapping, and Stage 3's decision (real vendor
+vs. staying a demo). Not yet tested: resuming a pending approval across a full backend
+restart with the CMMS integration in place (Stage 1 alone was verified pre-Stage-2;
+deferred since it requires restarting the live dev server rather than an isolated script).
+
+**Phase 7 testing pass closed out 2026-09-18** — Stages 0-2 and their failure paths are
+done and verified; the restart/resume case above is the one explicitly deferred item,
+not forgotten.
 
 ## Stage 3 — Decision point after Stage 2 prototype
 

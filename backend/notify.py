@@ -19,7 +19,11 @@ def send_alert(text: str) -> None:
         return
 
     try:
-        requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=5)
+        response = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=5)
+        response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        print(f"[알림 실패] Slack webhook 호출 실패: {e}")
+        # webhook URL 자체가 비밀키다 - requests의 예외 메시지는 요청 URL을 그대로
+        # 포함하므로, str(e)를 절대 로그에 남기지 않는다(security-reviewer 지적, 2026-09-18).
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        print(f"[알림 실패] Slack webhook 호출 실패: {type(e).__name__}" + (f" (status={status})" if status else ""))
         

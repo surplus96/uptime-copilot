@@ -152,14 +152,26 @@ value remaining `UI_UPGRADE_PLAN.md` item.
   Slack/email alerts, adopting Microsoft's own predictive-maintenance reference
   architecture pattern ("prediction → CMMS work order with evidence attached, not an
   email inbox"). Full staged plan in `PHASE_7_PLAN.md`.
-  - Stage 0 resolved: no real CMMS vendor named, Stage 2 proceeds as a Limble-trial demo.
+  - Stage 0 resolved: no real CMMS vendor named, Stage 2 proceeds as a self-hosted **Atlas
+    CMMS** demo (`/Users/surplus96/projects/atlas-cmms`) — Limble was the original pick
+    but reverted (its MCP support needs a Premium+/Enterprise sales demo, not workable
+    for an individual prototype).
   - **Stage 1 done and verified live**: `backend/notify.py` (Slack Incoming Webhook,
     direct call, no MCP) wired into both `scan_all_machines()` and `finalize_node()`'s
     긴급 승인 path. Real Slack messages confirmed for both triggers. Surfaced a UX gap
     while testing (not a bug): event list mixes wall-clock `detected_at` with
     dataset-simulated-clock evidence dates with no on-screen explanation — see
     `PHASE_7_PLAN.md` Stage 1 for detail and the planned caption fix.
-  - Stage 2 (CMMS push) not started.
+  - **Stage 2 done and verified live with real data (2026-09-18)**: forked/hardened a
+    community Atlas-MCP server (`/Users/surplus96/projects/atlas-mcp`, `security-reviewer`
+    audited — found and fixed a HIGH: unauthenticated-by-default + LAN-exposed), connected
+    it to Atlas CMMS, and added `backend/cmms_client.py` to push approved 긴급 work orders
+    into it via the official `mcp` Python SDK. End-to-end proof: approving a 긴급
+    diagnosis for 설비 #84 created a real work order (`WO000002`) visible in Atlas's own
+    UI with the full evidence text intact, timestamp-matched to the backend log. Full
+    detail, including the environment gotchas hit (host-port collision with Atlas's own
+    nginx, a Docker-`localhost`-means-the-container-itself trap, `.env` vars Compose
+    doesn't auto-forward), in `PHASE_7_PLAN.md` Stage 2.
 - **`frontend/UI_UPGRADE_PLAN.md`**: fully closed out (see that file — items 1-3 and 5
   shipped 09-17, per-message mode badge decided against).
 - **No `/simulate/tick` UI control** — only reachable via direct API call (curl/Swagger),

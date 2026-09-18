@@ -18,6 +18,7 @@ from data import pdm_operations, pdm_telemetry
 from rag.pump_manual import SIGNAL_TO_COMPONENT, ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES
 from core.harness import check_output_forbidden_words
 import notify
+import cmms_client
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -325,6 +326,10 @@ def finalize_node(state: SupervisorState) -> dict:
         if state.approved:
             result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 승인 처리되었습니다. 현장 책임자에게는 별도로 알려야 합니다."
             notify.send_alert(f"[긴급 승인] 설비 #{state.machine_id} 작업지시서 승인됨\n{state.work_order}")
+            try:
+                cmms_client.push_work_order(state.machine_id, state.work_order)
+            except Exception as e:
+                print(f"[CMMS push 실패] {e}")
         else:
             result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 반려 처리되었습니다. 별도 조치는 이루어지지 않았습니다."
     elif state.severity == "주의":

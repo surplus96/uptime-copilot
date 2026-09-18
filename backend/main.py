@@ -12,6 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from openai import OpenAI
 from pydantic import BaseModel, field_validator
@@ -91,6 +92,12 @@ class LLMAPIError(Exception):
         self.detail = detail
         super().__init__(detail)
 
+
+# DNS 리바인딩 방어 - CORS는 브라우저의 cross-origin 요청만 막고, 공격자 도메인이
+# 127.0.0.1로 재해석(rebind)되면 브라우저 입장에서 same-origin이라 CORS를 우회한다.
+# Host 헤더 자체를 검증해서 이걸 막는다 (atlas-mcp의 ALLOWED_HOSTS 하드닝과 같은 원칙,
+# security-reviewer 지적, 2026-09-18).
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 
 # Streamlit(로컬 개발 시 기본 8501 포트)에서의 요청을 허용
 app.add_middleware(

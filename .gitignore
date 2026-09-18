@@ -130,6 +130,8 @@ celerybeat.pid
 # Project-specific: raw data & regeneratable build artifacts (do not version-control)
 archive/
 *.db
+*.db-wal
+*.db-shm
 backend/rag/chroma_db/
 
 # Environments
