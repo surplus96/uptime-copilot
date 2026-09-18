@@ -83,10 +83,13 @@ with tab1:
     if "pending_approval" not in st.session_state:
         st.session_state.pending_approval = None
 
+    # 이 사이드바 컨트롤은 st.sidebar가 전역이라 다른 탭을 보고 있을 때도 그대로 뜬다 -
+    # 어느 탭 소속인지 라벨로 명시한다 (interface-reviewer 지적, 2026-09-18).
+    st.sidebar.markdown("**🤖 설비 에이전트**")
     reset_confirmed = True
     if st.session_state.pending_approval:
         reset_confirmed = st.sidebar.checkbox(
-            "⚠️ 승인 대기 중인 항목이 있습니다 - 포기하고 새로 시작하기",
+            "⚠️ 승인 대기 중인 항목을 버리고 새 진단을 시작합니다",
         )
     if st.sidebar.button("새 진단 시작", disabled=not reset_confirmed):
         st.session_state.agent_thread_id = str(uuid.uuid4())
@@ -130,7 +133,10 @@ with tab1:
                 st.markdown(message["content"])
 
     if st.session_state.pending_approval:
-        with st.container(border=True):
+        # 다른 assistant 메시지는 전부 아바타가 붙는데 이 블록만 chat_message 밖이라
+        # 아바타 없이 렌더링되던 걸 고침 - 재들여쓰기 없이 with 튜플로 감싼다
+        # (interface-reviewer 지적, 2026-09-18).
+        with st.chat_message("assistant", avatar=CHAT_AVATARS["assistant"]), st.container(border=True):
             st.warning("⚠️ 승인이 필요합니다 — 아래 작업지시서를 검토하세요")
             st.caption("승인하면 Slack 긴급 채널로 알림이 발송되고 CMMS에 긴급(HIGH) 작업지시서가 "
                        "등록됩니다. 반려하면 아무 것도 전송되지 않습니다.")
@@ -165,7 +171,10 @@ with tab1:
             with st.expander("원본 메시지 보기"):
                 st.text(st.session_state.pending_approval["message"])
 
-            col1, col2 = st.columns(2)
+            # layout="wide" 이후 col1/col2 50:50 분할이 화면 절반 크기 버튼이 됐다 -
+            # 실제 Slack/CMMS에 쓰기 작업을 트리거하는 버튼치고 너무 큰 클릭 타겟이라
+            # 실수 클릭 위험이 있었다 (interface-reviewer 지적, 2026-09-18).
+            col1, col2, _ = st.columns([1, 1, 4])
 
             def _resume(approved: bool):
                 try:
@@ -213,6 +222,9 @@ with tab1:
 
 
             with st.spinner("진단 중..."):
+                # st.stop()은 스크립트 전체(다른 탭까지)를 멈춘다 - 이 탭의 요청 실패는
+                # 이 탭 안에서만 처리해야 한다 (code-quality-reviewer 지적, 2026-09-18).
+                request_ok = True
                 try:
                     res = requests.post(
                         f"{BACKEND_URL}/agent/query",
@@ -223,20 +235,21 @@ with tab1:
                     data = res.json()
                 except requests.exceptions.RequestException as e:
                     st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
-                    st.stop()
+                    request_ok = False
 
-            if data["status"] == "pending_approval":
-                st.session_state.pending_approval = {
-                    "message": data["message"],
-                    "work_order": data.get("work_order"),
-                    "perspectives": data.get("perspectives", []),
-                }
+            if request_ok:
+                if data["status"] == "pending_approval":
+                    st.session_state.pending_approval = {
+                        "message": data["message"],
+                        "work_order": data.get("work_order"),
+                        "perspectives": data.get("perspectives", []),
+                    }
 
-            else:
-                st.session_state.agent_messages.append(
-                    {"role": "assistant", "content": data["result"], "work_order": data.get("work_order")}
-                )
-            st.rerun()
+                else:
+                    st.session_state.agent_messages.append(
+                        {"role": "assistant", "content": data["result"], "work_order": data.get("work_order")}
+                    )
+                st.rerun()
 
 
 # ---------- 매뉴얼 검색 모드 ----------
@@ -253,15 +266,20 @@ with tab2:
             try:
                 res = requests.post(f"{BACKEND_URL}/rag/query", json={"question": query}, timeout=60)
                 res.raise_for_status()
-                data = res.json()
+                # session_state에 저장해서 다른 위젯 클릭으로 재실행돼도 결과가 안 사라지게
+                # 한다 - search_clicked는 버튼 누른 바로 다음 실행에서만 True라서, 이 값에
+                # 의존해 렌더링하면 그 즉시 다음 재실행에 결과가 사라졌었다
+                # (code-quality-reviewer 지적, 2026-09-18).
+                st.session_state.rag_result = res.json()
             except requests.exceptions.RequestException as e:
                 st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
-                st.stop()
 
-        st.markdown(f"**답변**\n\n{data['answer']}")
-        if data.get("context"):
+    rag_result = st.session_state.get("rag_result")
+    if rag_result:
+        st.markdown(f"**답변**\n\n{rag_result['answer']}")
+        if rag_result.get("context"):
             with st.expander("📄 참고한 매뉴얼 원문 보기"):
-                st.text(data["context"])
+                st.text(rag_result["context"])
 
 
 # ---------- 이상감지 이벤트 모드 ----------
@@ -280,19 +298,25 @@ with tab3:
 
     if st.button("지금 전체 스캔하기"):
         with st.spinner("100대 설비 스캔 중..."):
+            scan_ok = True
             try:
                 res = requests.post(f"{BACKEND_URL}/scan", timeout=120)
                 res.raise_for_status()
                 detected_count = res.json()["detected_count"]
             except requests.exceptions.RequestException as e:
                 st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
-                st.stop()
-        st.session_state.has_scanned = True
-        st.session_state.event_feedback = (
-            f"스캔 완료: {detected_count}건 발견" if detected_count else "스캔 완료: 이상 없음"
-        )
-        st.rerun()
+                scan_ok = False
+        if scan_ok:
+            st.session_state.has_scanned = True
+            st.session_state.event_feedback = (
+                f"스캔 완료: {detected_count}건 발견" if detected_count else "스캔 완료: 이상 없음"
+            )
+            st.rerun()
 
+    # 아래 이벤트 목록 전체가 이 요청 성공에 의존한다 - st.stop()으로 스크립트 전체를
+    # 멈추면 이미 렌더링된 다른 탭까지는 영향 없지만(tab3가 마지막이라), 실패 시 이 탭
+    # 안에서만 건너뛰도록 일관되게 플래그로 처리한다 (code-quality-reviewer 지적, 2026-09-18).
+    events_ok = True
     try:
         res = requests.get(f"{BACKEND_URL}/events", params={"limit": 10}, timeout=30)
         res.raise_for_status()
@@ -301,60 +325,65 @@ with tab3:
         total = data["total"]
     except requests.exceptions.RequestException as e:
         st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
-        st.stop()
+        events_ok = False
 
-    if total > len(events):
-        st.caption(f"전체 {total}건 중 긴급/최신순 상위 {len(events)}건만 표시합니다.")
+    if events_ok:
+        if total > len(events):
+            st.caption(f"전체 {total}건 중 긴급/최신순 상위 {len(events)}건만 표시합니다.")
 
-    if not events:
-        if st.session_state.get("has_scanned"):
-            st.info("스캔 결과 감지된 이벤트가 없습니다.")
+        if not events:
+            if st.session_state.get("has_scanned"):
+                st.info("스캔 결과 감지된 이벤트가 없습니다.")
+            else:
+                st.info("아직 스캔한 적이 없습니다. 위 '지금 전체 스캔하기'를 눌러 확인하세요.")
         else:
-            st.info("아직 스캔한 적이 없습니다. 위 '지금 전체 스캔하기'를 눌러 확인하세요.")
-    else:
-        col_all1, col_all2 = st.columns(2)
-        select_all = col_all1.button("표시된 항목 전체 선택")
-        clear_all = col_all2.button("전체 해제")
+            col_all1, col_all2 = st.columns(2)
+            select_all = col_all1.button("표시된 항목 전체 선택")
+            clear_all = col_all2.button("전체 해제")
 
-        for ev in events:
-            key = f"chk_{ev['machine_id']}"
-            if select_all:
-                st.session_state[key] = True
-            if clear_all:
-                st.session_state[key] = False
-            with st.container(border=True):
-                badge = "🔴" if ev["severity"] == "긴급" else "🟡"
-                col1, col2 = st.columns([1, 9])
-                col1.checkbox("선택", key=key, label_visibility="collapsed")
-                # detected_at은 근거 발생 시각이 아니라 이 스캔 버튼을 누른 시각(벽시계)이다.
-                col2.markdown(f"{badge} **설비 #{ev['machine_id']}** · {ev['severity']} · 마지막 스캔: {ev['detected_at']}")
-                col2.caption(ev["diagnosis"])
+            for ev in events:
+                key = f"chk_{ev['machine_id']}"
+                if select_all:
+                    st.session_state[key] = True
+                if clear_all:
+                    st.session_state[key] = False
+                with st.container(border=True):
+                    badge = "🔴" if ev["severity"] == "긴급" else "🟡"
+                    col1, col2 = st.columns([1, 9])
+                    col1.checkbox("선택", key=key, label_visibility="collapsed")
+                    # detected_at은 근거 발생 시각이 아니라 이 스캔 버튼을 누른 시각(벽시계)이다.
+                    col2.markdown(f"{badge} **설비 #{ev['machine_id']}** · {ev['severity']} · 마지막 스캔: {ev['detected_at']}")
+                    col2.caption(ev["diagnosis"])
 
-        selected = [ev["machine_id"] for ev in events if st.session_state.get(f"chk_{ev['machine_id']}", False)]
+            selected = [ev["machine_id"] for ev in events if st.session_state.get(f"chk_{ev['machine_id']}", False)]
 
-        st.divider()
-        st.caption(
-            "완료 처리: 이 목록에서만 숨기고 설비 상태 자체는 바뀌지 않습니다 (새 근거가 생기면 재등장). "
-            "삭제: 기록을 남기지 않아, 같은 조건이면 다음 스캔에 바로 다시 나타날 수 있습니다."
-        )
-        col_a, col_b = st.columns(2)
-        if col_a.button(f"완료 처리 ({len(selected)}건)", disabled=not selected):
-            try:
-                res = requests.post(f"{BACKEND_URL}/events/complete", json={"machine_ids": selected}, timeout=30)
-                res.raise_for_status()
-                completed_count = res.json()["completed_count"]
-            except requests.exceptions.RequestException as e:
-                st.error(f"처리 실패: {_extract_error_message(e)}")
-                st.stop()
-            st.session_state.event_feedback = f"{completed_count}건 완료 처리했습니다."
-            st.rerun()
-        if col_b.button(f"선택 삭제 ({len(selected)}건)", disabled=not selected):
-            try:
-                res = requests.post(f"{BACKEND_URL}/events/delete", json={"machine_ids": selected}, timeout=30)
-                res.raise_for_status()
-                deleted_count = res.json()["deleted_count"]
-            except requests.exceptions.RequestException as e:
-                st.error(f"삭제 실패: {_extract_error_message(e)}")
-                st.stop()
-            st.session_state.event_feedback = f"{deleted_count}건 삭제했습니다."
-            st.rerun()
+            st.divider()
+            st.caption(
+                "완료 처리: 이 목록에서만 숨기고 설비 상태 자체는 바뀌지 않습니다 (새 근거가 생기면 재등장). "
+                "삭제: 기록을 남기지 않아, 같은 조건이면 다음 스캔에 바로 다시 나타날 수 있습니다."
+            )
+            col_a, col_b = st.columns(2)
+            if col_a.button(f"완료 처리 ({len(selected)}건)", disabled=not selected):
+                complete_ok = True
+                try:
+                    res = requests.post(f"{BACKEND_URL}/events/complete", json={"machine_ids": selected}, timeout=30)
+                    res.raise_for_status()
+                    completed_count = res.json()["completed_count"]
+                except requests.exceptions.RequestException as e:
+                    st.error(f"처리 실패: {_extract_error_message(e)}")
+                    complete_ok = False
+                if complete_ok:
+                    st.session_state.event_feedback = f"{completed_count}건 완료 처리했습니다."
+                    st.rerun()
+            if col_b.button(f"선택 삭제 ({len(selected)}건)", disabled=not selected):
+                delete_ok = True
+                try:
+                    res = requests.post(f"{BACKEND_URL}/events/delete", json={"machine_ids": selected}, timeout=30)
+                    res.raise_for_status()
+                    deleted_count = res.json()["deleted_count"]
+                except requests.exceptions.RequestException as e:
+                    st.error(f"삭제 실패: {_extract_error_message(e)}")
+                    delete_ok = False
+                if delete_ok:
+                    st.session_state.event_feedback = f"{deleted_count}건 삭제했습니다."
+                    st.rerun()
