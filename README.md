@@ -121,6 +121,14 @@ streamlit run streamlit_app.py
 | `SLACK_WEBHOOK_URL` | No | Slack alerts on 긴급/주의 detections are silently skipped (`backend/notify.py`) |
 | `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | No | CMMS work-order push on approval is silently skipped (`backend/cmms_client.py`); needs a running Atlas-MCP + Atlas CMMS instance if you do set these — see `PHASE_7_PLAN.md` |
 
+> **Running the backend in Docker with an Atlas-MCP instance on the host:** `localhost`
+> inside the `backend` container means the container itself, not your host machine, so
+> `CMMS_MCP_URL=http://localhost:PORT/mcp` will fail to connect. Use
+> `http://host.docker.internal:PORT/mcp` instead, and add `host.docker.internal:PORT` to
+> Atlas-MCP's own `ALLOWED_HOSTS` (its DNS-rebinding Host-header check will otherwise
+> reject the request with 421). `backend/cmms_client.py`'s own loopback check already
+> allowlists `host.docker.internal` for this reason.
+
 ## Key API Endpoints
 
 | Method | Path | Description |

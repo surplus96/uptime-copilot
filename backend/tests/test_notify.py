@@ -48,6 +48,20 @@ def test_send_alert_never_logs_the_webhook_url(monkeypatch, capsys):
     assert secret_url not in printed
 
 
+def test_format_for_slack_bolds_labels_and_breaks_numbered_steps():
+    """가독성 수정(2026-09-18): `[라벨]`은 굵게, 한 줄에 뭉친 `1. ... 2. ...`는
+    줄바꿈된 목록으로 풀려야 Slack에서 스캔하기 쉽다."""
+    import notify
+
+    raw = "[부품] 베어링\n[조치사항] 1. 육안 검사 2. 교체"
+    formatted = notify._format_for_slack(raw)
+
+    assert "*[부품]*" in formatted
+    assert "*[조치사항]*" in formatted
+    assert "\n1. 육안 검사" in formatted
+    assert "\n2. 교체" in formatted
+
+
 def test_send_alert_noop_when_unconfigured(monkeypatch):
     """SLACK_WEBHOOK_URL 미설정 시 조용히 아무것도 안 해야 한다(요청 자체를 안 보냄)."""
     import notify

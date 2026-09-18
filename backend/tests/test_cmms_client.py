@@ -60,6 +60,21 @@ async def test_create_work_order_succeeds_when_not_isError(monkeypatch):
     await cmms_client._create_work_order("제목", "설명", asset_id=1)  # 예외 없이 반환돼야 함
 
 
+def test_format_for_cmms_survives_whitespace_collapse():
+    """가독성 수정(2026-09-18): Atlas CMMS 상세 화면은 description을 일반 텍스트로
+    렌더링해서 개행이 공백 하나로 뭉개진다 - 그래도 항목이 구분되게 블록/필드/조치
+    각각을 살아남는 구분자(▌ · ▸)로 바꿔야 한다."""
+    import cmms_client
+
+    raw = "설비 #12\n\n[부품] 베어링\n[조치사항] 1. 육안 검사 2. 교체\n[긴급도] 긴급"
+    formatted = cmms_client._format_for_cmms(raw)
+
+    assert "\n" not in formatted
+    assert "▌" in formatted
+    assert "▸ 육안 검사" in formatted
+    assert "▸ 교체" in formatted
+
+
 def test_push_work_order_noop_when_unconfigured(monkeypatch):
     monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", None)
     monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", None)

@@ -8,6 +8,7 @@ CMMS 장애가 승인 흐름을 막으면 안 되므로 예외는 호출부(fina
 
 import asyncio
 import os
+import re
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -41,10 +42,22 @@ async def _create_work_order(title: str, description: str, asset_id: int | None)
                 raise RuntimeError(f"CMMS create-work-order 실패: {result.content}")
 
 
+def _format_for_cmms(text: str) -> str:
+    """Atlas CMMS의 작업지시서 상세 화면은 description을 일반 텍스트 컴포넌트로
+    렌더링해서 개행이 살아남지 않고 한 줄로 뭉개진다 - 그 상태에서도 항목이 구분되게,
+    부품 블록 사이는 굵은 구분자, 같은 블록 안 필드는 가운뎃점, 번호 매김
+    조치사항(`1. ... 2. ...`)은 화살표 불릿으로 바꾼다."""
+    text = re.sub(r"\n\n+", "  ▌  ", text)
+    text = re.sub(r"(?<=\s)(\d+)\.\s", r" ▸ ", text)
+    return text.replace("\n", "  ·  ")
+
+
 def _is_loopback_url(url: str) -> bool:
     from urllib.parse import urlparse
     host = urlparse(url).hostname
-    return host in ("localhost", "127.0.0.1")
+    # host.docker.internal은 Docker Desktop이 컨테이너 -> 호스트 방향으로만 열어주는
+    # 별칭이라 실제 네트워크로 나가지 않는다 - localhost와 같은 신뢰 경계로 취급한다.
+    return host in ("localhost", "127.0.0.1", "host.docker.internal")
 
 
 def push_work_order(machine_id: int, work_order_text: str) -> None:
@@ -60,4 +73,4 @@ def push_work_order(machine_id: int, work_order_text: str) -> None:
         return
     title = f"설비 #{machine_id} 긴급 정비"
     asset_id = MACHINE_ID_TO_ASSET_ID.get(machine_id)
-    asyncio.run(_create_work_order(title, work_order_text, asset_id))
+    asyncio.run(_create_work_order(title, _format_for_cmms(work_order_text), asset_id))

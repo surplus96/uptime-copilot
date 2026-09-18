@@ -270,3 +270,66 @@ named volume을 걸면 볼륨이 그 폴더를 통째로 덮어써 이미지를 
 `BACKEND_URL`/`ALLOWED_HOSTS` 환경변수로 확장(atlas-mcp 하드닝 때 쓴 것과 같은 패턴) —
 로컬 실행 시 기본값은 기존과 동일, 도커 컴포즈에서만 서비스 이름으로 확장됨.
 `backend/Dockerfile`, `frontend/Dockerfile` 작성 완료(빌드/실행 검증은 다음 단계).
+
+## 2026-09-18 (계속) — Docker 컨테이너 실행 검증 + CMMS 크로스-스택 연결 버그
+
+`.dockerignore` 부재로 `COPY . .`가 67MB `pdm_telemetry.db`를 이미지에 그대로 굽는
+버그 발견 (`docker run --rm ... ls /app/store/`로 실측). `backend/.dockerignore`
+추가(`store/`, `.venv`, `__pycache__` 등 제외)로 해결, 재빌드 후 이미지 안에 데이터
+없음 확인. 헬스체크에 `start_period` 없어서 임베딩 모델 다운로드 도중 `unhealthy`
+판정 나던 것도 `start_period: 180s`로 해결 — 완전 재생성 사이클로 자동 복구 확인.
+README에 "Running with Docker Compose" 섹션 신설(데이터셋은 여전히 수동 다운로드
+필요, 최초 1회 `docker compose exec backend python data/pdm_dataloader.py` 필요,
+`backend_store` named volume이 `down`/`up` 사이 상태 보존한다는 점 등 명시).
+
+이어서 실사용 테스트 중 발견한 버그: Slack 알림은 정상 도착하는데 Atlas CMMS에는
+작업지시서가 안 뜸. 로그로 확인한 원인은 두 겹:
+1. `backend/.env`의 `CMMS_MCP_URL=http://localhost:3100/mcp` — 컨테이너 안에서
+   `localhost`는 backend 컨테이너 자신이라 연결 자체가 실패(`TaskGroup` 예외).
+   `http://host.docker.internal:3100/mcp`로 교체.
+2. atlas-mcp(별도 프로젝트, `/Users/surplus96/projects/atlas-mcp`)의
+   `requireAllowedHost()`가 DNS 리바인딩 방어로 Host 헤더를 화이트리스트 검사 —
+   `host.docker.internal:3100`이 없어서 421로 거부. atlas-mcp의 `.env`
+   `ALLOWED_HOSTS`에 추가.
+3. 위 두 개를 고치자 `backend/cmms_client.py`의 자체 방어 로직
+   (`_is_loopback_url()` — http 평문으로 토큰 노출 방지, security-reviewer 지적)이
+   `host.docker.internal`을 루프백으로 인정 안 해서 이번엔 uptime-copilot 쪽에서
+   차단. `_is_loopback_url()`의 허용 목록에 `host.docker.internal` 추가(Docker
+   Desktop이 컨테이너→호스트 한 방향으로만 열어주는 별칭이라 실제 네트워크로 안
+   나간다는 근거 명시).
+3곳 모두 수정 후 `docker compose up -d --build backend`(uptime-copilot) +
+`docker compose up -d --force-recreate atlas-mcp`(atlas-mcp)로 재생성, 사용자가
+직접 긴급 승인 시나리오를 태워 Atlas CMMS 화면에 작업지시서 출력까지 실측 확인.
+README 환경변수 표에 이 Docker 크로스-스택 주의사항 추가.
+
+연결은 됐지만 뒤이어 사용자가 지적한 가독성 문제 (직접 진행): 같은 `state.work_order`
+원문(레이블마다 개행으로 구분된 블록)을 Slack과 CMMS에 그대로 보내고 있었는데, 두
+화면의 렌더링 방식이 서로 달라서 각자 다르게 깨졌다.
+- **Slack**: `notify.send_alert()`가 개행 자체는 보존하지만(mrkdwn), `[레이블]`이
+  그냥 평문이고 `조치사항`의 번호 매김 단계가 `manual_lookup_node`에서 이미
+  `" ".join(...)`으로 한 줄에 뭉쳐 있어 "1. x 2. y 3. z"처럼 붙어 보임.
+- **CMMS**: Atlas CMMS 작업지시서 상세 화면(`WorkOrderDetails.tsx`)이 description을
+  일반 MUI `Typography`로 렌더링해서 브라우저가 개행을 전부 공백으로 뭉개버림(리치
+  텍스트/마크다운 렌더러 없음, 소스로 직접 확인) - 그 결과 구분자 하나 없이 완전히
+  한 줄로 이어져 보임.
+
+`backend/notify.py`에 `_format_for_slack()` 추가(`[레이블]` -> `*[레이블]*` 굵게,
+번호 매김 단계를 줄바꿈된 목록으로 분리) - `send_alert()` 호출 시 적용.
+`backend/cmms_client.py`에 `_format_for_cmms()` 추가(블록 사이는 `▌`, 같은 블록 안
+필드는 `·`, 번호 매김 단계는 `▸`로 - 브라우저가 개행을 지워도 구분자가 살아남게) -
+`push_work_order()`에서 `_create_work_order()`에 넘기기 전 적용. 두 함수 모두 회귀
+테스트 추가(`test_notify.py`/`test_cmms_client.py`, 각 1개, 총 10개 통과) 후
+`docker compose up -d --build backend`로 반영, healthy 확인.
+
+실제 Slack/Atlas CMMS 화면으로 사용자가 직접 확인: Slack은 기대대로 개선(라벨 굵게,
+단계별 줄바꿈). CMMS는 구분자는 보이지만 여전히 한 문단으로 흘러 보여서 "바뀐 게
+없는 것 같다"는 피드백 - 원인을 헤드리스 Chrome으로 직접 실측: Atlas의
+`WorkOrderDetails.tsx`(553번째 줄, `<Typography variant="h6">{description}</Typography>`)
+가 `white-space: normal`이라 어떤 텍스트 트릭(줄바꿈 문자 대신 시도한 U+2028 LINE
+SEPARATOR 포함)을 써도 실제 줄바꿈이 살아남지 않음을 확인(스크린샷 비교로 검증 -
+U+2028도 그냥 뭉개짐). 반면 그 한 줄에 `sx={{ whiteSpace: 'pre-wrap' }}`만 추가하면
+원본 텍스트 그대로 완벽하게 줄바꿈되는 것도 같은 방식으로 실측 확인 - 근본 수정은
+atlas-cmms(별도 프로젝트) 소스 변경이 필요하다는 뜻. 사용자에게 진행 여부 확인 -
+**"uptime-copilot 쪽만 유지"로 결정** (atlas-cmms는 안 건드림). 그래서 CMMS 화면은
+`_format_for_cmms()`의 인라인 구분자가 이 스코프 안에서의 최종 형태 - 여전히 한
+문단처럼 보이지만 그 안에서 부품/필드/조치단계 구분은 가능한, 의도된 한계다.
