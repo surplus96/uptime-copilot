@@ -5,6 +5,7 @@ HITL 체크포인트를 추가한다.
 """
 
 import os
+import time
 from typing import Literal, Annotated
 import operator
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ import notify
 import cmms_client
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0)
 
 # 라우팅/추출/판정 계열 노드 전부가 참조하는 단일 모델 상수. main.py의 DEFAULT_MODEL과
 # 같은 OPENAI_MODEL 환경변수를 읽어서, .env 값 하나만 바꾸면 코드 수정 없이 전체가 바뀐다.
@@ -65,6 +66,7 @@ class IncidentExtraction(BaseModel):
 def route_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.parse(
         model=MODEL,
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": (
                 "사용자 문의를 아래 세 카테고리 중 하나로 분류하세요.\n"
@@ -170,6 +172,7 @@ def diagnosis_node(state: SupervisorState) -> dict:
     """자연어 질문에서 설비 번호를 추출한 뒤 _diagnose_machine()으로 진단한다."""
     completion = client.chat.completions.parse(
         model=MODEL,
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
             {"role": "user", "content": state.user_message},
@@ -205,6 +208,7 @@ def scan_all_machines() -> list[dict]:
         event_store.save_event(machine_id, result["severity"], result["diagnosis"], result["evidence_at"])
         if is_genuinely_new:
             notify.send_alert(f"[{result['severity']}] 설비 #{machine_id} 이상 감지\n{result['diagnosis']}")
+            time.sleep(1)
         detected.append(result)
     return detected
 
@@ -213,6 +217,7 @@ def scan_all_machines() -> list[dict]:
 def schedule_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.parse(
         model=MODEL,
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
             {"role": "user", "content": state.user_message},
@@ -224,6 +229,8 @@ def schedule_node(state: SupervisorState) -> dict:
 
     completion2 = client.chat.completions.create(
         model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=300,
         messages=[
             {"role": "system", "content": (
                 f"설비 #{machine_id}의 정비 이력 데이터: {schedule_info}\n"
@@ -240,6 +247,8 @@ def schedule_node(state: SupervisorState) -> dict:
 def general_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
         model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=500,
         messages=[
             {"role": "system", "content": "제조 설비 관련 일반적인 질문에 간단히 답하세요."},
             {"role": "user", "content": state.user_message},
@@ -283,6 +292,8 @@ def work_order_node(state: SupervisorState) -> dict:
 def safety_perspective_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
         model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=150,
         messages=[
             {"role": "system", "content": "당신은 현장 안전 담당자입니다. 아래 사고 상황의 안전 위험도를 2문장 이내로 평가하세요."},
             {"role": "user", "content": state.diagnosis},
@@ -294,6 +305,8 @@ def safety_perspective_node(state: SupervisorState) -> dict:
 def production_perspective_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
         model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=150,
         messages=[
             {"role": "system", "content": "당신은 생산 관리자입니다. 아래 사고 상황이 생산에 미치는 영향을 2문장 이내로 평가하세요."},
             {"role": "user", "content": state.diagnosis},
@@ -305,6 +318,8 @@ def production_perspective_node(state: SupervisorState) -> dict:
 def maintenance_perspective_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
         model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=150,
         messages=[
             {"role": "system", "content": "당신은 정비 기술자입니다. 아래 사고 상황의 수리 난이도를 2문장 이내로 평가하세요."},
             {"role": "user", "content": state.diagnosis},

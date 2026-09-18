@@ -19,3 +19,5 @@ langgraph-checkpoint-sqlite
 pandas
 requests
 mcp==1.30.0
+pytest
+pytest-asyncio

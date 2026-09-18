@@ -103,6 +103,7 @@ def _call_judge(client, prompt: str) -> JudgeResult:
     """
     completion = client.chat.completions.parse(
         model=JUDGE_MODEL,
+        reasoning_effort="none",
         messages=[{"role": "user", "content": prompt}],
         response_format=JudgeResult,
     )
@@ -212,6 +213,7 @@ def should_retrieve(client, question: str) -> bool:
     try:
         completion = client.chat.completions.parse(
             model=JUDGE_MODEL,
+            reasoning_effort="none",
             messages=[{"role": "user", "content": prompt}],
             response_format=RetrievalDecision,
         )

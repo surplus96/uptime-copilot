@@ -8,6 +8,7 @@ CMMS 장애가 승인 흐름을 막으면 안 되므로 예외는 호출부(fina
 
 import asyncio
 import os
+from datetime import timedelta
 
 from dotenv import load_dotenv
 from mcp import ClientSession
@@ -26,17 +27,16 @@ MACHINE_ID_TO_ASSET_ID = {84: 1}
 
 async def _create_work_order(title: str, description: str, asset_id: int | None) -> None:
     headers = {"Authorization": f"Bearer {CMMS_MCP_TOKEN}"}
-    async with streamablehttp_client(CMMS_MCP_URL, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
+    # 명시적 타임아웃 없으면 SSE 기본값(300초)까지 걸릴 수 있음 - 프론트 /agent/resume
+    # 타임아웃(60초)보다 훨씬 짧게 잡아서, CMMS가 응답만 느려도 전체 승인 흐름이
+    # 오래 안 걸리게 한다 (pipeline-optimizer 지적, 2026-09-18).
+    async with streamablehttp_client(CMMS_MCP_URL, headers=headers, timeout=10, sse_read_timeout=15) as (read, write, _):
+        async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=10)) as session:
             await session.initialize()
             arguments = {"title": title, "description": description, "priority": "HIGH"}
             if asset_id is not None:
                 arguments["assetId"] = asset_id
             result = await session.call_tool("create-work-order", arguments)
-            # MCP는 도구 실행 실패(Atlas 쪽 거부 등)를 예외가 아니라 성공 응답 안의
-            # isError 필드로 보고한다 - 이걸 확인 안 하면 CMMS가 거부해도 우리 쪽은
-            # 성공으로 착각한다 (code-quality-reviewer + pipeline-optimizer 공통 지적,
-            # 2026-09-18, atlas-mcp 실제 소스로도 재확인됨).
             if result.isError:
                 raise RuntimeError(f"CMMS create-work-order 실패: {result.content}")
 

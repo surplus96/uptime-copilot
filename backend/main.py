@@ -61,7 +61,7 @@ langsmith_client = Client(anonymizer=anonymizer)
 
 # 서버 전역에서 재사용할 OpenAI 클라이언트 - wrap_openai로 감싸서 judge 호출까지 자동 추적 + 익명화
 client = wrap_openai(
-    OpenAI(api_key=OPENAI_API_KEY),
+    OpenAI(api_key=OPENAI_API_KEY, timeout=30.0),
     tracing_extra={"client": langsmith_client},
 )
 

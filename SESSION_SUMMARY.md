@@ -216,3 +216,30 @@ MCP는 현재 **Stage 2(CMMS work-order push)에서만** 사용 중이다(`backe
   (재들여쓰기 없이).
 - **`layout="wide"` 이후 승인/반려 버튼이 화면 절반 크기**였던 것 — 컬럼 비율 조정으로
   실수 클릭 위험 완화.
+
+이어서 사용자가 직접 타이핑하는 방식으로 "집중" 목록 5~8번 진행(설명은 제공, 코드는 직접
+작성) — 각 단계마다 diff 재확인, 총 3개의 실제 크래시 버그를 검증 과정에서 발견/수정:
+- **5. `reasoning_effort`/`max_completion_tokens`**: `agent_service.py` 8곳 +
+  `harness.py`(`_call_judge`, `should_retrieve`) 2곳, 총 10개 OpenAI 호출에 적용.
+  분류/추출/판정류는 `reasoning_effort="none"`, 자유 텍스트 생성 5곳은
+  `max_completion_tokens`(150~500)도 추가.
+- **6. OpenAI 클라이언트 타임아웃**(`timeout=30.0`, 기본 600초×재시도2회 대비) —
+  `agent_service.py`, `main.py`. 과정에서 두 개의 실제 크래시 버그 발견/수정: `timeout`이
+  `os.getenv()` 인자로 잘못 들어간 것(`agent_service.py`), `wrap_openai()`에 콤마 없이
+  잘못된 인자로 들어간 것(`main.py`, SyntaxError).
+- **7. MCP 클라이언트 타임아웃**(`cmms_client.py`) — `streamablehttp_client`/
+  `ClientSession`에 명시적 타임아웃(10~15초, 기존 SSE 기본값 300초 대비) 추가. 과정에서
+  `from datetime import timedelta` import 누락(NameError) 발견/수정.
+- **8. Slack 스캔 버스트 방지** — `scan_all_machines()`의 알림 전송 직후 `time.sleep(1)`
+  (webhook 초당 1건 제한 대응, 알림 실제 발생 시에만 지연).
+
+전부 문법 검증 + 실제 모듈 import(클라이언트 timeout 값까지 확인)로 재검증 완료.
+
+**10. 가벼운 회귀 테스트** (`backend/tests/`, 최초 pytest 도입 — `pytest`/`pytest-asyncio`
+`requirements.txt`에 추가): 이번 세션에서 발견/수정한 4개 버그 각각에 대응하는 테스트
+14개(`test_event_store.py` 4, `test_notify.py` 3, `test_cmms_client.py` 5,
+`test_rag_dedup.py` 2 — RAG는 실제 임베딩 모델 필요해 무겁게 분리) 작성, 전부 통과.
+`conftest.py`가 `event_store.DB_PATH`/RAG `PERSIST_DIR`를 매 테스트 임시 경로로 격리해서
+실제 `pdm_telemetry.db`/`chroma_db`는 전혀 건드리지 않음(실측으로 확인). 4개 버그
+전부 "수정 전 코드로 되돌리면 해당 테스트가 실제로 실패하는지"까지 직접 검증한 뒤
+원상복구 — 테스트가 형식적이지 않고 실제로 그 버그를 잡는다는 것을 증명.

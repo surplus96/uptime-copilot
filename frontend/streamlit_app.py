@@ -127,7 +127,7 @@ with tab1:
                 elif content.startswith("[긴급 반려됨]"):
                     st.warning("🚫 반려됨 — 별도 조치는 이루어지지 않았습니다.")
                 render_work_order(message["work_order"])
-                with st.expander("처리 결과 상세"):
+                with st.expander("원본 응답 텍스트"):
                     st.text(content)
             else:
                 st.markdown(message["content"])
@@ -156,7 +156,7 @@ with tab1:
                 label = label.lstrip("[") if sep else ""
                 parsed.setdefault(label, (text or p).strip())
 
-            if parsed:
+            if any(parsed.get(n) for n in PERSPECTIVE_ORDER):
                 st.markdown("**🤖 3개 관점 AI 의견** (참고용 — 매뉴얼로 검증된 작업지시서와 달리 근거 확인 없이 생성됨)")
                 cols = st.columns(len(PERSPECTIVE_ORDER))
                 for col, name in zip(cols, PERSPECTIVE_ORDER):
@@ -339,7 +339,7 @@ with tab3:
         else:
             col_all1, col_all2 = st.columns(2)
             select_all = col_all1.button("표시된 항목 전체 선택")
-            clear_all = col_all2.button("전체 해제")
+            clear_all = col_all2.button("표시된 항목 전체 해제")
 
             for ev in events:
                 key = f"chk_{ev['machine_id']}"
