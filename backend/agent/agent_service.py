@@ -188,6 +188,7 @@ def scan_all_machines() -> list[dict]:
     from data import event_store
 
     completed_evidence_map = event_store.get_completed_evidence_map()
+    already_detected_map = event_store.get_detected_evidence_map()
     detected = []
     for machine_id in range(1, 101):
         result = _diagnose_machine(machine_id, within_days=1)
@@ -196,8 +197,14 @@ def scan_all_machines() -> list[dict]:
         completed_evidence_at = completed_evidence_map.get(machine_id)
         if completed_evidence_at and result["evidence_at"] and result["evidence_at"] <= completed_evidence_at:
             continue  # 완료 처리 당시 근거보다 새 근거가 없음 - 재등장 안 시킴
+        # 이미 목록에 있고 근거도 그대로면(=이전 스캔 때 이미 알렸으면) 또 알리지 않는다 -
+        # save_event는 계속 하되(INSERT OR REPLACE, 상태 유지 목적) 알림만 생략한다.
+        # 근거(evidence_at)가 바뀐 경우는 진짜 새 정보이므로 다시 알린다
+        # (code-quality-reviewer 지적, 2026-09-18 - 재스캔마다 같은 알림이 중복 발송되던 문제).
+        is_genuinely_new = already_detected_map.get(machine_id) != result["evidence_at"]
         event_store.save_event(machine_id, result["severity"], result["diagnosis"], result["evidence_at"])
-        notify.send_alert(f"[{result['severity']}] 설비 #{machine_id} 이상 감지\n{result['diagnosis']}")
+        if is_genuinely_new:
+            notify.send_alert(f"[{result['severity']}] 설비 #{machine_id} 이상 감지\n{result['diagnosis']}")
         detected.append(result)
     return detected
 
@@ -398,14 +405,17 @@ graph.add_edge("general", END)
 app = None  # main.py의 lifespan이 initialize_agent()를 호출할 때 SqliteSaver로 컴파일됨
 
 
-def _validate_work_order(state_dict: dict) -> None:
-    """작업지시서(긴급/주의)에도 최소한의 하네스 검증을 적용한다. 내용이 전부 결정론적으로
-    조립되므로(component_evidence + PUMP_MAINTENANCE_PROCEDURES) 지어낼 여지가 없어
-    Faithfulness/안전성 judge는 불필요한 지연·비용·불안정성만 추가한다. PII 형식 검사만 남긴다."""
-    work_order = state_dict.get("work_order")
-    if not work_order:
-        return
-    check_output_forbidden_words(work_order)
+def _validate_output(state_dict: dict) -> None:
+    """work_order(긴급/주의 작업지시서)와 result(일반 문의/정비 일정 답변) 둘 다에 최소한의
+    하네스 검증을 적용한다. work_order는 전부 결정론적으로 조립되므로(component_evidence +
+    PUMP_MAINTENANCE_PROCEDURES) 지어낼 여지가 없어 Faithfulness/안전성 judge는 불필요한
+    지연·비용·불안정성만 추가한다 - PII 형식 검사만으로 충분하다. 반면 result는 general_node/
+    schedule_node가 LLM으로 자유 생성한 텍스트라 같은 PII 검사가 실제로 의미 있는데, 예전엔
+    work_order 필드만 봐서 이 두 경로가 검사를 완전히 피해갔다 (code-quality-reviewer 지적,
+    2026-09-18)."""
+    for text in (state_dict.get("work_order"), state_dict.get("result")):
+        if text:
+            check_output_forbidden_words(text)
 
 
 def start_agent(user_message: str, thread_id: str) -> dict:
@@ -413,19 +423,19 @@ def start_agent(user_message: str, thread_id: str) -> dict:
     result = app.invoke(SupervisorState(user_message=user_message), config=config)
     if "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
-        _validate_work_order(payload)
+        _validate_output(payload)
         return {
             "status": "pending_approval",
             "message": payload["message"],
             "work_order": payload.get("work_order"),
             "perspectives": payload.get("perspectives", []),
         }
-    _validate_work_order(result)
+    _validate_output(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}
 
 
 def resume_agent(thread_id: str, approved: bool) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
     result = app.invoke(Command(resume=approved), config=config)
-    _validate_work_order(result)
+    _validate_output(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}

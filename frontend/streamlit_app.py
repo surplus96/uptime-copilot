@@ -118,7 +118,9 @@ with tab1:
             if message["role"] == "assistant" and message.get("work_order"):
                 content = message["content"]
                 if content.startswith("[긴급 승인됨]"):
-                    st.success("✅ 승인됨 — 현장 책임자에게는 별도로 알려야 합니다.")
+                    st.success("✅ 승인됨 — Slack 알림과 CMMS 작업지시서 등록을 서버에서 자동 처리했습니다.")
+                    st.caption("전송 성공 여부는 이 화면에 표시되지 않습니다(외부 시스템 장애가 승인 자체를 "
+                               "막지 않도록 한 설계) — 확인이 필요하면 Slack 채널이나 CMMS에서 직접 보세요.")
                 elif content.startswith("[긴급 반려됨]"):
                     st.warning("🚫 반려됨 — 별도 조치는 이루어지지 않았습니다.")
                 render_work_order(message["work_order"])
@@ -130,6 +132,8 @@ with tab1:
     if st.session_state.pending_approval:
         with st.container(border=True):
             st.warning("⚠️ 승인이 필요합니다 — 아래 작업지시서를 검토하세요")
+            st.caption("승인하면 Slack 긴급 채널로 알림이 발송되고 CMMS에 긴급(HIGH) 작업지시서가 "
+                       "등록됩니다. 반려하면 아무 것도 전송되지 않습니다.")
             wo = st.session_state.pending_approval.get("work_order")
             if wo:
                 render_work_order(wo)
@@ -173,7 +177,17 @@ with tab1:
                     res.raise_for_status()
                     data = res.json()
                 except requests.exceptions.RequestException as e:
-                    data = {"result": f"[오류] {_extract_error_message(e)}", "work_order": None}
+                    # 타임아웃/네트워크 오류만으로는 서버가 실제로 처리했는지 알 수 없다 -
+                    # 여기서 pending_approval을 지우면 실제로는 이미 성공(Slack+CMMS까지
+                    # 나간)했는데 사용자에게는 "실패"로 보이고 재시도할 방법도 사라진다
+                    # (code-quality-reviewer + interface-reviewer 공통 지적, 2026-09-18).
+                    # 확실해질 때까지 승인 대기 상태를 그대로 유지한다.
+                    st.error(
+                        f"승인 결과를 확인하지 못했습니다: {_extract_error_message(e)}\n\n"
+                        "요청이 서버에 전달되어 이미 처리됐을 수도 있습니다. 다시 누르기 전에 "
+                        "Slack 채널이나 CMMS에서 작업지시서가 이미 등록됐는지 확인하세요."
+                    )
+                    return
                 st.session_state.agent_messages.append(
                     {"role": "assistant", "content": data["result"], "work_order": data.get("work_order")}
                 )

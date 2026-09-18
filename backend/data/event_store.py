@@ -108,6 +108,16 @@ def complete_events(machine_ids: list[int]) -> int:
     return len(rows)
 
 
+def get_detected_evidence_map() -> dict[int, str]:
+    """설비별 현재 detected_events에 남아있는 evidence_at - 스캔할 때마다 같은 근거로
+    Slack에 또 알리는 걸 막는 기준점 (완료 억제 여부와는 별개 문제: 이건 '이미 목록에
+    있고 근거도 그대로인데 알림만 또 나가는' 스팸을 막는 것)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT machine_id, evidence_at FROM detected_events").fetchall()
+    conn.close()
+    return {r[0]: r[1] for r in rows}
+
+
 def get_completed_evidence_map() -> dict[int, str]:
     """설비별 '완료 처리 당시 근거였던' 가장 최근 evidence_at - 그보다 새로운 근거가
     생긴 경우에만 재등장시키기 위한 기준점 (완료 처리 시각 자체와 비교하면 안 됨 -

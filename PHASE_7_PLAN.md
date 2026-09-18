@@ -253,6 +253,18 @@ deferred since it requires restarting the live dev server rather than an isolate
 done and verified; the restart/resume case above is the one explicitly deferred item,
 not forgotten.
 
+**Gap found and fixed the same day, by a full-project audit pass** (`code-quality-reviewer`
+and `pipeline-optimizer`, independently, the latter also reading the actual `atlas-mcp`
+server source): the failure tests above only covered *transport*-level failures (server
+down, bad token) — none exercised Atlas rejecting the request at the *application* level.
+MCP reports that case as `isError: true` inside an otherwise-successful response, not as
+an exception, and `cmms_client.py`'s `_create_work_order` discarded `call_tool`'s return
+value entirely — so a real CMMS-side rejection would have looked like a successful push.
+Fixed: check `result.isError` and raise. **Reproduced the exact failure live** (a bogus
+`assetId` → Atlas returns 500 → MCP wraps it as `isError: true`) and confirmed the fix
+now raises and would be caught by `finalize_node`'s existing `except Exception`, closing
+the one real hole in an otherwise-verified integration.
+
 ## Stage 3 — Decision point after Stage 2 prototype
 
 - Real vendor confirmed (Stage 0 resolved with an answer) → swap the Atlas CMMS prototype

@@ -32,7 +32,13 @@ async def _create_work_order(title: str, description: str, asset_id: int | None)
             arguments = {"title": title, "description": description, "priority": "HIGH"}
             if asset_id is not None:
                 arguments["assetId"] = asset_id
-            await session.call_tool("create-work-order", arguments)
+            result = await session.call_tool("create-work-order", arguments)
+            # MCP는 도구 실행 실패(Atlas 쪽 거부 등)를 예외가 아니라 성공 응답 안의
+            # isError 필드로 보고한다 - 이걸 확인 안 하면 CMMS가 거부해도 우리 쪽은
+            # 성공으로 착각한다 (code-quality-reviewer + pipeline-optimizer 공통 지적,
+            # 2026-09-18, atlas-mcp 실제 소스로도 재확인됨).
+            if result.isError:
+                raise RuntimeError(f"CMMS create-work-order 실패: {result.content}")
 
 
 def _is_loopback_url(url: str) -> bool:

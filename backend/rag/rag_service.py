@@ -68,7 +68,19 @@ def initialize_rag(openai_api_key: str, model_name: str, langsmith_client=None) 
     logger.info(f"청킹 결과: {len(chunks)}개 청크")
 
     embeddings = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-small")
-    vectorstore = Chroma.from_documents(chunks, embeddings, persist_directory=PERSIST_DIR)
+
+    # Chroma.from_documents()는 호출할 때마다 새 UUID로 추가만 하고 기존 내용을 지우지
+    # 않는다 - 서버를 재시작할 때마다(uvicorn --reload 포함) 같은 청크가 계속 쌓여서,
+    # dense 검색 k=3이 사실상 같은 문서 1개의 중복 3건이 되는 문제가 있었다
+    # (pipeline-optimizer 지적, 2026-09-18 - 실측 원본 4개 청크가 168개로 누적됨).
+    # 이미 적재된 컬렉션이 있으면 재적재하지 않고 그대로 재사용한다.
+    vectorstore = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
+    existing_count = vectorstore._collection.count()
+    if existing_count == 0:
+        vectorstore = Chroma.from_documents(chunks, embeddings, persist_directory=PERSIST_DIR)
+        logger.info(f"Chroma에 {len(chunks)}개 청크 신규 적재")
+    else:
+        logger.info(f"Chroma 기존 컬렉션 재사용 (임베딩 {existing_count}개, 재적재 안 함)")
     dense_retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
     # Sparse: BM25 키워드 검색 - 모델명/오류코드처럼 정확한 문자열 매칭이 중요한 질의에 강함
