@@ -321,7 +321,7 @@ def approval_node(state: SupervisorState) -> dict:
         "message": f"[승인 필요] 설비 #{state.machine_id}에서 긴급 상황 발생.\n\n{state.work_order}{extra}\n\n"
                 f"이 작업지시서로 현장 책임자에게 즉시 보고를 진행할까요?",
         "work_order": state.work_order,
-        "perspectives": state.perspectives,   # ← 추가
+        "perspectives": state.perspectives,
     })
 
     print(f"[승인 재개] 사람의 결정: {decision}")

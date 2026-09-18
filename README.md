@@ -16,24 +16,15 @@ uptime-copilot/
 │   │                             (`pump_manual.py` is a static lookup dict the agent reads
 │   │                             directly — not retrieved via RAG; see Architecture Principles)
 │   ├── agent/                  LangGraph multi-agent graph (routing + HITL + event scanner)
-│   └── data/                    PdM data ingestion/query layer + event store (SQLite)
+│   ├── data/                    PdM data ingestion/query layer + event store (SQLite)
+│   ├── notify.py                 Slack alerting — optional, see Environment Variables
+│   └── cmms_client.py             CMMS work-order push — optional, see PHASE_7_PLAN.md
 └── frontend/                Streamlit chat UI
 ```
 
 ## Prerequisites
 
 - Python ≥3.10 (developed and tested on 3.12; the codebase uses `X | None` union syntax throughout)
-
-## Data Setup
-
-1. Download the Azure Predictive Maintenance dataset (PdM_machines.csv, PdM_errors.csv,
-   PdM_maint.csv, PdM_failures.csv, PdM_telemetry.csv).
-2. Place the files under `uptime-copilot/archive/`.
-3. Run the one-time SQLite ingestion:
-   ```bash
-   cd backend/data
-   python pdm_dataloader.py
-   ```
 
 ## Running the Project
 
@@ -44,9 +35,32 @@ python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env             # Windows: copy .env.example .env
-# fill in .env (OPENAI_API_KEY is required)
-uvicorn main:app --reload --port 8000
+# fill in .env (OPENAI_API_KEY is required; everything else is optional - see
+# Environment Variables below)
+```
 
+### Data Setup (one-time, after `pip install`, before the first run)
+
+1. Download the [Microsoft Azure Predictive Maintenance dataset](https://www.kaggle.com/datasets/arnabbiswas1/microsoft-azure-predictive-maintenance)
+   (PdM_machines.csv, PdM_errors.csv, PdM_maint.csv, PdM_failures.csv, PdM_telemetry.csv —
+   PdM_telemetry.csv alone is ~870k rows, so ingestion takes a moment).
+2. Place the files under `uptime-copilot/archive/`.
+3. Run the one-time SQLite ingestion (from `backend/`, with the venv above active):
+   ```bash
+   python data/pdm_dataloader.py
+   ```
+
+### First run
+
+```bash
+uvicorn main:app --reload --port 8000
+```
+
+The very first startup also downloads the `intfloat/multilingual-e5-small` embedding
+model (~470MB) from Hugging Face and builds the RAG index — allow a few minutes and
+network access; it looks hung but isn't. Subsequent restarts are fast.
+
+```bash
 # Frontend (separate terminal)
 cd frontend
 python3 -m venv .venv
@@ -54,6 +68,16 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
+
+## Environment Variables (`backend/.env`)
+
+| Variable | Required | Effect if unset |
+|---|---|---|
+| `OPENAI_API_KEY` | **Yes** | Backend refuses to start |
+| `OPENAI_MODEL` | No | Defaults to `gpt-5.6-luna` |
+| `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` | No | LangSmith tracing disabled |
+| `SLACK_WEBHOOK_URL` | No | Slack alerts on 긴급/주의 detections are silently skipped (`backend/notify.py`) |
+| `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | No | CMMS work-order push on approval is silently skipped (`backend/cmms_client.py`); needs a running Atlas-MCP + Atlas CMMS instance if you do set these — see `PHASE_7_PLAN.md` |
 
 ## Key API Endpoints
 
@@ -63,7 +87,7 @@ streamlit run streamlit_app.py
 | POST | `/rag/query` | RAG-based document Q&A |
 | POST | `/agent/query` | Multi-agent query — returns `pending_approval` on urgent findings |
 | POST | `/agent/resume` | Resume the graph after an HITL approval/rejection decision |
-| POST | `/simulate/tick` | Advance the runtime telemetry simulator by N hours |
+| POST | `/simulate/tick` | Advance the runtime telemetry simulator by N hours (no UI button for this — curl or the `/docs` Swagger page only; without ticking, rescanning returns the same results every time) |
 | POST | `/scan` | Sweep all 100 machines (no LLM), saving 긴급/주의 findings to the event store |
 | GET | `/events` | List pending detected events |
 | POST | `/events/complete` | Mark events completed — archived, and only re-surfaces on genuinely new evidence |
@@ -104,10 +128,15 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 
 ## Related Documents
 
-- `SESSION_SUMMARY.md` — summary of past work sessions (may lag behind the latest
-  changes on a fast-iterating branch; verify against the code for anything load-bearing)
-- `frontend/UI_UPGRADE_PLAN.md` — remaining frontend polish items (most of the original
-  plan has already shipped; only the still-open items are listed)
+- `SESSION_SUMMARY.md` — running engineering log of past work sessions (a narrative log,
+  not a reference — may lag behind the latest changes; verify against the code for
+  anything load-bearing)
+- `PHASE_7_PLAN.md` — **optional integration, not required to run this project.** Design/
+  status record for Slack alerting + CMMS work-order push. With `SLACK_WEBHOOK_URL` /
+  `CMMS_MCP_URL` / `CMMS_MCP_TOKEN` left unset, both features no-op and the app is fully
+  functional without anything described in this file.
+- `frontend/UI_UPGRADE_PLAN.md` — record of the frontend upgrade pass; fully closed out,
+  kept as history rather than an active backlog
 - `.claude/agents/README.md` — the nine review/diagnosis subagents installed in this repo
   (code quality, security, pipeline, docs, interface, debugger, build-doctor, performance,
   test-engineer) and when to reach for each

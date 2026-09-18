@@ -75,6 +75,6 @@ None. All items shipped or explicitly decided against (see below).
 
 ## Suggested Order
 
-All non-cosmetic items have shipped (2026-09-17). Only `layout="wide"` remains, and it's
-a one-line, low-stakes change — pick it up opportunistically whenever the layout is being
-touched for something else anyway, no need to scope it separately.
+All items closed out 2026-09-17. This file is now a record, not a backlog
+(`docs-reviewer` caught this section still describing `layout="wide"` as open after it
+had already shipped into "Done" above — fixed 2026-09-18).

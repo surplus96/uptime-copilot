@@ -133,6 +133,8 @@ archive/
 *.db-wal
 *.db-shm
 backend/rag/chroma_db/
+.DS_Store
+claude-history.txt
 
 # Environments
 .env

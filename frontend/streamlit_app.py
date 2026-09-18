@@ -229,7 +229,7 @@ with tab1:
                 st.session_state.pending_approval = {
                     "message": data["message"],
                     "work_order": data.get("work_order"),
-                    "perspectives": data.get("perspectives", []),   # ← 추가
+                    "perspectives": data.get("perspectives", []),
                 }
 
             else:

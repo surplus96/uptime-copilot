@@ -1,5 +1,10 @@
 # Phase 7 — CMMS/Alert Integration via Microsoft's Predictive-Maintenance Reference Architecture
 
+> **Not required to run this project.** Everything below is an optional integration
+> (Slack alerts + CMMS work-order push). With `SLACK_WEBHOOK_URL` / `CMMS_MCP_URL` /
+> `CMMS_MCP_TOKEN` unset, both paths no-op and the app is fully functional. See
+> `README.md` to just run it.
+
 (Replaces the previous Phase 7 definition of "Clean Architecture, TDD, SDD methodology,"
 which was never started and is superseded by this plan — see decision trail in
 `SESSION_SUMMARY.md`'s 2026-09-17 entries and this session's MCP-scope conversation.)
@@ -61,7 +66,8 @@ it satisfies the reference architecture.
 - Trigger points (two, both already know exactly when to fire — no LLM decision needed):
   - `agent_service.scan_all_machines()`, right after `event_store.save_event(...)` for a
     newly-surfaced 긴급/주의 event.
-  - `finalize_node()` / `resume_agent()`, on 긴급 승인/반려 outcome.
+  - `finalize_node()`, on 긴급 **승인** outcome only (반려는 아무 것도 전송하지 않음 —
+    확인된 의도된 동작, `docs-reviewer` 지적으로 이 문구를 정정, 2026-09-18).
 - Config: one new env var (`SLACK_WEBHOOK_URL` or `SMTP_*`), no new service.
 - Explicitly deferred to later (not this stage): letting the conversational agent itself
   decide, mid-chat, to compose and send an ad hoc Slack message. That *would* be a genuine
@@ -90,7 +96,8 @@ content's dates are the simulated dataset clock (e.g. `2016-01-01 08:00:00`) —
 correct by design (`event_store.py`'s `_dataset_now()` vs `save_event`'s `detected_at`,
 same wall-clock/dataset-clock separation this project adopted after the
 `check_recent_failure` bug). Not documented anywhere in the UI, so it reads as a bug on
-first encounter. Follow-up: add a clarifying caption in the 이상감지 이벤트 tab.
+first encounter. Follow-up: ✅ shipped — see `frontend/streamlit_app.py`'s 이상감지 이벤트
+tab caption (added 2026-09-17, confirmed still present by `docs-reviewer` 2026-09-18).
 
 ## Stage 2 — CMMS work-order push (thin adapter onto an existing MCP gateway)
 

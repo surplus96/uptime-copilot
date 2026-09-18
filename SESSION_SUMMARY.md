@@ -1,4 +1,4 @@
-# Uptime Copilot — Session Summary (updated 2026-09-17)
+# Uptime Copilot — Session Summary (updated 2026-09-18)
 
 ## Overview
 
@@ -85,7 +85,9 @@ applied from that audit:
   `load_dotenv()` call to actually see `.env` values instead of silently falling back to
   the hardcoded default.)
 - **Dead dependencies removed** (`mcp`, `langchain-mcp-adapters`, `ragas` — zero import
-  sites found); `langgraph-checkpoint-sqlite` added.
+  sites found); `langgraph-checkpoint-sqlite` added. (`mcp` was later re-added for Phase 7
+  Stage 2 — see below — once a real endpoint existed to call; `langchain-mcp-adapters`
+  stayed removed, deliberately not used even then, see `PHASE_7_PLAN.md`.)
 - **`README.md` corrected**: setup commands were Windows-only despite the actual dev
   machine being macOS; 5 endpoints (`/scan`, `/events*`, `/simulate/tick`) were
   undocumented; a `backend/practice/` folder was referenced that never existed in this
@@ -178,11 +180,13 @@ value remaining `UI_UPGRADE_PLAN.md` item.
   found while testing the event-scan fix above.
 - **No CONTRIBUTING.md, LICENSE, or CHANGELOG.md.**
 
-## 재검토 사항 — MCP 도입 (2026-09-17 판단, 09-17 갱신)
+## 재검토 사항 — MCP 도입 (2026-09-17 판단, 09-18 갱신)
 
-현재는 MCP 미사용(과거 `mcp`/`langchain-mcp-adapters` 의존성은 zero-import로 제거됨,
-위 History 참조). 아래 세 가지 중 하나가 실제로 구축될 때 재검토한다는 원칙은 유지 —
-그 전까지는 붙일 외부 시스템 자체가 없어서 다시 죽은 의존성이 될 뿐이다.
+MCP는 현재 **Stage 2(CMMS work-order push)에서만** 사용 중이다(`backend/cmms_client.py`,
+`mcp` Python SDK 직접 호출) — 대화형 에이전트가 스스로 도구를 골라 쓰는 agentic 용도로는
+아직 미사용. 과거 `mcp`/`langchain-mcp-adapters`를 zero-import로 제거했던 것도 여전히
+유효한 원칙(붙일 외부 시스템이 없으면 다시 죽은 의존성이 될 뿐)이고, `langchain-mcp-adapters`
+쪽은 지금도 의도적으로 안 쓴다.
 
 1. ~~실제 CMMS/ERP에 작업지시서를 밀어넣어야 할 때~~ → **`PHASE_7_PLAN.md`로 승격**
    (Stage 2). 다만 결론은 "MCP를 우리가 새로 만든다"가 아니라 "이미 존재하는
