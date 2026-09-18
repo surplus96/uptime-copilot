@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-DB_PATH = str(Path(__file__).parent / "pdm_telemetry.db")
+DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
 
 
 def get_recent_telemetry(machine_id: int, hours: int = 24) -> list[dict]:

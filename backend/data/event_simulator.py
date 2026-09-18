@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
-DB_PATH = str(Path(__file__).parent / "pdm_telemetry.db")
+DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
 DATA_DIR = str(Path(__file__).parent.parent.parent / "archive")
 
 _machines = pd.read_csv(f"{DATA_DIR}/PdM_machines.csv")

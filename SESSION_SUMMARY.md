@@ -243,3 +243,30 @@ MCP는 현재 **Stage 2(CMMS work-order push)에서만** 사용 중이다(`backe
 실제 `pdm_telemetry.db`/`chroma_db`는 전혀 건드리지 않음(실측으로 확인). 4개 버그
 전부 "수정 전 코드로 되돌리면 해당 테스트가 실제로 실패하는지"까지 직접 검증한 뒤
 원상복구 — 테스트가 형식적이지 않고 실제로 그 버그를 잡는다는 것을 증명.
+
+## 2026-09-18 (계속) — Docker Compose 패키징 착수: 폴더 구조 정리
+
+Docker Compose로 패키징하기로 스코프 합의(backend+frontend 2개 서비스만, atlas-cmms/
+atlas-mcp는 제외 — "이 프로젝트 실행에 필수 아님" 원칙 유지). 진행 중 발견: 상태(DB)
+파일이 소스코드와 같은 폴더(`backend/data/`, `backend/rag/`)에 있어서, 그대로 도커
+named volume을 걸면 볼륨이 그 폴더를 통째로 덮어써 이미지를 재빌드해도 `.py` 코드가
+갱신 안 되는 문제가 있었음.
+
+**해결**: `backend/store/`를 신설해서 상태 파일만 분리:
+- `pdm_telemetry.db`, `checkpoints.db`, `chroma_db/`를 기존 데이터 그대로(삭제 후
+  재생성 아님) `backend/store/`로 이관.
+- 경로 상수 8곳 수정(`event_store.py`, `pdm_operations.py`, `pdm_telemetry.py`,
+  `event_simulator.py`, `pdm_dataloader.py`, `main.py`의 `CHECKPOINT_DB_PATH`,
+  `rag/generate_docs.py`, `rag/rag_service.py`의 `PERSIST_DIR`).
+- `pdm_dataloader.py`/`main.py`엔 `store/` 자동 생성(`mkdir(parents=True, exist_ok=True)`)
+  추가 — 도커 최초 부팅처럼 그 폴더가 아직 없는 상황 대비.
+- `.gitignore`를 `backend/rag/chroma_db/` 단일 경로 대신 `backend/store/*` +
+  `!backend/store/.gitkeep`로 교체.
+- 검증: 8개 파일 문법 통과, 실제 import로 세 DB 전부 새 경로에서 정상 조회 확인
+  (이벤트 3건·RAG 청크 4개 데이터 유실 없음), 14개 회귀 테스트 재실행 통과.
+
+같은 세션에서 도커 네트워킹 대응도 시작: `frontend/streamlit_app.py`의 `BACKEND_URL`과
+`backend/main.py`의 `TrustedHostMiddleware`를 하드코딩 `localhost`에서
+`BACKEND_URL`/`ALLOWED_HOSTS` 환경변수로 확장(atlas-mcp 하드닝 때 쓴 것과 같은 패턴) —
+로컬 실행 시 기본값은 기존과 동일, 도커 컴포즈에서만 서비스 이름으로 확장됨.
+`backend/Dockerfile`, `frontend/Dockerfile` 작성 완료(빌드/실행 검증은 다음 단계).

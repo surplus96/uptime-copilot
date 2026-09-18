@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = str(Path(__file__).parent / "pdm_telemetry.db")
+DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
 
 
 def init_event_table() -> None:

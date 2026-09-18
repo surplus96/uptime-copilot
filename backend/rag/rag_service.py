@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # main.py를 어디서 실행하든, rag_service.py가 어느 폴더로 옮겨지든 항상 정확한 경로를 가리킨다.
 _MODULE_DIR = Path(__file__).parent
 DOCS_DIR = str(_MODULE_DIR / "docs")
-PERSIST_DIR = str(_MODULE_DIR / "chroma_db")
+PERSIST_DIR = str(_MODULE_DIR.parent / "store" / "chroma_db")
 
 _rag_chain = None  # 서버 시작 시 1회만 구축해서 재사용 (요청마다 재구축 방지)
 _retriever = None

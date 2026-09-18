@@ -2,13 +2,15 @@ import streamlit as st
 import requests
 import uuid
 import re
+import os
+
 
 CHAT_AVATARS = {"user": "🧑‍🔧", "assistant": "🛡️"}
 
 st.set_page_config(page_title="Uptime Copilot", page_icon="🛡️", layout="wide")
 st.title("Uptime Copilot")
 
-BACKEND_URL = "http://localhost:8000"
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 
 ERROR_LABELS = {

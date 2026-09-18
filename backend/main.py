@@ -68,7 +68,8 @@ client = wrap_openai(
 
 # HITL 승인 대기 상태(그래프 체크포인트)를 디스크에 남긴다 - InMemorySaver는 uvicorn --reload나
 # 프로세스 재시작마다 대기 중인 승인을 전부 날려버려서 SqliteSaver로 교체함.
-CHECKPOINT_DB_PATH = Path(__file__).parent / "data" / "checkpoints.db"
+CHECKPOINT_DB_PATH = Path(__file__).parent / "store" / "checkpoints.db"
+CHECKPOINT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)  # 최초 실행(예: 도커 첫 부팅) 시 store/가 아직 없을 수 있음
 
 
 @asynccontextmanager
@@ -93,11 +94,10 @@ class LLMAPIError(Exception):
         super().__init__(detail)
 
 
-# DNS 리바인딩 방어 - CORS는 브라우저의 cross-origin 요청만 막고, 공격자 도메인이
-# 127.0.0.1로 재해석(rebind)되면 브라우저 입장에서 same-origin이라 CORS를 우회한다.
-# Host 헤더 자체를 검증해서 이걸 막는다 (atlas-mcp의 ALLOWED_HOSTS 하드닝과 같은 원칙,
-# security-reviewer 지적, 2026-09-18).
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
+allowed_hosts = ["localhost", "127.0.0.1"] + [
+    h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()
+]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 # Streamlit(로컬 개발 시 기본 8501 포트)에서의 요청을 허용
 app.add_middleware(

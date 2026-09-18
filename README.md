@@ -17,6 +17,9 @@ uptime-copilot/
 │   │                             directly — not retrieved via RAG; see Architecture Principles)
 │   ├── agent/                  LangGraph multi-agent graph (routing + HITL + event scanner)
 │   ├── data/                    PdM data ingestion/query layer + event store (SQLite)
+│   ├── store/                    Generated state (pdm_telemetry.db, checkpoints.db,
+│   │                             chroma_db/) — gitignored, separate from source so a
+│   │                             Docker volume can be mounted here without shadowing code
 │   ├── notify.py                 Slack alerting — optional, see Environment Variables
 │   └── cmms_client.py             CMMS work-order push — optional, see PHASE_7_PLAN.md
 └── frontend/                Streamlit chat UI
@@ -25,8 +28,47 @@ uptime-copilot/
 ## Prerequisites
 
 - Python ≥3.10 (developed and tested on 3.12; the codebase uses `X | None` union syntax throughout)
+- Docker + Docker Compose, if you'd rather skip the manual venv setup below (see
+  "Running with Docker Compose")
 
-## Running the Project
+## Running with Docker Compose (recommended)
+
+The dataset still has to be downloaded manually either way — it can't be redistributed
+inside the image — so "Data Setup" below applies regardless of which path you take.
+
+```bash
+# 1) Data Setup (see below) — download the dataset into archive/ first
+
+# 2) Configure
+cp backend/.env.example backend/.env
+# fill in backend/.env (OPENAI_API_KEY is required; everything else optional —
+# see Environment Variables below)
+
+# 3) Build and start both services
+docker compose up -d --build
+```
+
+- Frontend: http://localhost:8501 — Backend: http://localhost:8000 (`/docs` for the
+  interactive API)
+- **First startup takes a few minutes**: the backend downloads the same ~470MB embedding
+  model mentioned below, inside the container this time. `docker compose logs -f backend`
+  to watch progress; it reports "starting" (not yet healthy) until that finishes, and the
+  frontend container waits for it automatically — no action needed, just wait.
+- **One-time data ingestion still has to be run once, inside the container**, the first
+  time you bring the stack up (the image intentionally ships with no data baked in — see
+  `backend/.dockerignore` — so a fresh `docker compose up` starts from an empty DB):
+  ```bash
+  docker compose exec backend python data/pdm_dataloader.py
+  ```
+- State (`backend/store/`: the SQLite DBs and the RAG index) lives in a named Docker
+  volume, not in the image — it survives `docker compose down` / `up`. Only
+  `docker compose down -v` wipes it (you'd need to re-run the ingestion step above
+  afterward).
+- Both services bind to `127.0.0.1` only, same as the manual setup below — nothing is
+  exposed on your LAN.
+- `docker compose down` to stop.
+
+## Running Without Docker
 
 ```bash
 # Backend
@@ -115,14 +157,17 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
   Only 긴급 cases run three parallel perspective evaluations (safety / production /
   maintenance) and pause for Human-in-the-Loop (HITL) approval; 주의 cases skip
   straight to a work order. HITL approval state is checkpointed to SQLite
-  (`backend/data/checkpoints.db`), not held only in memory, so it survives
+  (`backend/store/checkpoints.db`), not held only in memory, so it survives
   `--reload`/restarts. A separate `/scan` sweep runs the same diagnosis logic
   (no LLM) across all 100 machines and stores 긴급/주의 findings in an event store;
   a completed event only re-surfaces on a later scan once genuinely new evidence
   (postdating the completion time) appears — see `backend/data/event_store.py`.
 - **Data**: All path constants are resolved relative to the file's own location
   (`Path(__file__).parent`) rather than the current working directory, so they remain
-  correct regardless of where the code is run from or moved to.
+  correct regardless of where the code is run from or moved to. Generated/mutable
+  state (`pdm_telemetry.db`, `checkpoints.db`, the RAG Chroma index) lives under
+  `backend/store/`, kept separate from source code specifically so a Docker named
+  volume can be mounted there without ever shadowing application code.
 - **Observability**: Integrated with LangSmith; an anonymizer built from the same PII
   regex patterns masks sensitive data before traces are sent out.
 

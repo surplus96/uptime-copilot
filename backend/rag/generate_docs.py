@@ -16,7 +16,7 @@ from data.pdm_operations import (
     get_component_failure_stats,
 )
 
-DB_PATH = Path(__file__).parent.parent / "data" / "pdm_telemetry.db"
+DB_PATH = Path(__file__).parent.parent / "store" / "pdm_telemetry.db"
 from pump_manual import (
     PUMP_MAINTENANCE_PROCEDURES,
     ERROR5_NOTE,
