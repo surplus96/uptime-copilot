@@ -1,3 +1,12 @@
+[server]
+# 승인 버튼 하나로 실제 Slack 알림 + Atlas CMMS 작업지시서 생성이 나가는데 인증이 없다 -
+# 같은 네트워크의 누구나 접근하지 못하도록 이 컴퓨터 자신에게서 오는 요청만 받는다
+# (security-reviewer 지적, 2026-09-18).
+address = "127.0.0.1"
+
+[browser]
+gatherUsageStats = false
+
 [theme]
 # Hanwha Orange (Pantone 1585 C) - 한화 계열사 공통 브랜드 컬러
 primaryColor = "#F96D17"

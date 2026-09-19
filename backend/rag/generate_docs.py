@@ -4,6 +4,7 @@ COMPONENT_DESCRIPTIONS/ERROR_DESCRIPTIONS(교육용 추정 서술) + pump_manual
 + 실제 집계 통계를 결합해서 "증상 -> 점검 절차 -> 실제 통계" 문서를 만든다.
 pdm_dataloader.py와 같은 성격의 1회 실행용 배치 스크립트.
 """
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -12,9 +13,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))  # backend/ 를 import 경
 from data.pdm_operations import (
     ERROR_DESCRIPTIONS,
     COMPONENT_DESCRIPTIONS,
-    _errors,
     get_component_failure_stats,
 )
+
+DB_PATH = Path(__file__).parent.parent / "store" / "pdm_telemetry.db"
 from pump_manual import (
     PUMP_MAINTENANCE_PROCEDURES,
     ERROR5_NOTE,
@@ -59,12 +61,16 @@ def build_component_doc() -> str:
 
 def build_error_doc() -> str:
     """오류코드별 설명 + 전체 오류 이력 중 비중."""
+    conn = sqlite3.connect(DB_PATH)
+    total = conn.execute("SELECT COUNT(*) FROM errors").fetchone()[0]
+
     lines = ["# 오류 코드 안내\n"]
-    total = len(_errors)
     for err, desc in ERROR_DESCRIPTIONS.items():
-        count = len(_errors[_errors["errorID"] == err])
+        count = conn.execute("SELECT COUNT(*) FROM errors WHERE errorID = ?", (err,)).fetchone()[0]
         pct = round(count / total * 100, 1) if total else 0
         lines.append(f"- {err}: {desc}. 전체 오류 이력 중 {pct}%를 차지함 (총 {count}건).")
+    conn.close()
+
     lines.append(f"\n{ERROR5_NOTE}")
     return "\n".join(lines)
 

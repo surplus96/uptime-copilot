@@ -130,7 +130,14 @@ celerybeat.pid
 # Project-specific: raw data & regeneratable build artifacts (do not version-control)
 archive/
 *.db
-backend/rag/chroma_db/
+*.db-wal
+*.db-shm
+# 도커 볼륨 마운트 대상 - 소스코드와 분리된 상태(state) 전용 폴더 (pdm_telemetry.db,
+# checkpoints.db, chroma_db/). .gitkeep으로 폴더 자체는 추적하되 내용물은 제외한다.
+backend/store/*
+!backend/store/.gitkeep
+.DS_Store
+claude-history.txt
 
 # Environments
 .env

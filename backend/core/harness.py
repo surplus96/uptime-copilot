@@ -10,9 +10,15 @@
 """
 
 import logging
+import os
 import re
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+# main.py의 import 순서상 이 모듈이 main.py 자신의 load_dotenv() 호출보다 먼저 로드되므로,
+# .env 값을 확실히 읽으려면 이 모듈이 스스로 호출해야 한다(agent_service.py와 동일한 패턴).
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +44,7 @@ def validate_input(message: str) -> None:
     """입력 길이를 검사한다 (computational check)."""
     if len(message) > MAX_INPUT_LENGTH:
         raise HarnessRejectedError(
-            f"입력이 너무 깁니다 ({len(message)}자, 최대 {MAX_INPUT_LENGHT}자)"
+            f"입력이 너무 깁니다 ({len(message)}자, 최대 {MAX_INPUT_LENGTH}자)"
         )
 
 
@@ -51,8 +57,9 @@ def check_output_forbidden_words(text: str) -> None:
 
 # --------------- Inferential checks ---------------
 
-# OpenAI 구조화 출력을 지원하는 비용 효율적인 모델. 필요시 gpt-4o 등으로 교체 가능.
-JUDGE_MODEL = "gpt-4o-mini"
+# agent_service.py의 MODEL, main.py의 DEFAULT_MODEL과 같은 OPENAI_MODEL 환경변수를
+# 읽는다 - .env 값 하나만 바꾸면 코드 수정 없이 judge를 포함한 전체 모델이 바뀐다.
+JUDGE_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 
 JUDGE_PROMPT_TEMPLATE = """\
 당신은 AI 응답 품질과 안전성을 평가하는 심사관입니다. 아래 규칙을 응답이 얼마나 잘 지켰는지 판단하세요.
@@ -96,6 +103,7 @@ def _call_judge(client, prompt: str) -> JudgeResult:
     """
     completion = client.chat.completions.parse(
         model=JUDGE_MODEL,
+        reasoning_effort="none",
         messages=[{"role": "user", "content": prompt}],
         response_format=JudgeResult,
     )
@@ -205,6 +213,7 @@ def should_retrieve(client, question: str) -> bool:
     try:
         completion = client.chat.completions.parse(
             model=JUDGE_MODEL,
+            reasoning_effort="none",
             messages=[{"role": "user", "content": prompt}],
             response_format=RetrievalDecision,
         )

@@ -5,6 +5,7 @@ HITL 체크포인트를 추가한다.
 """
 
 import os
+import time
 from typing import Literal, Annotated
 import operator
 from dotenv import load_dotenv
@@ -12,23 +13,30 @@ from openai import OpenAI
 from pydantic import BaseModel
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt, Command
-from langgraph.checkpoint.memory import InMemorySaver
 from langsmith.wrappers import wrap_openai
 
 from data import pdm_operations, pdm_telemetry
 from rag.pump_manual import SIGNAL_TO_COMPONENT, ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES
 from core.harness import check_output_forbidden_words
-
+import notify
+import cmms_client
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0)
 
-def initialize_agent(langsmith_client) -> None:
+# 라우팅/추출/판정 계열 노드 전부가 참조하는 단일 모델 상수. main.py의 DEFAULT_MODEL과
+# 같은 OPENAI_MODEL 환경변수를 읽어서, .env 값 하나만 바꾸면 코드 수정 없이 전체가 바뀐다.
+MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+
+def initialize_agent(langsmith_client, checkpointer) -> None:
     """main.py의 lifespan에서 호출: main.py와 같은 LangSmith Client(PII 익명화 포함)로
-    이 모듈의 OpenAI 클라이언트를 감싼다. - 별도 Client를 새로 만들지 않고 재사용.
+    이 모듈의 OpenAI 클라이언트를 감싸고, HITL 승인 대기 상태를 담을 체크포인터로 그래프를
+    컴파일한다. InMemorySaver(프로세스 메모리)는 `uvicorn --reload`나 재시작마다 대기 중인
+    승인이 전부 사라지므로, main.py가 넘겨주는 디스크 기반 SqliteSaver로 교체함.
     """
-    global client
+    global client, app
     client = wrap_openai(client, tracing_extra={"client": langsmith_client})
+    app = graph.compile(checkpointer=checkpointer)
 
 class SupervisorState(BaseModel):
     user_message: str
@@ -57,7 +65,8 @@ class IncidentExtraction(BaseModel):
 
 def route_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.parse(
-        model="gpt-4o-mini",
+        model=MODEL,
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": (
                 "사용자 문의를 아래 세 카테고리 중 하나로 분류하세요.\n"
@@ -77,9 +86,8 @@ def route_node(state: SupervisorState) -> dict:
     print(f"[라우터] {decision.category}")
     return {"category": decision.category}
 
-def _diagnose_machine(machine_id: int) -> dict:
-    """machine_id가 이미 확정된 상태에서 순수 데이터로 진단한다.
-    diagnosis_node(자연어 질문 경로)와 scan_all_machines(자동 스캔 경로)가 이 함수를 공유한다."""
+
+def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     machine_info = pdm_operations.get_machine_info(machine_id)
     if "error" in machine_info:
         return {
@@ -88,10 +96,11 @@ def _diagnose_machine(machine_id: int) -> dict:
             "severity": "일반",
             "involved_components": [],
             "component_evidence": {},
+            "evidence_at": None,
         }
 
     recent_errors = pdm_operations.get_recent_errors(machine_id, limit=3)
-    failure = pdm_operations.check_recent_failure(machine_id, within_days=30)
+    failure = pdm_operations.check_recent_failure(machine_id, within_days=within_days)
     anomaly = pdm_telemetry.detect_anomaly(machine_id)
 
     error_summary = (
@@ -139,19 +148,31 @@ def _diagnose_machine(machine_id: int) -> dict:
     else:
         severity = "일반"
 
+    # 근거시각: 실제로 severity 판정에 쓰인 것들 중 가장 최근 것
+    evidence_times = []
+    if recent_errors:
+        evidence_times.append(recent_errors[0]["datetime"])   # 이미 최신순 정렬됨
+    if failure:
+        evidence_times.append(failure["datetime"])
+    if anomaly.get("has_anomaly"):
+        evidence_times.append(anomaly["as_of"])
+    evidence_at = max(evidence_times) if evidence_times else None
+
     return {
         "machine_id": machine_id,
         "diagnosis": diagnosis_text,
         "severity": severity,
         "involved_components": list(component_evidence.keys()),
         "component_evidence": {comp: "; ".join(v) for comp, v in component_evidence.items()},
+        "evidence_at": evidence_at,
     }
 
 
 def diagnosis_node(state: SupervisorState) -> dict:
     """자연어 질문에서 설비 번호를 추출한 뒤 _diagnose_machine()으로 진단한다."""
     completion = client.chat.completions.parse(
-        model="gpt-4o-mini",
+        model=MODEL,
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
             {"role": "user", "content": state.user_message},
@@ -161,27 +182,42 @@ def diagnosis_node(state: SupervisorState) -> dict:
     machine_id = completion.choices[0].message.parsed.machine_id
     result = _diagnose_machine(machine_id)
     print(f"[진단] machine #{machine_id} -> {result['severity']}")
-    return result
+    return {k: v for k, v in result.items() if k != "evidence_at"}
 
 
 def scan_all_machines() -> list[dict]:
-    """전체 100대 설비를 LLM 없이 순수 데이터로 스캔해서, 긴급/주의로 판정된 설비를
-    이벤트 저장소에 적재한다."""
+    """전체 100대 설비를 LLM 없이 순수 데이터로 스캔한다. 완료 처리된 설비는
+    그 이후 실제로 새 근거(evidence_at)가 생긴 경우에만 재등장한다."""
     from data import event_store
 
+    completed_evidence_map = event_store.get_completed_evidence_map()
+    already_detected_map = event_store.get_detected_evidence_map()
     detected = []
     for machine_id in range(1, 101):
-        result = _diagnose_machine(machine_id)
-        if result["severity"] in ("긴급", "주의"):
-            event_store.save_event(machine_id, result["severity"], result["diagnosis"])
-            detected.append(result)
+        result = _diagnose_machine(machine_id, within_days=1)
+        if result["severity"] not in ("긴급", "주의"):
+            continue
+        completed_evidence_at = completed_evidence_map.get(machine_id)
+        if completed_evidence_at and result["evidence_at"] and result["evidence_at"] <= completed_evidence_at:
+            continue  # 완료 처리 당시 근거보다 새 근거가 없음 - 재등장 안 시킴
+        # 이미 목록에 있고 근거도 그대로면(=이전 스캔 때 이미 알렸으면) 또 알리지 않는다 -
+        # save_event는 계속 하되(INSERT OR REPLACE, 상태 유지 목적) 알림만 생략한다.
+        # 근거(evidence_at)가 바뀐 경우는 진짜 새 정보이므로 다시 알린다
+        # (code-quality-reviewer 지적, 2026-09-18 - 재스캔마다 같은 알림이 중복 발송되던 문제).
+        is_genuinely_new = already_detected_map.get(machine_id) != result["evidence_at"]
+        event_store.save_event(machine_id, result["severity"], result["diagnosis"], result["evidence_at"])
+        if is_genuinely_new:
+            notify.send_alert(f"[{result['severity']}] 설비 #{machine_id} 이상 감지\n{result['diagnosis']}")
+            time.sleep(1)
+        detected.append(result)
     return detected
 
 
 
 def schedule_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.parse(
-        model="gpt-4o-mini",
+        model=MODEL,
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
             {"role": "user", "content": state.user_message},
@@ -192,7 +228,9 @@ def schedule_node(state: SupervisorState) -> dict:
     schedule_info = pdm_operations.estimate_next_maintenance(machine_id)
 
     completion2 = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=300,
         messages=[
             {"role": "system", "content": (
                 f"설비 #{machine_id}의 정비 이력 데이터: {schedule_info}\n"
@@ -208,7 +246,9 @@ def schedule_node(state: SupervisorState) -> dict:
 
 def general_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=500,
         messages=[
             {"role": "system", "content": "제조 설비 관련 일반적인 질문에 간단히 답하세요."},
             {"role": "user", "content": state.user_message},
@@ -251,7 +291,9 @@ def work_order_node(state: SupervisorState) -> dict:
 
 def safety_perspective_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=150,
         messages=[
             {"role": "system", "content": "당신은 현장 안전 담당자입니다. 아래 사고 상황의 안전 위험도를 2문장 이내로 평가하세요."},
             {"role": "user", "content": state.diagnosis},
@@ -262,7 +304,9 @@ def safety_perspective_node(state: SupervisorState) -> dict:
 
 def production_perspective_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=150,
         messages=[
             {"role": "system", "content": "당신은 생산 관리자입니다. 아래 사고 상황이 생산에 미치는 영향을 2문장 이내로 평가하세요."},
             {"role": "user", "content": state.diagnosis},
@@ -273,7 +317,9 @@ def production_perspective_node(state: SupervisorState) -> dict:
 
 def maintenance_perspective_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=MODEL,
+        reasoning_effort="none",
+        max_completion_tokens=150,
         messages=[
             {"role": "system", "content": "당신은 정비 기술자입니다. 아래 사고 상황의 수리 난이도를 2문장 이내로 평가하세요."},
             {"role": "user", "content": state.diagnosis},
@@ -288,9 +334,11 @@ def approval_node(state: SupervisorState) -> dict:
     extra = f"\n\n[관련 관점 의견]\n{perspectives_text}" if perspectives_text else ""
     decision = interrupt({
         "message": f"[승인 필요] 설비 #{state.machine_id}에서 긴급 상황 발생.\n\n{state.work_order}{extra}\n\n"
-                   f"이 작업지시서로 현장 책임자에게 즉시 보고를 진행할까요?",
+                f"이 작업지시서로 현장 책임자에게 즉시 보고를 진행할까요?",
         "work_order": state.work_order,
+        "perspectives": state.perspectives,
     })
+
     print(f"[승인 재개] 사람의 결정: {decision}")
     return {"approved": decision}
 
@@ -298,9 +346,14 @@ def approval_node(state: SupervisorState) -> dict:
 def finalize_node(state: SupervisorState) -> dict:
     if state.severity == "긴급":
         if state.approved:
-            result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 현장 책임자에게 즉시 보고되었습니다."
+            result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 승인 처리되었습니다. 현장 책임자에게는 별도로 알려야 합니다."
+            notify.send_alert(f"[긴급 승인] 설비 #{state.machine_id} 작업지시서 승인됨\n{state.work_order}")
+            try:
+                cmms_client.push_work_order(state.machine_id, state.work_order)
+            except Exception as e:
+                print(f"[CMMS push 실패] {e}")
         else:
-            result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 보고가 보류되었습니다."
+            result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 반려 처리되었습니다. 별도 조치는 이루어지지 않았습니다."
     elif state.severity == "주의":
         result = f"[사전 경보 - 예방 조치 권장]\n{state.work_order}"
     else:
@@ -364,17 +417,20 @@ graph.add_edge("schedule", END)
 graph.add_edge("general", END)
 
 
-app = graph.compile(checkpointer=InMemorySaver())
+app = None  # main.py의 lifespan이 initialize_agent()를 호출할 때 SqliteSaver로 컴파일됨
 
 
-def _validate_work_order(state_dict: dict) -> None:
-    """작업지시서(긴급/주의)에도 최소한의 하네스 검증을 적용한다. 내용이 전부 결정론적으로
-    조립되므로(component_evidence + PUMP_MAINTENANCE_PROCEDURES) 지어낼 여지가 없어
-    Faithfulness/안전성 judge는 불필요한 지연·비용·불안정성만 추가한다. PII 형식 검사만 남긴다."""
-    work_order = state_dict.get("work_order")
-    if not work_order:
-        return
-    check_output_forbidden_words(work_order)
+def _validate_output(state_dict: dict) -> None:
+    """work_order(긴급/주의 작업지시서)와 result(일반 문의/정비 일정 답변) 둘 다에 최소한의
+    하네스 검증을 적용한다. work_order는 전부 결정론적으로 조립되므로(component_evidence +
+    PUMP_MAINTENANCE_PROCEDURES) 지어낼 여지가 없어 Faithfulness/안전성 judge는 불필요한
+    지연·비용·불안정성만 추가한다 - PII 형식 검사만으로 충분하다. 반면 result는 general_node/
+    schedule_node가 LLM으로 자유 생성한 텍스트라 같은 PII 검사가 실제로 의미 있는데, 예전엔
+    work_order 필드만 봐서 이 두 경로가 검사를 완전히 피해갔다 (code-quality-reviewer 지적,
+    2026-09-18)."""
+    for text in (state_dict.get("work_order"), state_dict.get("result")):
+        if text:
+            check_output_forbidden_words(text)
 
 
 def start_agent(user_message: str, thread_id: str) -> dict:
@@ -382,14 +438,19 @@ def start_agent(user_message: str, thread_id: str) -> dict:
     result = app.invoke(SupervisorState(user_message=user_message), config=config)
     if "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
-        _validate_work_order(payload)
-        return {"status": "pending_approval", "message": payload["message"], "work_order": payload.get("work_order")}
-    _validate_work_order(result)
+        _validate_output(payload)
+        return {
+            "status": "pending_approval",
+            "message": payload["message"],
+            "work_order": payload.get("work_order"),
+            "perspectives": payload.get("perspectives", []),
+        }
+    _validate_output(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}
 
 
 def resume_agent(thread_id: str, approved: bool) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
     result = app.invoke(Command(resume=approved), config=config)
-    _validate_work_order(result)
+    _validate_output(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}

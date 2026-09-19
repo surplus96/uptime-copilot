@@ -8,7 +8,8 @@ from pathlib import Path
 import pandas as pd
 
 DATA_DIR = str(Path(__file__).parent.parent.parent / "archive")
-DB_PATH = str(Path(__file__).parent / "pdm_telemetry.db")
+DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
+Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)  # 최초 실행(예: 도커 첫 부팅) 시 store/가 아직 없을 수 있음
 
 
 def load_telemetry_to_sqlite():
