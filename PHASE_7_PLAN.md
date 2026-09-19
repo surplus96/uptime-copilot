@@ -208,7 +208,13 @@ This is the stage that actually implements the Microsoft reference pattern
    involved (`priority` is unconditionally `"HIGH"`, matching the fact this path only
    ever runs for 긴급+approved). `mcp` added to `backend/requirements.txt`;
    `CMMS_MCP_URL`/`CMMS_MCP_TOKEN` added to `backend/.env.example` (the token must match
-   `atlas-mcp/.env`'s `MCP_AUTH_TOKEN` exactly).
+   `atlas-mcp/.env`'s `MCP_AUTH_TOKEN` exactly). Note: `push_work_order()` refuses to send
+   over plaintext `http://` unless the host is a recognized loopback address
+   (`localhost`/`127.0.0.1`/`host.docker.internal` — `_is_loopback_url()`,
+   `backend/cmms_client.py`) to avoid leaking `CMMS_MCP_TOKEN` in the clear; pointing
+   `CMMS_MCP_URL` at a real LAN/public host over `http://` gets silently blocked
+   (`[CMMS push 실패] ... 차단` in the logs) rather than sent — use `https://` for anything
+   beyond loopback.
 3. **Field mapping — turned out to need none.** `work_order_node` already keeps
    `state.work_order` as one deterministic, evidence-grounded string (see its docstring);
    `push_work_order()` just reuses it verbatim as the `description` argument to

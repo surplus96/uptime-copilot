@@ -84,10 +84,11 @@ measured — `performance-profiler`.
 Roles worth adding only when the repository gives evidence for them, rather than
 because a generic team template lists them:
 
-- **data-modeler** — this project has no database. Add one when persistent
-  schemas, migrations or query patterns appear.
-- **api-designer** — nothing here exposes an API to other programs. Add one when
-  something publishes a contract others depend on.
+- **data-modeler** — the SQLite layer (`backend/store/pdm_telemetry.db`,
+  `checkpoints.db`, `chroma_db/`) is small and owned entirely by `backend/data/`.
+  Add one when migrations or non-trivial query-plan work appear.
+- **api-designer** — the FastAPI surface has exactly one consumer, the bundled
+  Streamlit app. Add one when an external client depends on the contract.
 - **release-manager** — versioning, changelogs and migration notes are currently
   small enough to sit with `docs-reviewer`. Add one when releases have
   consumers who can be broken.

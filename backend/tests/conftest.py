@@ -1,6 +1,6 @@
-"""pytest 공유 fixture. backend/를 rootdir로 실행한다는 전제(uvicorn과 동일하게
-sys.path에 backend/가 잡혀 있어야 `from data import event_store` 같은 절대 임포트가
-동작한다) - pytest.ini의 pythonpath 설정으로 보장한다."""
+"""pytest 공유 fixture. uvicorn과 동일하게 sys.path에 backend/가 잡혀 있어야
+`from data import event_store` 같은 절대 임포트가 동작한다 - 별도 pytest.ini/
+pyproject.toml 설정 없이, 바로 아래 sys.path.insert()로 이 파일이 직접 보장한다."""
 import sys
 from pathlib import Path
 

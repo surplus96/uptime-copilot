@@ -63,8 +63,9 @@ applied from that audit:
   flagged by 4 of 5 agents; the input-length rejection path was silently raising
   `NameError` (uncaught 500) instead of the intended 400 response.
 - **HITL checkpointing moved off `InMemorySaver` onto `SqliteSaver`**
-  (`backend/data/checkpoints.db`) — pending approvals no longer vanish on
-  `uvicorn --reload` or a restart.
+  (`backend/data/checkpoints.db`, → `backend/store/checkpoints.db` 이관, 09-18 폴더
+  구조 정리 참고) — pending approvals no longer vanish on `uvicorn --reload` or a
+  restart.
 - **Honest HITL outcome text**: approving/rejecting no longer claims
   "현장 책임자에게 즉시 보고되었습니다" (nothing in the codebase ever sent that report) —
   now states the decision was recorded and that reporting is a separate manual step.
@@ -144,7 +145,10 @@ value remaining `UI_UPGRADE_PLAN.md` item.
 - **No auth on any backend route** — acceptable today since `uvicorn` binds to
   `127.0.0.1` only; must be closed before any deployment beyond localhost (`--host
   0.0.0.0`, Docker, reverse proxy), especially `/events/delete` and `/agent/resume`.
-- **No lint/type-checker/test config, zero test files** anywhere in the repo.
+- ~~No lint/type-checker/test config, zero test files anywhere in the repo.~~
+  **테스트 부분 09-18 해소**: `backend/tests/`에 pytest 회귀 테스트 16개(사유는 아래 "가벼운
+  회귀 테스트" 항목과 이후 CMMS 가독성 항목 참고). lint/type-checker 설정은 여전히 없음 —
+  이 스코프에서는 우선순위 낮음으로 유지.
 - **Dependencies remain unpinned** (no lockfile) — the dead-dependency cleanup didn't
   address reproducibility.
 - **`/scan` is still a manual button** — no scheduler (e.g. APScheduler) triggers it
@@ -178,7 +182,9 @@ value remaining `UI_UPGRADE_PLAN.md` item.
   shipped 09-17, per-message mode badge decided against).
 - **No `/simulate/tick` UI control** — only reachable via direct API call (curl/Swagger),
   found while testing the event-scan fix above.
-- **No CONTRIBUTING.md, LICENSE, or CHANGELOG.md.**
+- ~~No CONTRIBUTING.md, LICENSE, or CHANGELOG.md.~~ **LICENSE 09-18 해소**: 루트에 MIT
+  라이선스 추가됨. CONTRIBUTING.md/CHANGELOG.md는 여전히 없음 — 1인 포트폴리오 프로젝트
+  스코프에서는 우선순위 낮음으로 유지.
 
 ## 재검토 사항 — MCP 도입 (2026-09-17 판단, 09-18 갱신)
 
@@ -318,7 +324,9 @@ README 환경변수 표에 이 Docker 크로스-스택 주의사항 추가.
 `backend/cmms_client.py`에 `_format_for_cmms()` 추가(블록 사이는 `▌`, 같은 블록 안
 필드는 `·`, 번호 매김 단계는 `▸`로 - 브라우저가 개행을 지워도 구분자가 살아남게) -
 `push_work_order()`에서 `_create_work_order()`에 넘기기 전 적용. 두 함수 모두 회귀
-테스트 추가(`test_notify.py`/`test_cmms_client.py`, 각 1개, 총 10개 통과) 후
+테스트 추가(`test_notify.py`/`test_cmms_client.py`, 각 1개, 두 파일 합쳐 총 10개 통과 —
+저장소 전체 pytest 스위트는 이 시점 기준 16개: `test_event_store.py` 4,
+`test_notify.py` 4, `test_cmms_client.py` 6, `test_rag_dedup.py` 2) 후
 `docker compose up -d --build backend`로 반영, healthy 확인.
 
 실제 Slack/Atlas CMMS 화면으로 사용자가 직접 확인: Slack은 기대대로 개선(라벨 굵게,

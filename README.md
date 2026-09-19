@@ -20,9 +20,13 @@ uptime-copilot/
 │   ├── store/                    Generated state (pdm_telemetry.db, checkpoints.db,
 │   │                             chroma_db/) — gitignored, separate from source so a
 │   │                             Docker volume can be mounted here without shadowing code
+│   ├── tests/                    pytest regression suite — see "Running the tests" below
 │   ├── notify.py                 Slack alerting — optional, see Environment Variables
-│   └── cmms_client.py             CMMS work-order push — optional, see PHASE_7_PLAN.md
-└── frontend/                Streamlit chat UI
+│   ├── cmms_client.py             CMMS work-order push — optional, see PHASE_7_PLAN.md
+│   └── Dockerfile
+├── frontend/                Streamlit chat UI
+│   └── Dockerfile
+└── docker-compose.yml       See "Running with Docker Compose" below
 ```
 
 ## Prerequisites
@@ -111,6 +115,15 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
+## Running the Tests
+
+```bash
+cd backend
+source .venv/bin/activate
+pytest tests/ --ignore=tests/test_rag_dedup.py   # fast path - skips the embedding-model test
+pytest tests/                                     # full suite, downloads/loads the embedding model
+```
+
 ## Environment Variables (`backend/.env`)
 
 | Variable | Required | Effect if unset |
@@ -120,6 +133,8 @@ streamlit run streamlit_app.py
 | `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` | No | LangSmith tracing disabled |
 | `SLACK_WEBHOOK_URL` | No | Slack alerts on 긴급/주의 detections are silently skipped (`backend/notify.py`) |
 | `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | No | CMMS work-order push on approval is silently skipped (`backend/cmms_client.py`); needs a running Atlas-MCP + Atlas CMMS instance if you do set these — see `PHASE_7_PLAN.md` |
+| `ALLOWED_HOSTS` | No | Extra comma-separated hostnames allowed past `TrustedHostMiddleware` (`backend/main.py`), in addition to the always-allowed `localhost`/`127.0.0.1`. `docker-compose.yml` sets this to `backend` for you (its `environment:` block always wins over whatever you put in `backend/.env` for this key) — only needed manually if you put the backend behind another hostname or reverse proxy. |
+| `BACKEND_URL` (frontend, not `backend/.env`) | No | Where the Streamlit app looks for the backend. Defaults to `http://localhost:8000`; `docker-compose.yml` sets it to `http://backend:8000` for you. |
 
 > **Running the backend in Docker with an Atlas-MCP instance on the host:** `localhost`
 > inside the `backend` container means the container itself, not your host machine, so
@@ -193,3 +208,4 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 - `.claude/agents/README.md` — the nine review/diagnosis subagents installed in this repo
   (code quality, security, pipeline, docs, interface, debugger, build-doctor, performance,
   test-engineer) and when to reach for each
+- `LICENSE` — MIT
