@@ -196,6 +196,8 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 
 ## Related Documents
 
+- `docs/PORTFOLIO.md` — architecture/design case study written for a portfolio audience
+  (diagrams, key engineering decisions, debugging war-stories)
 - `SESSION_SUMMARY.md` — running engineering log of past work sessions (a narrative log,
   not a reference — may lag behind the latest changes; verify against the code for
   anything load-bearing)
