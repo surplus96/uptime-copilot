@@ -1,8 +1,13 @@
 # Uptime Copilot
 
+[![English](https://img.shields.io/badge/English-current-0c7c8c?style=for-the-badge)](README.md)
+[![한국어](https://img.shields.io/badge/한국어-switch-555555?style=for-the-badge)](README_KOR.md)
+
 An OpenAI-based RAG + multi-agent backend, paired with a Streamlit frontend. Built around a
 manufacturing equipment maintenance domain example, backed by the Azure Predictive
 Maintenance dataset.
+
+> 📄 **[Portfolio case study →](docs/PORTFOLIO.md)** — architecture diagrams, core logic, and key engineering decisions.
 
 ## Folder Structure
 

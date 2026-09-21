@@ -1,0 +1,201 @@
+# Uptime Copilot
+
+[![English](https://img.shields.io/badge/English-switch-555555?style=for-the-badge)](README.md)
+[![한국어](https://img.shields.io/badge/한국어-현재-0c7c8c?style=for-the-badge)](README_KOR.md)
+
+OpenAI 기반 RAG + 멀티에이전트 백엔드와 Streamlit 프론트엔드로 구성된 프로젝트입니다.
+제조 설비 정비 도메인을 배경으로 하며, Azure Predictive Maintenance 데이터셋을 사용합니다.
+
+> 📄 **[포트폴리오 케이스 스터디 →](docs/PORTFOLIO_KOR.md)** — 아키텍처 다이어그램, 핵심 로직, 주요 엔지니어링 결정.
+
+## 폴더 구조
+
+```
+uptime-copilot/
+├── archive/               Azure PdM 원본 CSV (직접 다운로드 필요 - 아래 "데이터 준비" 참고)
+├── backend/                FastAPI 백엔드
+│   ├── main.py               진입점 (uvicorn main:app)
+│   ├── core/                  Harness(입출력 검증) + 시스템 프롬프트
+│   ├── rag/                    RAG 파이프라인(하이브리드 검색 + Multi-Query) + docs/
+│   │                             (`pump_manual.py`는 에이전트가 직접 읽는 정적 조회용 dict —
+│   │                             RAG로 검색하지 않음. "아키텍처 원칙" 참고)
+│   ├── agent/                  LangGraph 멀티에이전트 그래프(라우팅 + HITL + 이벤트 스캐너)
+│   ├── data/                    PdM 데이터 적재/조회 계층 + 이벤트 스토어(SQLite)
+│   ├── store/                    생성되는 상태(pdm_telemetry.db, checkpoints.db,
+│   │                             chroma_db/) — gitignore 대상. 소스와 분리해서 Docker 볼륨을
+│   │                             마운트해도 코드를 덮어쓰지 않음
+│   ├── tests/                    pytest 회귀 테스트 — 아래 "테스트 실행" 참고
+│   ├── notify.py                 Slack 알림 — 선택 사항, "환경 변수" 참고
+│   ├── cmms_client.py             CMMS 작업지시서 전송 — 선택 사항, PHASE_7_PLAN.md 참고
+│   └── Dockerfile
+├── frontend/                Streamlit 채팅 UI
+│   └── Dockerfile
+└── docker-compose.yml       아래 "Docker Compose로 실행" 참고
+```
+
+## 사전 요구사항
+
+- Python ≥3.10 (3.12에서 개발/테스트. 코드 전반에서 `X | None` 유니온 문법 사용)
+- Docker + Docker Compose (아래 수동 venv 설정을 건너뛰고 싶은 경우)
+
+## Docker Compose로 실행 (권장)
+
+데이터셋은 어떤 방식이든 직접 다운로드해야 합니다(재배포 불가라 이미지에 포함할 수 없음).
+따라서 아래 "데이터 준비"는 실행 방식과 관계없이 필요합니다.
+
+```bash
+# 1) 데이터 준비(아래 참고) — 먼저 데이터셋을 archive/에 다운로드
+
+# 2) 설정
+cp backend/.env.example backend/.env
+# backend/.env 채우기 (OPENAI_API_KEY 필수, 나머지는 선택 —
+# 아래 "환경 변수" 참고)
+
+# 3) 두 서비스 빌드 및 실행
+docker compose up -d --build
+```
+
+- 프론트엔드: http://localhost:8501 — 백엔드: http://localhost:8000 (`/docs`에서 대화형 API 문서)
+- **최초 실행은 몇 분 걸립니다**: 백엔드가 아래에 언급된 약 470MB 임베딩 모델을 컨테이너 안에서
+  내려받습니다. `docker compose logs -f backend`로 진행 상황을 볼 수 있고, 완료 전까지는
+  "starting"(아직 healthy 아님) 상태이며 프론트엔드 컨테이너는 자동으로 기다립니다 — 별도 조치 없이
+  기다리면 됩니다.
+- **최초 1회 데이터 적재는 컨테이너 안에서 직접 실행해야 합니다**(이미지에는 의도적으로 데이터를
+  넣지 않음 — `backend/.dockerignore` 참고. 그래서 처음 `docker compose up`하면 빈 DB로 시작):
+  ```bash
+  docker compose exec backend python data/pdm_dataloader.py
+  ```
+- 상태(`backend/store/`: SQLite DB와 RAG 인덱스)는 이미지가 아니라 Docker named volume에
+  저장되어 `docker compose down` / `up` 사이에도 유지됩니다. `docker compose down -v`만
+  이를 삭제합니다(그 경우 위 적재 단계를 다시 실행해야 함).
+- 두 서비스 모두 `127.0.0.1`에만 바인딩됩니다(아래 수동 설정과 동일) — LAN에 노출되지 않습니다.
+- 중지는 `docker compose down`.
+
+## Docker 없이 실행
+
+```bash
+# 백엔드
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env             # Windows: copy .env.example .env
+# .env 채우기 (OPENAI_API_KEY 필수, 나머지는 선택 - 아래 "환경 변수" 참고)
+```
+
+### 데이터 준비 (최초 1회, `pip install` 이후 첫 실행 전)
+
+1. [Microsoft Azure Predictive Maintenance 데이터셋](https://www.kaggle.com/datasets/arnabbiswas1/microsoft-azure-predictive-maintenance)을
+   다운로드합니다 (PdM_machines.csv, PdM_errors.csv, PdM_maint.csv, PdM_failures.csv,
+   PdM_telemetry.csv — PdM_telemetry.csv만 약 87만 행이라 적재에 시간이 좀 걸립니다).
+2. 파일들을 `uptime-copilot/archive/` 아래에 둡니다.
+3. 최초 1회 SQLite 적재를 실행합니다 (`backend/`에서, 위 venv 활성화 상태로):
+   ```bash
+   python data/pdm_dataloader.py
+   ```
+
+### 첫 실행
+
+```bash
+uvicorn main:app --reload --port 8000
+```
+
+최초 실행 시 `intfloat/multilingual-e5-small` 임베딩 모델(약 470MB)을 Hugging Face에서 내려받고
+RAG 인덱스를 만듭니다 — 몇 분과 네트워크 연결이 필요하며, 멈춘 것처럼 보이지만 정상입니다.
+이후 재시작은 빠릅니다.
+
+```bash
+# 프론트엔드 (별도 터미널)
+cd frontend
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+## 테스트 실행
+
+```bash
+cd backend
+source .venv/bin/activate
+pytest tests/ --ignore=tests/test_rag_dedup.py   # 빠른 경로 - 임베딩 모델 테스트 제외
+pytest tests/                                     # 전체 스위트, 임베딩 모델 다운로드/로드 포함
+```
+
+## 환경 변수 (`backend/.env`)
+
+| 변수 | 필수 | 미설정 시 동작 |
+|---|---|---|
+| `OPENAI_API_KEY` | **필수** | 백엔드가 시작되지 않음 |
+| `OPENAI_MODEL` | 선택 | 기본값 `gpt-5.6-luna` |
+| `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` | 선택 | LangSmith 트레이싱 비활성화 |
+| `SLACK_WEBHOOK_URL` | 선택 | 긴급/주의 감지 시 Slack 알림을 조용히 건너뜀 (`backend/notify.py`) |
+| `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | 선택 | 승인 시 CMMS 작업지시서 전송을 조용히 건너뜀 (`backend/cmms_client.py`). 설정한다면 실행 중인 Atlas-MCP + Atlas CMMS 인스턴스가 필요 — `PHASE_7_PLAN.md` 참고 |
+| `ALLOWED_HOSTS` | 선택 | 항상 허용되는 `localhost`/`127.0.0.1` 외에 `TrustedHostMiddleware`(`backend/main.py`)를 통과시킬 추가 호스트명(쉼표 구분). `docker-compose.yml`이 `backend`로 자동 설정하며(이 키에 한해 compose의 `environment:` 블록이 `backend/.env` 값보다 항상 우선) — 백엔드를 다른 호스트명이나 리버스 프록시 뒤에 둘 때만 직접 설정 필요. |
+| `BACKEND_URL` (프론트엔드용, `backend/.env` 아님) | 선택 | Streamlit 앱이 백엔드를 찾는 주소. 기본값 `http://localhost:8000`, `docker-compose.yml`이 `http://backend:8000`으로 자동 설정. |
+
+> **호스트에 있는 Atlas-MCP를 Docker 안의 백엔드에서 사용할 때:** `backend` 컨테이너 안의
+> `localhost`는 호스트 머신이 아니라 컨테이너 자신을 가리키므로
+> `CMMS_MCP_URL=http://localhost:PORT/mcp`는 연결에 실패합니다.
+> `http://host.docker.internal:PORT/mcp`를 쓰고, Atlas-MCP 쪽 `ALLOWED_HOSTS`에도
+> `host.docker.internal:PORT`를 추가하세요(DNS 리바인딩 방어용 Host 헤더 검사가 그렇지 않으면
+> 421로 거부합니다). `backend/cmms_client.py`의 루프백 검사는 이미 이 목적으로
+> `host.docker.internal`을 허용 목록에 넣어두었습니다.
+
+## 주요 API 엔드포인트
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| GET | `/health` | 헬스 체크 |
+| POST | `/rag/query` | RAG 기반 문서 Q&A |
+| POST | `/agent/query` | 멀티에이전트 질의 — 긴급 건이면 `pending_approval` 반환 |
+| POST | `/agent/resume` | HITL 승인/반려 결정 후 그래프 재개 |
+| POST | `/simulate/tick` | 런타임 텔레메트리 시뮬레이터를 N시간 진행 (UI 버튼 없음 — curl 또는 `/docs` Swagger 페이지로만 호출 가능. tick 없이 재스캔하면 매번 같은 결과) |
+| POST | `/scan` | 100대 설비 전체 스캔(LLM 미사용), 긴급/주의 건을 이벤트 스토어에 저장 |
+| GET | `/events` | 대기 중인 감지 이벤트 목록 |
+| POST | `/events/complete` | 이벤트를 완료 처리 — 보관되며, 진짜 새로운 근거가 있을 때만 다시 표면화 |
+| POST | `/events/delete` | 기록 없이 이벤트 폐기 (다음 스캔에서 다시 나타날 수 있음) |
+
+`/agent/query` 요청 예시:
+```json
+{"message": "Machine #12 has an error, what's wrong?", "thread_id": "unique-thread-id"}
+```
+응답이 `{"status": "pending_approval", "message": "..."}`이면, 같은 `thread_id`로
+`{"thread_id": "...", "approved": true|false}`를 `/agent/resume`에 보내 실행을 이어갑니다.
+
+## 아키텍처 원칙
+
+- **Harness**: 각 모델 호출 전후로 입출력을 검증하는 결정론적 계층(`core/harness.py`) —
+  정규식 기반 PII 체크(계산적)와 LLM-as-judge 체크(추론적)를 함께 사용.
+- **RAG**: Multi-Query 재작성 + 하이브리드(BM25 + Dense) 검색, 자동 Faithfulness 채점.
+- **Agent**: LangGraph `StateGraph` 기반. 질문을 진단 / 정비 일정 / 일반 문의 분기로 라우팅.
+  진단은 3단계 긴급도 모델을 사용: 일반(normal) / 주의(caution — Z-score 텔레메트리 이상,
+  확정 고장 아님) / 긴급(urgent — 실제 로그된 고장 기록). 긴급 건만 3개 관점 병렬 평가
+  (안전 / 생산 / 정비)를 거쳐 Human-in-the-Loop(HITL) 승인을 기다리고, 주의 건은 바로
+  작업지시서로 넘어갑니다. HITL 승인 상태는 메모리에만 두지 않고 SQLite
+  (`backend/store/checkpoints.db`)에 체크포인트되어 `--reload`/재시작에도 유지됩니다.
+  별도의 `/scan`은 동일한 진단 로직을 LLM 없이 100대 전체에 돌려 긴급/주의 건을 이벤트
+  스토어에 저장하고, 완료 처리된 이벤트는 완료 시점 이후의 진짜 새로운 근거가 나타나야만
+  이후 스캔에서 다시 표면화됩니다 — `backend/data/event_store.py` 참고.
+- **Data**: 모든 경로 상수는 현재 작업 디렉터리가 아니라 파일 자신의 위치(`Path(__file__).parent`)
+  기준으로 해석하므로, 코드를 어디서 실행하거나 옮겨도 올바르게 동작합니다. 생성/변경되는 상태
+  (`pdm_telemetry.db`, `checkpoints.db`, RAG Chroma 인덱스)는 `backend/store/` 아래에 두어,
+  Docker named volume을 마운트해도 애플리케이션 코드를 가리지 않도록 소스와 분리했습니다.
+- **Observability**: LangSmith 연동. 동일한 PII 정규식으로 만든 익명화기가 트레이스 전송 전에
+  민감 정보를 마스킹합니다.
+
+## 관련 문서
+
+- `docs/PORTFOLIO_KOR.md` — 포트폴리오 독자를 위한 아키텍처/설계 케이스 스터디
+  (다이어그램, 주요 엔지니어링 결정, 디버깅 사례)
+- `SESSION_SUMMARY.md` — 과거 작업 세션의 엔지니어링 로그 (서술형 기록이며 참고 문서가
+  아님 — 최신 변경을 반영하지 못할 수 있으니 중요한 내용은 코드로 확인)
+- `PHASE_7_PLAN.md` — **선택적 연동, 이 프로젝트 실행에 필수 아님.** Slack 알림 + CMMS
+  작업지시서 전송의 설계/진행 기록. `SLACK_WEBHOOK_URL` / `CMMS_MCP_URL` / `CMMS_MCP_TOKEN`을
+  비워두면 두 기능 모두 동작하지 않고, 앱은 이 파일에 적힌 어떤 것도 없이 완전히 동작합니다.
+- `frontend/UI_UPGRADE_PLAN.md` — 프론트엔드 개선 작업 기록. 완전히 종료되었으며 진행 중인
+  백로그가 아닌 이력으로 보관
+- `.claude/agents/README.md` — 이 저장소에 설치된 9개 리뷰/진단 서브에이전트(코드 품질, 보안,
+  파이프라인, 문서, 인터페이스, 디버거, build-doctor, 성능, 테스트 엔지니어)와 각각을 언제
+  쓰는지
+- `LICENSE` — MIT
