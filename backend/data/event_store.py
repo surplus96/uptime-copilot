@@ -73,10 +73,9 @@ def _dataset_now() -> str:
     """실제 벽시계가 아니라, 시뮬레이터가 매 틱 전진시키는 telemetry 자체의 최신 시각을
     '지금'의 기준으로 삼는다 - check_recent_failure에서 이미 겪었던 것과 같은
     데이터셋시간 vs 벽시계 혼동 함정을 피하기 위함."""
-    conn = sqlite3.connect(DB_PATH)
-    now = conn.execute("SELECT MAX(datetime) FROM telemetry").fetchone()[0]
-    conn.close()
-    return now
+    from data import sim_query
+    return sim_query.dataset_now()
+
 
 
 def complete_events(machine_ids: list[int]) -> int:

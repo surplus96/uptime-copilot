@@ -6,6 +6,7 @@ FastAPI 백엔드
 """
 
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -35,7 +36,8 @@ from core.harness import (
 )
 from rag import rag_service
 from agent import agent_service
-from data import event_simulator, event_store
+from data import event_simulator, event_store, sim_loop, sim_store
+
 
 
 load_dotenv()
@@ -76,9 +78,17 @@ CHECKPOINT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)  # 최초 실행(�
 async def lifespan(app: FastAPI):
     rag_service.initialize_rag(OPENAI_API_KEY, DEFAULT_MODEL, langsmith_client)
     event_store.init_event_table()
+    sim_store.init_sim_tables()
+    sim_task = asyncio.create_task(sim_loop.run_forever())
     with SqliteSaver.from_conn_string(str(CHECKPOINT_DB_PATH)) as checkpointer:
         agent_service.initialize_agent(langsmith_client, checkpointer)
         yield
+    sim_task.cancel()
+    try:
+        await sim_task
+    except asyncio.CancelledError:
+        pass
+
 
 
 
@@ -224,10 +234,43 @@ def simulate_tick(hours: int = 1):
     return event_simulator.generate_tick(hours=hours)
 
 @app.post("/scan")
-def scan_machines():
+def trigger_scan():
     """전체 설비를 스캔해서 긴급/주의로 판정된 설비를 이벤트 저장소에 적재한다."""
     detected = agent_service.scan_all_machines()
     return {"detected_count": len(detected), "events": detected}
+
+@app.post("/simulator/start")
+def simulator_start():
+    sim_loop.start()
+    return {"running": True}
+
+
+@app.post("/simulator/stop")
+def simulator_stop():
+    sim_loop.stop()
+    return {"running": False}
+
+
+@app.get("/simulator/status")
+def simulator_status():
+    return sim_loop.status()
+
+
+class SimulatorInjectRequest(BaseModel):
+    machine_id: int
+    signal: str | None = None
+
+
+@app.post("/simulator/inject")
+def simulator_inject(req: SimulatorInjectRequest):
+    return sim_loop.inject(req.machine_id, req.signal)
+
+
+@app.post("/simulator/reset")
+def simulator_reset():
+    sim_loop.reset()
+    return {"status": "reset"}
+
 
 
 class EventIdsRequest(BaseModel):

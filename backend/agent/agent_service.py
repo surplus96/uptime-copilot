@@ -185,32 +185,39 @@ def diagnosis_node(state: SupervisorState) -> dict:
     return {k: v for k, v in result.items() if k != "evidence_at"}
 
 
-def scan_all_machines() -> list[dict]:
-    """전체 100대 설비를 LLM 없이 순수 데이터로 스캔한다. 완료 처리된 설비는
-    그 이후 실제로 새 근거(evidence_at)가 생긴 경우에만 재등장한다."""
+def scan_machines(machine_ids) -> tuple[list[dict], list[str]]:
+    """주어진 설비 목록만 스캔한다. 결과와, '진짜 새로운' 알림 문구 목록을 함께 돌려준다 -
+    개별 발송할지 묶어서 보낼지는 호출부가 정한다."""
     from data import event_store
 
     completed_evidence_map = event_store.get_completed_evidence_map()
     already_detected_map = event_store.get_detected_evidence_map()
     detected = []
-    for machine_id in range(1, 101):
+    alerts = []
+    for machine_id in machine_ids:
         result = _diagnose_machine(machine_id, within_days=1)
         if result["severity"] not in ("긴급", "주의"):
             continue
         completed_evidence_at = completed_evidence_map.get(machine_id)
         if completed_evidence_at and result["evidence_at"] and result["evidence_at"] <= completed_evidence_at:
-            continue  # 완료 처리 당시 근거보다 새 근거가 없음 - 재등장 안 시킴
-        # 이미 목록에 있고 근거도 그대로면(=이전 스캔 때 이미 알렸으면) 또 알리지 않는다 -
-        # save_event는 계속 하되(INSERT OR REPLACE, 상태 유지 목적) 알림만 생략한다.
-        # 근거(evidence_at)가 바뀐 경우는 진짜 새 정보이므로 다시 알린다
-        # (code-quality-reviewer 지적, 2026-09-18 - 재스캔마다 같은 알림이 중복 발송되던 문제).
+            continue
         is_genuinely_new = already_detected_map.get(machine_id) != result["evidence_at"]
         event_store.save_event(machine_id, result["severity"], result["diagnosis"], result["evidence_at"])
         if is_genuinely_new:
-            notify.send_alert(f"[{result['severity']}] 설비 #{machine_id} 이상 감지\n{result['diagnosis']}")
-            time.sleep(1)
+            alerts.append(f"[{result['severity']}] 설비 #{machine_id} 이상 감지\n{result['diagnosis']}")
         detected.append(result)
+    return detected, alerts
+
+
+def scan_all_machines() -> list[dict]:
+    """전체 100대 설비를 LLM 없이 순수 데이터로 스캔한다. 완료 처리된 설비는
+    그 이후 실제로 새 근거(evidence_at)가 생긴 경우에만 재등장한다."""
+    detected, alerts = scan_machines(range(1, 101))
+    for text in alerts:
+        notify.send_alert(text)
+        time.sleep(1)
     return detected
+
 
 
 

@@ -21,6 +21,8 @@ uptime-copilot/
 │   │                             RAG로 검색하지 않음. "아키텍처 원칙" 참고)
 │   ├── agent/                  LangGraph 멀티에이전트 그래프(라우팅 + HITL + 이벤트 스캐너)
 │   ├── data/                    PdM 데이터 적재/조회 계층 + 이벤트 스토어(SQLite)
+│   │                             (`sim_*.py`: 자동 열화 시뮬레이터 —
+│   │                             "아키텍처 원칙"과 `SIMULATOR_PLAN.md` 참고)
 │   ├── store/                    생성되는 상태(pdm_telemetry.db, checkpoints.db,
 │   │                             chroma_db/) — gitignore 대상. 소스와 분리해서 Docker 볼륨을
 │   │                             마운트해도 코드를 덮어쓰지 않음
@@ -133,6 +135,9 @@ pytest tests/                                     # 전체 스위트, 임베딩 
 | `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | 선택 | 승인 시 CMMS 작업지시서 전송을 조용히 건너뜀 (`backend/cmms_client.py`). 설정한다면 실행 중인 Atlas-MCP + Atlas CMMS 인스턴스가 필요 — `PHASE_7_PLAN.md` 참고 |
 | `ALLOWED_HOSTS` | 선택 | 항상 허용되는 `localhost`/`127.0.0.1` 외에 `TrustedHostMiddleware`(`backend/main.py`)를 통과시킬 추가 호스트명(쉼표 구분). `docker-compose.yml`이 `backend`로 자동 설정하며(이 키에 한해 compose의 `environment:` 블록이 `backend/.env` 값보다 항상 우선) — 백엔드를 다른 호스트명이나 리버스 프록시 뒤에 둘 때만 직접 설정 필요. |
 | `BACKEND_URL` (프론트엔드용, `backend/.env` 아님) | 선택 | Streamlit 앱이 백엔드를 찾는 주소. 기본값 `http://localhost:8000`, `docker-compose.yml`이 `http://backend:8000`으로 자동 설정. |
+| `SIM_TICK_SECONDS` | 선택 | 기본값 `60` — 자동 열화 시뮬레이터가 켜져 있을 때 실제 몇 초마다 한 번씩 전진할지 |
+| `SIM_HOURS_PER_TICK` | 선택 | 기본값 `1` — 한 번 전진할 때 시뮬레이션 시간으로 몇 시간을 진행할지 |
+| `SIM_SEED` | 선택 | 기본값 `42` — 시뮬레이터 난수 시드. `POST /simulator/reset`을 호출하면 이 시드로 새로 시작 |
 
 > **호스트에 있는 Atlas-MCP를 Docker 안의 백엔드에서 사용할 때:** `backend` 컨테이너 안의
 > `localhost`는 호스트 머신이 아니라 컨테이너 자신을 가리키므로
@@ -150,11 +155,16 @@ pytest tests/                                     # 전체 스위트, 임베딩 
 | POST | `/rag/query` | RAG 기반 문서 Q&A |
 | POST | `/agent/query` | 멀티에이전트 질의 — 긴급 건이면 `pending_approval` 반환 |
 | POST | `/agent/resume` | HITL 승인/반려 결정 후 그래프 재개 |
-| POST | `/simulate/tick` | 런타임 텔레메트리 시뮬레이터를 N시간 진행 (UI 버튼 없음 — curl 또는 `/docs` Swagger 페이지로만 호출 가능. tick 없이 재스캔하면 매번 같은 결과) |
+| POST | `/simulate/tick` | 정적 데이터셋의 telemetry를 수동으로 N시간 진행 (UI 버튼 없음 — curl 또는 `/docs` Swagger 페이지로만 호출 가능). 원본 `telemetry` 테이블에 직접 기록하며, 아래 자동 시뮬레이터와는 별개 경로 |
 | POST | `/scan` | 100대 설비 전체 스캔(LLM 미사용), 긴급/주의 건을 이벤트 스토어에 저장 |
 | GET | `/events` | 대기 중인 감지 이벤트 목록 |
 | POST | `/events/complete` | 이벤트를 완료 처리 — 보관되며, 진짜 새로운 근거가 있을 때만 다시 표면화 |
 | POST | `/events/delete` | 기록 없이 이벤트 폐기 (다음 스캔에서 다시 나타날 수 있음) |
+| POST | `/simulator/start` | 자동 열화 시뮬레이터 백그라운드 루프 시작 (현재 상태에서 이어감) |
+| POST | `/simulator/stop` | 루프 정지 |
+| GET | `/simulator/status` | 실행 여부, 시뮬레이션 시각, 열화 진행 중인 설비 목록, `has_stale_events` |
+| POST | `/simulator/inject` | 특정 설비를 강제로 강하게 열화시킴, 데모용 (`{"machine_id": 12}`) |
+| POST | `/simulator/reset` | 시뮬레이터 상태/데이터 **및** 감지/완료 이벤트 테이블 전체 초기화 — 새로 시작하기 전에 호출. 자동으로는 지워지지 않음. `SIMULATOR_PLAN.md` 참고 |
 
 `/agent/query` 요청 예시:
 ```json
@@ -177,6 +187,13 @@ pytest tests/                                     # 전체 스위트, 임베딩 
   별도의 `/scan`은 동일한 진단 로직을 LLM 없이 100대 전체에 돌려 긴급/주의 건을 이벤트
   스토어에 저장하고, 완료 처리된 이벤트는 완료 시점 이후의 진짜 새로운 근거가 나타나야만
   이후 스캔에서 다시 표면화됩니다 — `backend/data/event_store.py` 참고.
+- **자동 시뮬레이터**: `backend/data/sim_engine.py`/`sim_store.py`/`sim_query.py`/`sim_loop.py`가
+  백그라운드 열화 모델을 돌립니다(설비별 상태 머신: HEALTHY → DEGRADING → FAULT → 고장+정비).
+  실제 데이터셋에서 측정한 통계(편차 크기, 리드 타임, 오류 동시발생 등 — `SIMULATOR_PLAN.md`
+  참고)로 보정했습니다. 원본과 분리된 `sim_*` 테이블에만 기록하고(원본 읽기 전용 데이터는
+  건드리지 않음), `asyncio` 백그라운드 태스크가 `SIM_TICK_SECONDS`마다 한 번씩 전진시키며,
+  매 틱마다 증분 스캔과 새로 감지된 건을 묶은 Slack 알림이 뒤따릅니다. 완전히 선택 사항이라
+  꺼져 있어도(기본값) 앱은 동일하게 동작합니다.
 - **Data**: 모든 경로 상수는 현재 작업 디렉터리가 아니라 파일 자신의 위치(`Path(__file__).parent`)
   기준으로 해석하므로, 코드를 어디서 실행하거나 옮겨도 올바르게 동작합니다. 생성/변경되는 상태
   (`pdm_telemetry.db`, `checkpoints.db`, RAG Chroma 인덱스)는 `backend/store/` 아래에 두어,
@@ -188,6 +205,8 @@ pytest tests/                                     # 전체 스위트, 임베딩 
 
 - `docs/PORTFOLIO_KOR.md` — 포트폴리오 독자를 위한 아키텍처/설계 케이스 스터디
   (다이어그램, 주요 엔지니어링 결정, 디버깅 사례)
+- `SIMULATOR_PLAN.md` — 자동 열화 시뮬레이터 설계 기록: 실측 보정 데이터, 상태 머신,
+  백그라운드 루프, `/simulator/*` API
 - `SESSION_SUMMARY.md` — 과거 작업 세션의 엔지니어링 로그 (서술형 기록이며 참고 문서가
   아님 — 최신 변경을 반영하지 못할 수 있으니 중요한 내용은 코드로 확인)
 - `PHASE_7_PLAN.md` — **선택적 연동, 이 프로젝트 실행에 필수 아님.** Slack 알림 + CMMS

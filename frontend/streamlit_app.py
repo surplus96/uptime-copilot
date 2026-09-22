@@ -283,17 +283,76 @@ with tab2:
             with st.expander("📄 참고한 매뉴얼 원문 보기"):
                 st.text(rag_result["context"])
 
+@st.fragment(run_every="10s")
+def _simulator_panel():
+    try:
+        res = requests.get(f"{BACKEND_URL}/simulator/status", timeout=10)
+        res.raise_for_status()
+        status = res.json()
+    except requests.exceptions.RequestException as e:
+        st.warning(f"시뮬레이터 상태 조회 실패: {_extract_error_message(e)}")
+        return
+
+    with st.container(border=True):
+        col1, col2, col3 = st.columns([2, 2, 1])
+        running = status["running"]
+        col1.markdown(f"{'🟢 실행 중' if running else '⏸️ 정지'} · 시뮬레이션 시각: `{status['sim_now'] or '없음'}`")
+
+        speed = f"속도: 실제 {status['tick_seconds']}초 = 시뮬레이션 {status['hours_per_tick']}시간"
+        if running and status["elapsed_seconds"] is not None:
+            m, s = divmod(status["elapsed_seconds"], 60)
+            speed += f" · 실행 경과 {m}분 {s}초"
+        col2.caption(speed)
+
+        if running:
+            if col3.button("정지", key="sim_stop"):
+                requests.post(f"{BACKEND_URL}/simulator/stop", timeout=10)
+                st.rerun()
+        else:
+            if col3.button("시작", key="sim_start"):
+                requests.post(f"{BACKEND_URL}/simulator/start", timeout=10)
+                st.rerun()
+
+        if running and status["seconds_since_last_tick"] is not None:
+            remaining = max(0, status["tick_seconds"] - status["seconds_since_last_tick"])
+            st.caption(f"⏳ 다음 틱까지 약 {remaining}초 (10초마다 이 화면 자동 갱신)")
+
+        if status["has_stale_events"]:
+            st.warning("설비는 전부 정상인데 감지 목록에 이전 데이터가 남아있습니다. 시뮬레이터를 새로 시작하기 전에 리셋을 권장합니다.")
+
+        col_r1, col_r2 = st.columns([3, 1])
+        col_r1.caption("리셋: 시뮬레이션 상태·데이터와 감지 목록을 전부 초기화합니다(자동으로는 지워지지 않음).")
+        if col_r2.button("리셋", key="sim_reset"):
+            requests.post(f"{BACKEND_URL}/simulator/reset", timeout=10)
+            st.session_state.pop("sim_event_count", None)
+            st.rerun()
+
+        degrading = status["degrading"]
+        if degrading:
+            st.caption(f"열화 진행 중인 설비 {len(degrading)}대")
+            for d in sorted(degrading, key=lambda x: -x["progress"]):
+                label = f"설비 #{d['machine_id']} · {d['signal']} · {d['state']} · 오류 {d['errors_emitted']}건"
+                st.progress(min(d["progress"], 1.0), text=label)
+        else:
+            st.caption("현재 열화 진행 중인 설비 없음")
+
+    try:
+        ev_res = requests.get(f"{BACKEND_URL}/events", params={"limit": 1}, timeout=10)
+        ev_res.raise_for_status()
+        current_total = ev_res.json()["total"]
+    except requests.exceptions.RequestException:
+        current_total = st.session_state.get("sim_event_count")
+
+    if current_total is not None and current_total != st.session_state.get("sim_event_count"):
+        st.session_state.sim_event_count = current_total
+        st.rerun()
+
 
 # ---------- 이상감지 이벤트 모드 ----------
 with tab3:
     st.subheader("🔔 감지된 이상 이벤트")
-    st.caption("전체 설비를 스캔해서 긴급/주의로 판정된 설비 목록입니다. 확인이 필요하면 '설비 에이전트' 탭에서 직접 조회하세요.")
-    st.caption("🔴 긴급: 실제 고장 이력 확인됨 · 🟡 주의: 통계적 이상 징후(사전 경보), 고장 확정 아님")
-    st.caption(
-        "⏱️ 진단 내용의 날짜(예: 2016-01-01)는 오늘 날짜가 아니라 시뮬레이션 데이터셋 자체의 시각입니다 "
-        "(Azure PdM 데이터셋 2014~2016년 + `/simulate/tick`으로 전진시킨 시간). "
-        "'마지막 스캔'만 실제 스캔 버튼을 누른 오늘 시각입니다."
-    )
+    _simulator_panel()
+    st.divider()
     
     if "event_feedback" in st.session_state:
         st.success(st.session_state.pop("event_feedback"))

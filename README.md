@@ -22,6 +22,8 @@ uptime-copilot/
 │   │                             directly — not retrieved via RAG; see Architecture Principles)
 │   ├── agent/                  LangGraph multi-agent graph (routing + HITL + event scanner)
 │   ├── data/                    PdM data ingestion/query layer + event store (SQLite)
+│   │                             (`sim_*.py`: automated runtime degradation simulator —
+│   │                             see "Architecture Principles" and `SIMULATOR_PLAN.md`)
 │   ├── store/                    Generated state (pdm_telemetry.db, checkpoints.db,
 │   │                             chroma_db/) — gitignored, separate from source so a
 │   │                             Docker volume can be mounted here without shadowing code
@@ -140,6 +142,9 @@ pytest tests/                                     # full suite, downloads/loads 
 | `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | No | CMMS work-order push on approval is silently skipped (`backend/cmms_client.py`); needs a running Atlas-MCP + Atlas CMMS instance if you do set these — see `PHASE_7_PLAN.md` |
 | `ALLOWED_HOSTS` | No | Extra comma-separated hostnames allowed past `TrustedHostMiddleware` (`backend/main.py`), in addition to the always-allowed `localhost`/`127.0.0.1`. `docker-compose.yml` sets this to `backend` for you (its `environment:` block always wins over whatever you put in `backend/.env` for this key) — only needed manually if you put the backend behind another hostname or reverse proxy. |
 | `BACKEND_URL` (frontend, not `backend/.env`) | No | Where the Streamlit app looks for the backend. Defaults to `http://localhost:8000`; `docker-compose.yml` sets it to `http://backend:8000` for you. |
+| `SIM_TICK_SECONDS` | No | Defaults to `60` — how often (real seconds) the background degradation simulator advances, when running (see below) |
+| `SIM_HOURS_PER_TICK` | No | Defaults to `1` — simulated hours advanced per tick |
+| `SIM_SEED` | No | Defaults to `42` — RNG seed for the simulator; a fresh `POST /simulator/reset` starts a new run from this seed |
 
 > **Running the backend in Docker with an Atlas-MCP instance on the host:** `localhost`
 > inside the `backend` container means the container itself, not your host machine, so
@@ -157,11 +162,16 @@ pytest tests/                                     # full suite, downloads/loads 
 | POST | `/rag/query` | RAG-based document Q&A |
 | POST | `/agent/query` | Multi-agent query — returns `pending_approval` on urgent findings |
 | POST | `/agent/resume` | Resume the graph after an HITL approval/rejection decision |
-| POST | `/simulate/tick` | Advance the runtime telemetry simulator by N hours (no UI button for this — curl or the `/docs` Swagger page only; without ticking, rescanning returns the same results every time) |
+| POST | `/simulate/tick` | Manually advance the static dataset's telemetry by N hours (no UI button — curl or the `/docs` Swagger page only). Writes straight to the original `telemetry` table; independent of the automated simulator below. |
 | POST | `/scan` | Sweep all 100 machines (no LLM), saving 긴급/주의 findings to the event store |
 | GET | `/events` | List pending detected events |
 | POST | `/events/complete` | Mark events completed — archived, and only re-surfaces on genuinely new evidence |
 | POST | `/events/delete` | Discard events with no record kept (they can reappear on the next scan) |
+| POST | `/simulator/start` | Start the automated background degradation simulator (resumes from its current state) |
+| POST | `/simulator/stop` | Stop the background loop |
+| GET | `/simulator/status` | Running state, simulated clock, degrading-machine list, `has_stale_events` flag |
+| POST | `/simulator/inject` | Force a specific machine into a strong degradation, for demos (`{"machine_id": 12}`) |
+| POST | `/simulator/reset` | Wipe simulator state/data **and** the detected/completed event tables — call this before a fresh run; nothing is cleared automatically. See `SIMULATOR_PLAN.md` |
 
 Example `/agent/query` request:
 ```json
@@ -190,6 +200,14 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
   (no LLM) across all 100 machines and stores 긴급/주의 findings in an event store;
   a completed event only re-surfaces on a later scan once genuinely new evidence
   (postdating the completion time) appears — see `backend/data/event_store.py`.
+- **Automated simulator**: `backend/data/sim_engine.py`/`sim_store.py`/`sim_query.py`/`sim_loop.py`
+  drive a background degradation model (state machine per machine: HEALTHY → DEGRADING →
+  FAULT → failure+repair), calibrated against measured statistics from the real dataset
+  (drift magnitude, lead time, error co-occurrence — see `SIMULATOR_PLAN.md`). It writes to
+  separate `sim_*` tables (never touching the original read-only data), an
+  `asyncio` background task ticks it forward every `SIM_TICK_SECONDS`, and each tick
+  triggers an incremental scan + a batched Slack alert for genuinely new detections. Fully
+  optional — the app works identically with it stopped (the default on startup).
 - **Data**: All path constants are resolved relative to the file's own location
   (`Path(__file__).parent`) rather than the current working directory, so they remain
   correct regardless of where the code is run from or moved to. Generated/mutable
@@ -203,6 +221,8 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 
 - `docs/PORTFOLIO.md` — architecture/design case study written for a portfolio audience
   (diagrams, key engineering decisions, debugging war-stories)
+- `SIMULATOR_PLAN.md` — design record for the automated degradation simulator: measured
+  calibration data, state machine, background loop, and the `/simulator/*` API
 - `SESSION_SUMMARY.md` — running engineering log of past work sessions (a narrative log,
   not a reference — may lag behind the latest changes; verify against the code for
   anything load-bearing)

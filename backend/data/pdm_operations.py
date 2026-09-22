@@ -4,6 +4,7 @@ errors/maint/failures는 SQLite에서 매번 조회한다 - 이벤트 시뮬레�
 새 행을 재시작 없이 바로 인식하기 위함이다.
 """
 import sqlite3
+from data import sim_query
 from pathlib import Path
 
 import pandas as pd
@@ -40,50 +41,44 @@ def get_machine_info(machine_id: int) -> dict:
     row = _machines[_machines["machineID"] == machine_id]
     return row.iloc[0].to_dict() if not row.empty else {"error": f"machineID {machine_id} 없음"}
 
-
 def get_recent_errors(machine_id: int, limit: int = 3) -> list[dict]:
     """이 설비의 최근 오류(가동 지속되는 경고성) 이력 + 의미를 함께 반환한다."""
-    df = _query_df(
-        "SELECT datetime, errorID FROM errors WHERE machineID = ? ORDER BY datetime DESC LIMIT ?",
-        (machine_id, limit),
-    )
+    if sim_query.machine_has_sim_failure(machine_id):
+        rows = sim_query.sim_only_rows("sim_errors", ["datetime", "errorID"], machine_id, limit)
+    else:
+        rows = sim_query.recent_rows("errors", "sim_errors", ["datetime", "errorID"], machine_id, limit)
     return [
-        {"datetime": str(r["datetime"]), "errorID": r["errorID"], "description": ERROR_DESCRIPTIONS.get(r["errorID"], "알 수 없음")}
-        for _, r in df.iterrows()
+        {"datetime": str(dt), "errorID": eid, "description": ERROR_DESCRIPTIONS.get(eid, "알 수 없음")}
+        for dt, eid in reversed(rows)
     ]
+
 
 def check_recent_failure(machine_id: int, within_days: int = 30) -> dict | None:
     """최근 N일 내 실제 고장(failures) 기록이 있으면 반환한다 - HITL '긴급' 판정 기준."""
-    df = _query_df(
-        "SELECT datetime, failure FROM failures WHERE machineID = ? ORDER BY datetime DESC",
-        (machine_id,),
-    )
-    if df.empty:
+    rows = sim_query.recent_rows("failures", "sim_failures", ["datetime", "failure"], machine_id, 1)
+    if not rows:
         return None
-    latest = df.iloc[0]
-    now_df = _query_df("SELECT MAX(datetime) as datetime FROM failures")  # <- max_dt -> datetime으로 별칭 수정
-    dataset_now = now_df["datetime"].iloc[0]
-    days_ago = (dataset_now - latest["datetime"]).days
+    latest_dt, latest_failure = rows[-1]
+    dataset_now = sim_query.dataset_now()
+    days_ago = (pd.Timestamp(dataset_now) - pd.Timestamp(latest_dt)).days
     if days_ago > within_days:
         return None
     return {
-        "datetime": str(latest["datetime"]),
-        "component": latest["failure"],
-        "description": COMPONENT_DESCRIPTIONS.get(latest["failure"], "알 수 없음"),
+        "datetime": str(latest_dt),
+        "component": latest_failure,
+        "description": COMPONENT_DESCRIPTIONS.get(latest_failure, "알 수 없음"),
     }
 
 
 def estimate_next_maintenance(machine_id: int) -> dict:
     """정비 이력의 평균 주기를 계산해서 다음 예상 점검일을 산출한다."""
-    df = _query_df(
-        "SELECT datetime FROM maint WHERE machineID = ? ORDER BY datetime",
-        (machine_id,),
-    )
-    if len(df) < 2:
+    rows = sim_query.all_rows("maint", "sim_maint", ["datetime"], machine_id)
+    if len(rows) < 2:
         return {"next_due_estimate": "이력 부족으로 추정 불가"}
-    intervals = df["datetime"].diff().dropna()
+    dates = pd.to_datetime([r[0] for r in rows])
+    intervals = pd.Series(dates).diff().dropna()
     avg_interval = intervals.mean()
-    last_date = df["datetime"].iloc[-1]
+    last_date = dates[-1]
     return {
         "last_maintenance": str(last_date),
         "average_interval_days": round(avg_interval.total_seconds() / 86400, 1),
