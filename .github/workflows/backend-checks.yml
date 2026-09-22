@@ -1,0 +1,38 @@
+name: Backend checks
+
+# ruff/mypy/pytest만 돈다 - 2026-09-22 sim_only_now() 삭제 사고(테스트 하나로도 안
+# 잡히고 배포 후에야 500으로 드러남) 재발 방지용. OPENAI_API_KEY 없이 돈다: 테스트가
+# import하는 모듈 중 OpenAI 클라이언트를 모듈 레벨에서 만드는 agent_service.py/main.py는
+# 어떤 테스트도 직접 import하지 않는다(ruff/mypy는 소스만 정적으로 읽지 실행하지 않음).
+on:
+  push:
+    branches: [main, workspace-mac, workspace-mac-2]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install mypy ruff
+
+      - name: ruff
+        run: python -m ruff check .
+
+      - name: mypy (data/ + cmms_client.py)
+        run: python -m mypy
+
+      - name: pytest (fast path - skips the embedding-model test)
+        run: python -m pytest tests/ --ignore=tests/test_rag_dedup.py

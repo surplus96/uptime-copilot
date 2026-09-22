@@ -61,6 +61,7 @@ def step(m: MachineSim, rng: random.Random, hour_of_day: int) -> dict:
             m.elapsed = 0
             m.errors_emitted = 0
     else:
+        assert m.signal is not None, "signal은 HEALTHY가 아닌 상태에서 항상 설정돼 있어야 한다"
         m.elapsed += 1
         offsets[m.signal] = m.drift_sigma * m.direction * min(m.elapsed / RAMP_UP_HOURS, 1.0)
 

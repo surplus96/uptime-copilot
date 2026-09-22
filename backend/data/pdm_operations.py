@@ -4,10 +4,11 @@ errors/maint/failures는 SQLite에서 매번 조회한다 - 이벤트 시뮬레�
 새 행을 재시작 없이 바로 인식하기 위함이다.
 """
 import sqlite3
-from data import sim_query
 from pathlib import Path
 
 import pandas as pd
+
+from data import sim_query
 
 DATA_DIR = str(Path(__file__).parent.parent.parent / "archive")
 DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")

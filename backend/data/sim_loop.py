@@ -118,7 +118,7 @@ def status() -> dict:
         "elapsed_seconds": round(now - float(started_at)) if running and started_at else None,
         "seconds_since_last_tick": round(now - float(last_tick_at)) if last_tick_at else None,
         "last_error": _get_control("last_error") or None,
-        "consecutive_failures": int(_get_control("consecutive_failures", "0")),
+        "consecutive_failures": int(_get_control("consecutive_failures", "0") or "0"),
     }
 
 
@@ -143,7 +143,7 @@ def inject(machine_id: int, signal: str | None = None) -> dict:
         return {"machine_id": machine_id, "signal": m.signal, "drift_sigma": round(m.drift_sigma, 2)}
 
 
-def _signal_values(machine_id: int, offsets: dict[str, float], rng: random.Random) -> tuple[float, float, float, float]:
+def _signal_values(machine_id: int, offsets: dict[str, float], rng: random.Random) -> tuple[float, ...]:
     baseline = _baseline(machine_id)
     values = []
     for sig in sim_engine.SIGNALS:

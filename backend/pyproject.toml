@@ -1,0 +1,27 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+warn_unused_ignores = true
+# data/ 전체 + cmms_client.py만 검사한다(2026-09-22 실제로 0 에러로 정리함).
+# agent/agent_service.py는 아직 범위 밖 - OpenAI SDK의 겹친 오버로드 타입 정의
+# 때문에 나는 노이즈성 에러가 대부분이라, 이번엔 손대지 않고 범위에서 제외했다.
+# 넓히려면 여기 목록에 "agent"를 추가하면 된다.
+files = ["data", "cmms_client.py"]
+
+[[tool.mypy.overrides]]
+# sim_loop.py가 agent_service를 import하기 때문에 mypy가 따라 들어가서 검사한다 -
+# files 목록에서 뺀 것만으로는 안 막혀서 명시적으로 무시한다.
+module = "agent.agent_service"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

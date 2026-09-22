@@ -358,5 +358,24 @@ HEALTHY인데 `detected_events`에 행이 있으면 `true` — "지금 보이는
 `pdm_telemetry.get_recent_telemetry()`(호출자 0) 전부 삭제. README(EN/KOR) 엔드포인트
 표에서도 제거. 사용자 승인 하에 진행(기존 기능 제거라 별도 확인 거침).
 
+**즉시 반영 (8번째 커밋, lint/타입체커/CI)**: 사용자 승인 하에 진행.
+- `backend/pyproject.toml` 신설: ruff(E/F/I 규칙) + mypy + pytest 설정.
+- mypy 범위는 `data/` 전체 + `cmms_client.py`(둘 다 이번 세션에 새로 만들거나 많이
+  건드린 코드) - 실제로 돌려보니 23개 에러가 나왔는데, `sim_engine.py`/`sim_store.py`/
+  `sim_loop.py`/`event_store.py`/`cmms_client.py`의 8개는 실제 버그 소지가 있는
+  타입 문제라 전부 고침(예: `event_store._dataset_now()`가 `-> str`로 선언돼
+  있었지만 실제로는 텔레메트리가 완전히 비어있으면 `None`을 반환할 수 있었음).
+  `agent/agent_service.py`의 나머지 13개는 OpenAI SDK 오버로드 타입 정의가
+  겹쳐서 나는 노이즈성 에러 위주라, 지금은 손대지 않고 `ignore_errors=true`로
+  범위에서 뺐다(주석에 이유와 확장 방법 남겨둠). **최종: mypy 0 에러.**
+- ruff는 import 정렬 9건 + 불필요한 f-string 1건을 자동 수정(동작 변화 없음,
+  `--fix`로 처리). `rag/generate_docs.py`의 import 순서 위반 1건은 `sys.path.insert`
+  뒤에 오는 게 의도된 배치 스크립트라 그대로 둠.
+- `.github/workflows/backend-checks.yml` 신설 - push/PR마다 ruff+mypy+pytest(RAG
+  제외 빠른 경로) 실행. `OPENAI_API_KEY` 없이 돈다(테스트가 import하는 모듈 중
+  OpenAI 클라이언트를 모듈 레벨에서 만드는 파일은 어떤 테스트도 직접 import 안 함).
+- 재빌드 + 실제 컨테이너로 정상 흐름(에이전트 쿼리) 재확인 완료.
+
 **아직 미반영 (다음 라운드, P2 - 배포를 막는 수준 아님)**:
 - `DB_PATH` 8곳 통합, `sim_loop.py`를 클래스로 전환(파일이 더 커질 경우에만)
+- `agent/agent_service.py`의 mypy 범위 확장(OpenAI SDK 타입 정리 필요)

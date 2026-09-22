@@ -69,10 +69,12 @@ def list_events(limit: int = 10) -> dict:
     conn.close()
     return {"total": total, "events": [dict(r) for r in rows]}
 
-def _dataset_now() -> str:
+def _dataset_now() -> str | None:
     """실제 벽시계가 아니라, 시뮬레이터가 매 틱 전진시키는 telemetry 자체의 최신 시각을
     '지금'의 기준으로 삼는다 - check_recent_failure에서 이미 겪었던 것과 같은
-    데이터셋시간 vs 벽시계 혼동 함정을 피하기 위함."""
+    데이터셋시간 vs 벽시계 혼동 함정을 피하기 위함. telemetry가 완전히 빈 상태
+    (최초 부팅, 데이터 적재 전)면 None을 돌려준다 - 예전엔 -> str로 선언돼 있었지만
+    실제로는 None이 나올 수 있었다(2026-09-22 mypy 도입 중 발견)."""
     from data import sim_query
     return sim_query.dataset_now()
 

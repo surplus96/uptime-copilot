@@ -5,6 +5,7 @@ telemetry 실시간 조회 계층. pdm_data_loader.py가 미리 만들어둔 SQL
 
 import sqlite3
 from pathlib import Path
+
 import pandas as pd
 
 from data import sim_query

@@ -11,16 +11,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))  # backend/ 를 import 경로에 추가
 
 from data.pdm_operations import (
-    ERROR_DESCRIPTIONS,
     COMPONENT_DESCRIPTIONS,
+    ERROR_DESCRIPTIONS,
     get_component_failure_stats,
 )
 
 DB_PATH = Path(__file__).parent.parent / "store" / "pdm_telemetry.db"
 from pump_manual import (
-    PUMP_MAINTENANCE_PROCEDURES,
-    ERROR5_NOTE,
     ANOMALY_PREWARNING_NOTE,
+    ERROR5_NOTE,
+    PUMP_MAINTENANCE_PROCEDURES,
     SIGNAL_TO_COMPONENT,
 )
 

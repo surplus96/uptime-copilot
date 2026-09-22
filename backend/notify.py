@@ -7,9 +7,9 @@ Slack 알림 - 결정론적 트리거(긴급/주의 신규 감지, 승인 결과
 
 import os
 import re
+
 import requests
 from dotenv import load_dotenv
-
 
 load_dotenv()
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")

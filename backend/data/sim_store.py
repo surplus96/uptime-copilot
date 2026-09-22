@@ -43,13 +43,12 @@ def save_states(states: dict[int, MachineSim], conn: sqlite3.Connection | None =
     텔레메트리는 남고 상태는 전 틱으로 되돌아가는 불일치가 생긴다). conn 없이
     부르면 기존처럼 자체 커넥션을 열고 바로 커밋한다."""
     own_conn = conn is None
-    if own_conn:
-        conn = sqlite3.connect(DB_PATH)
-    conn.executemany(
+    active_conn = conn if conn is not None else sqlite3.connect(DB_PATH)
+    active_conn.executemany(
         "INSERT OR REPLACE INTO sim_state VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [(m.machine_id, m.state, m.signal, m.direction, m.drift_sigma, m.lead_hours, m.elapsed, m.errors_emitted)
          for m in states.values()],
     )
     if own_conn:
-        conn.commit()
-        conn.close()
+        active_conn.commit()
+        active_conn.close()
