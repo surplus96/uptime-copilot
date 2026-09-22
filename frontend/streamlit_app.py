@@ -283,6 +283,10 @@ with tab2:
             with st.expander("📄 참고한 매뉴얼 원문 보기"):
                 st.text(rag_result["context"])
 
+_SIGNAL_LABELS = {"volt": "전압", "rotate": "회전", "pressure": "압력", "vibration": "진동"}
+_STATE_LABELS = {"DEGRADING": "열화 중", "FAULT": "전조 오류 발생"}
+
+
 @st.fragment(run_every="10s")
 def _simulator_panel():
     try:
@@ -290,49 +294,87 @@ def _simulator_panel():
         res.raise_for_status()
         status = res.json()
     except requests.exceptions.RequestException as e:
-        st.warning(f"시뮬레이터 상태 조회 실패: {_extract_error_message(e)}")
+        with st.container(border=True):
+            st.error("백엔드에 연결하지 못했습니다. 서버가 실행 중인지 확인한 뒤 다시 시도하세요.")
+            st.caption(f"요청 주소: {BACKEND_URL}/simulator/status · 10초 후 자동 재시도")
+            with st.expander("자세한 오류"):
+                st.code(_extract_error_message(e))
         return
 
     with st.container(border=True):
         col1, col2, col3 = st.columns([2, 2, 1])
         running = status["running"]
-        col1.markdown(f"{'🟢 실행 중' if running else '⏸️ 정지'} · 시뮬레이션 시각: `{status['sim_now'] or '없음'}`")
+        col1.markdown(f"{'▶️ 실행 중' if running else '⏸️ 정지'} · 시뮬레이션 시각: `{status['sim_now'] or '없음'}`")
 
         speed = f"속도: 실제 {status['tick_seconds']}초 = 시뮬레이션 {status['hours_per_tick']}시간"
         if running and status["elapsed_seconds"] is not None:
-            m, s = divmod(status["elapsed_seconds"], 60)
-            speed += f" · 실행 경과 {m}분 {s}초"
+            h, rem = divmod(status["elapsed_seconds"], 3600)
+            m, s = divmod(rem, 60)
+            speed += f" · 실행 경과 {f'{h}시간 ' if h else ''}{m}분 {s}초"
         col2.caption(speed)
 
         if running:
             if col3.button("정지", key="sim_stop"):
-                requests.post(f"{BACKEND_URL}/simulator/stop", timeout=10)
-                st.rerun()
+                try:
+                    r = requests.post(f"{BACKEND_URL}/simulator/stop", timeout=10)
+                    r.raise_for_status()
+                    st.rerun()
+                except requests.exceptions.RequestException as e:
+                    st.error(f"시뮬레이터를 정지하지 못했습니다: {_extract_error_message(e)}")
         else:
             if col3.button("시작", key="sim_start"):
-                requests.post(f"{BACKEND_URL}/simulator/start", timeout=10)
-                st.rerun()
+                try:
+                    r = requests.post(f"{BACKEND_URL}/simulator/start", timeout=10)
+                    r.raise_for_status()
+                    st.rerun()
+                except requests.exceptions.RequestException as e:
+                    st.error(f"시뮬레이터를 시작하지 못했습니다: {_extract_error_message(e)}")
 
-        if running and status["seconds_since_last_tick"] is not None:
-            remaining = max(0, status["tick_seconds"] - status["seconds_since_last_tick"])
-            st.caption(f"⏳ 다음 틱까지 약 {remaining}초 (10초마다 이 화면 자동 갱신)")
+        since = status["seconds_since_last_tick"]
+        if running and since is not None:
+            if since > status["tick_seconds"] * 2:
+                st.warning(f"마지막 진행 이후 {since}초째 갱신이 없습니다. 아래 오류 내용을 확인하세요.")
+            else:
+                st.caption(f"⏳ 다음 진행까지 약 {max(0, status['tick_seconds'] - since)}초 (10초마다 이 화면 자동 갱신)")
+
+        if status.get("last_error"):
+            st.error(f"최근 진행 {status.get('consecutive_failures', 0)}회 연속 실패: {status['last_error']}")
 
         if status["has_stale_events"]:
-            st.warning("설비는 전부 정상인데 감지 목록에 이전 데이터가 남아있습니다. 시뮬레이터를 새로 시작하기 전에 리셋을 권장합니다.")
+            st.info(f"감지 목록에 항목이 있습니다. 시뮬레이터 상태와는 별개로 유지되며, 이전 실행이나 수동 전체 스캔의 결과일 수 있습니다.")
 
         col_r1, col_r2 = st.columns([3, 1])
-        col_r1.caption("리셋: 시뮬레이션 상태·데이터와 감지 목록을 전부 초기화합니다(자동으로는 지워지지 않음).")
-        if col_r2.button("리셋", key="sim_reset"):
-            requests.post(f"{BACKEND_URL}/simulator/reset", timeout=10)
-            st.session_state.pop("sim_event_count", None)
-            st.rerun()
+        col_r1.caption(
+            "리셋: 시뮬레이션 데이터, 감지 목록, **완료 처리 이력**을 모두 삭제하고 시뮬레이터를 정지합니다. "
+            "되돌릴 수 없으며, 수동 전체 스캔 결과와 완료 처리한 항목도 함께 사라집니다."
+        )
+        reset_ok = col_r1.checkbox("⚠️ 위 내용을 확인했습니다", key="sim_reset_confirm")
+        if col_r2.button("리셋", key="sim_reset", disabled=not reset_ok, type="secondary"):
+            try:
+                r = requests.post(f"{BACKEND_URL}/simulator/reset", timeout=10)
+                r.raise_for_status()
+                st.session_state.pop("sim_event_count", None)
+                st.session_state.pop("sim_reset_confirm", None)
+                st.rerun()
+            except requests.exceptions.RequestException as e:
+                st.error(f"리셋하지 못했습니다: {_extract_error_message(e)}")
 
         degrading = status["degrading"]
         if degrading:
-            st.caption(f"열화 진행 중인 설비 {len(degrading)}대")
-            for d in sorted(degrading, key=lambda x: -x["progress"]):
-                label = f"설비 #{d['machine_id']} · {d['signal']} · {d['state']} · 오류 {d['errors_emitted']}건"
+            st.caption(
+                f"열화 진행 중인 설비 {len(degrading)}대 — 감지 기준에 도달하면 아래 이벤트 목록에 나타나고, "
+                "고장이 기록된 설비는 이 목록에서 사라집니다."
+            )
+            for d in sorted(degrading, key=lambda x: -x["progress"])[:8]:
+                signal_label = _SIGNAL_LABELS.get(d["signal"], d["signal"] or "?")
+                state_label = _STATE_LABELS.get(d["state"], d["state"])
+                pct = round(d["progress"] * 100)
+                label = f"설비 #{d['machine_id']} · {signal_label} 이상 · {state_label} · 예상 고장 시점의 {pct}% 경과"
+                if d["errors_emitted"]:
+                    label += f" · 전조 오류 {d['errors_emitted']}건"
                 st.progress(min(d["progress"], 1.0), text=label)
+            if len(degrading) > 8:
+                st.caption(f"…외 {len(degrading) - 8}대")
         else:
             st.caption("현재 열화 진행 중인 설비 없음")
 
