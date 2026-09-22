@@ -1,4 +1,4 @@
-# Uptime Copilot — Session Summary (updated 2026-09-18)
+# Uptime Copilot — Session Summary (updated 2026-09-22)
 
 ## Overview
 
@@ -376,3 +376,64 @@ atlas-cmms(별도 프로젝트) 소스 변경이 필요하다는 뜻. 사용자�
   0→0.02). 검증 후 stop+reset으로 정리, 실 데이터는 그대로.
 - 이번 항목 전체에서 코드는 사용자가 직접 타이핑(설명 후 진행 방식 유지), 검증/테스트는
   각 단계마다 복제 DB 또는 실제 컨테이너로 직접 실행해서 확인.
+
+## 2026-09-22 (계속) — 배포 전 리뷰 5종 + 지적사항 수정 8라운드
+
+시뮬레이터가 동작하는 걸 확인한 뒤, "빌드 배포전 전체 점검"을 요청받아 보안·코드품질·
+빌드/배포·테스트·인터페이스 5개 전담 에이전트를 병렬 실행(`.claude/agents/`). 실제로
+이번 세션에서 겪은 사고(`sim_only_now()` 삭제, 70분 무응답)를 각자 다른 각도에서 재확인·
+확장했고, 발견 사항을 8라운드에 걸쳐 순차 반영. 전체 상세는 `SIMULATOR_PLAN.md`의
+"배포 전 전체 점검" 절 참고, 여기서는 무엇이 왜 바뀌었는지만 요약.
+
+1. **테스트/보안 기반 정비**: 검증된 `sim_query.py` 회귀 테스트 25개(호출자 이름을
+   AST로 전수 스캔해서 삭제 사고를 즉시 잡는 테스트 포함) 반영. `conftest.py`의
+   `event_store_module` fixture가 `sim_query.DB_PATH`는 안 바꿔치기해서, 실제
+   67MB 운영 DB를 읽는 바람에 2026-09-17에 잡았던 `evidence_at`/`completed_at`
+   혼동 회귀 테스트가 조용히 무력화돼 있던 것 발견·수정(재현으로 검증). `.env`가
+   Docker 이미지에 그대로 구워지던 것도 발견 — `backend/.dockerignore`에 제외 추가
+   (실제 컨테이너에 `/app/.env`가 있는 것까지 확인 후 수정).
+2. **백그라운드 루프 강건화**: `/simulator/inject`에 존재하지 않는 signal 문자열을
+   넣으면 다음 틱에서 `KeyError`가 나고 커밋 전에 죽어서 같은 상태로 무한 반복되던
+   문제(보안 에이전트가 직접 `KeyError` 재현) → `Literal` 타입 제약(422) + 코드
+   방어 2중화. `run_forever()`의 상태 체크가 `try` 밖에 있어서 DB 오류 한 번에
+   루프가 영구 정지할 수 있던 문제 → `try` 안으로 이동, `last_error`/
+   `consecutive_failures`를 `/simulator/status`에 노출. 틱을 `asyncio.to_thread`로
+   오프로드해서 도는 동안 `/health`까지 멈추던 문제도 해소.
+3. **빌드 인프라**: 재빌드마다 임베딩 모델(476MB)을 다시 받던 문제의 원인을 실측으로
+   확인(HF 캐시가 이미지 레이어 안에 있어서 매번 날아감) → named volume `hf_cache`로
+   분리, **cold 6분29초 → warm 4.45초**로 실측 개선. xet 다운로드 경로가 이 환경
+   프록시와 안 맞던 문제는 `HF_HUB_DISABLE_XET=1`로 해결(로그로 우회 경로 확인).
+   헬스체크 `start_period`를 180s→600s(+`start_interval: 5s`)로, 종료 유예도
+   `stop_grace_period: 30s`로 조정, lifespan 종료 처리를 `try/finally`+
+   `asyncio.wait_for`로 강화.
+4. **인터페이스**: 시뮬레이터가 방금 만든 진짜 긴급 이벤트를 "지워야 할 옛날 데이터"로
+   오인시키던 경고 문구 수정, 시작/정지/리셋 버튼 에러 처리 추가(트레이스백 노출
+   방지), 리셋 버튼에 확인 체크박스 + 실제 삭제 범위(`completed_events` 포함) 명시,
+   진행률 바를 한글 라벨로, 백그라운드 실패를 빨간 배너로 노출.
+5. **틱 원자성/동시성**: `_tick_once()`를 커넥션 하나·트랜잭션 하나로 묶어서 텔레메트리
+   기록 후 상태 저장 직전에 죽으면 생기던 불일치 제거. `threading.Lock()`으로
+   `_tick_once()`/`inject()`/`reset()`이 동시에 `sim_state`를 덮어쓰지 못하게 함
+   (실제로 틱 도는 중 inject해서 유실 안 되는 것까지 확인).
+6. **구 시뮬레이터 정리** (사용자 승인 하에): `/simulate/tick` 라우트와
+   `backend/data/event_simulator.py` 삭제 — 원본 데이터가 "안 바뀐다"는 이번 세션의
+   핵심 전제와 계속 충돌하던 죽은 경로였음. 호출자 0인 `get_recent_telemetry()`도
+   같이 삭제. README(EN/KOR) 엔드포인트 표에서도 제거.
+7. **lint/타입체커/CI 도입** (사용자 승인 하에): `backend/pyproject.toml`(ruff+mypy+
+   pytest 설정) 신설. mypy를 `data/`+`cmms_client.py`에 돌려 실제로 23개 에러 발견 —
+   8개(sim_engine/sim_store/sim_loop/event_store/cmms_client)는 진짜 타입 문제라
+   수정(예: `event_store._dataset_now()`가 `-> str`로 선언돼 있었지만 텔레메트리가
+   완전히 비면 실제로 `None`을 반환할 수 있었음). `agent_service.py`의 나머지 13개는
+   OpenAI SDK 오버로드 타입 노이즈 위주라 범위에서 제외(이유는 주석으로 남김).
+   **최종 mypy 0 에러.** ruff는 import 정렬 9건 + 불필요한 f-string 1건을 자동
+   수정(동작 변화 없음, diff로 확인). `.github/workflows/backend-checks.yml` 신설 -
+   push/PR마다 ruff+mypy+pytest 실행.
+8. **문서 정합성 재확인**: docs-reviewer로 README(EN/KOR)를 다시 대조해서 HIGH 2건
+   (이 섹션 자체가 누락된 것, README에 ruff/mypy가 개발 워크플로에 없던 것) +
+   MEDIUM 3건(`.env.example`의 데모용 속도값이 표의 코드 기본값과 다른데 각주 없음,
+   Docker 섹션이 `hf_cache`/헬스체크 타이밍 변경 이전 내용, 포트폴리오 문서에
+   시뮬레이터 내용 전무) + LOW 5건을 찾아 대부분 즉시 반영.
+
+각 라운드 끝날 때마다 `docker compose up -d --build`로 재빌드 후 실제 컨테이너로
+검증(reset→start→inject→틱 진행→상태 확인)하는 루틴을 유지. 최종 상태: 전체
+pytest 49개 통과, mypy 0 에러, ruff 의도적으로 남긴 1건(배치 스크립트) 제외 통과,
+커밋 8개(브랜치 `workspace-mac-2`).

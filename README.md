@@ -27,12 +27,14 @@ uptime-copilot/
 │   ├── store/                    Generated state (pdm_telemetry.db, checkpoints.db,
 │   │                             chroma_db/) — gitignored, separate from source so a
 │   │                             Docker volume can be mounted here without shadowing code
-│   ├── tests/                    pytest regression suite — see "Running the tests" below
+│   ├── tests/                    pytest regression suite — see "Running the Checks" below
 │   ├── notify.py                 Slack alerting — optional, see Environment Variables
 │   ├── cmms_client.py             CMMS work-order push — optional, see PHASE_7_PLAN.md
+│   ├── pyproject.toml             ruff / mypy / pytest config — see "Running the Checks"
 │   └── Dockerfile
 ├── frontend/                Streamlit chat UI
 │   └── Dockerfile
+├── .github/workflows/       CI: ruff + mypy + pytest on every push/PR
 └── docker-compose.yml       See "Running with Docker Compose" below
 ```
 
@@ -61,10 +63,13 @@ docker compose up -d --build
 
 - Frontend: http://localhost:8501 — Backend: http://localhost:8000 (`/docs` for the
   interactive API)
-- **First startup takes a few minutes**: the backend downloads the same ~470MB embedding
-  model mentioned below, inside the container this time. `docker compose logs -f backend`
-  to watch progress; it reports "starting" (not yet healthy) until that finishes, and the
-  frontend container waits for it automatically — no action needed, just wait.
+- **First startup can take up to ~10 minutes on a genuinely cold boot** (the healthcheck
+  allows up to `start_period: 600s` for this): the backend downloads the same ~470MB
+  embedding model mentioned below, inside the container this time. `docker compose logs -f
+  backend` to watch progress; it reports "starting" (not yet healthy) until that finishes,
+  and the frontend container waits for it automatically — no action needed, just wait.
+  The model is cached in a named volume (`hf_cache`) afterward, so every subsequent
+  `--build` is healthy again in seconds, not minutes.
 - **One-time data ingestion still has to be run once, inside the container**, the first
   time you bring the stack up (the image intentionally ships with no data baked in — see
   `backend/.dockerignore` — so a fresh `docker compose up` starts from an empty DB):
@@ -74,7 +79,8 @@ docker compose up -d --build
 - State (`backend/store/`: the SQLite DBs and the RAG index) lives in a named Docker
   volume, not in the image — it survives `docker compose down` / `up`. Only
   `docker compose down -v` wipes it (you'd need to re-run the ingestion step above
-  afterward).
+  afterward — and re-download the embedding model, since `down -v` also drops the
+  `hf_cache` volume mentioned above).
 - Both services bind to `127.0.0.1` only, same as the manual setup below — nothing is
   exposed on your LAN.
 - `docker compose down` to stop.
@@ -111,7 +117,10 @@ uvicorn main:app --reload --port 8000
 
 The very first startup also downloads the `intfloat/multilingual-e5-small` embedding
 model (~470MB) from Hugging Face and builds the RAG index — allow a few minutes and
-network access; it looks hung but isn't. Subsequent restarts are fast.
+network access; it looks hung but isn't. Subsequent restarts are fast. If the download
+stalls for minutes with no progress, set `HF_HUB_DISABLE_XET=1` in your shell before
+starting uvicorn — the newer "xet" transfer path is blocked outright in some network
+environments; `docker-compose.yml` already sets this for the container path.
 
 ```bash
 # Frontend (separate terminal)
@@ -122,14 +131,20 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
-## Running the Tests
+## Running the Checks
 
 ```bash
 cd backend
 source .venv/bin/activate
+pip install ruff mypy          # not in requirements.txt (dev-only)
+ruff check .                   # lint + import order (config: pyproject.toml)
+mypy                           # type checks data/ + cmms_client.py; must stay at 0 errors
 pytest tests/ --ignore=tests/test_rag_dedup.py   # fast path - skips the embedding-model test
 pytest tests/                                     # full suite, downloads/loads the embedding model
 ```
+
+CI (`.github/workflows/backend-checks.yml`) runs `ruff check`, `mypy`, and the fast pytest
+path on every push and pull request.
 
 ## Environment Variables (`backend/.env`)
 
@@ -145,6 +160,11 @@ pytest tests/                                     # full suite, downloads/loads 
 | `SIM_TICK_SECONDS` | No | Defaults to `60` — how often (real seconds) the background degradation simulator advances, when running (see below) |
 | `SIM_HOURS_PER_TICK` | No | Defaults to `1` — simulated hours advanced per tick |
 | `SIM_SEED` | No | Defaults to `42` — RNG seed for the simulator; a fresh `POST /simulator/reset` starts a new run from this seed |
+
+> **`backend/.env.example` ships demo-tuned simulator values** (`SIM_TICK_SECONDS=15`,
+> `SIM_HOURS_PER_TICK=12`), not the code defaults (`60`/`1`) shown above — this makes
+> events show up in well under a minute for a live demo, at ~48x the code's default
+> pace. Delete those two lines (or set them to `60`/`1`) for the slower, real-time-ish rate.
 
 > **Running the backend in Docker with an Atlas-MCP instance on the host:** `localhost`
 > inside the `backend` container means the container itself, not your host machine, so
@@ -168,8 +188,8 @@ pytest tests/                                     # full suite, downloads/loads 
 | POST | `/events/delete` | Discard events with no record kept (they can reappear on the next scan) |
 | POST | `/simulator/start` | Start the automated background degradation simulator (resumes from its current state) |
 | POST | `/simulator/stop` | Stop the background loop |
-| GET | `/simulator/status` | Running state, simulated clock, degrading-machine list, `has_stale_events` flag |
-| POST | `/simulator/inject` | Force a specific machine into a strong degradation, for demos (`{"machine_id": 12}`) |
+| GET | `/simulator/status` | Running state, simulated clock, degrading-machine list, `has_stale_events`, and `last_error`/`consecutive_failures` if a background tick has been failing |
+| POST | `/simulator/inject` | Force a specific machine into a strong degradation, for demos (`{"machine_id": 12}`, optional `"signal"`: one of `volt`/`rotate`/`pressure`/`vibration`, random if omitted) |
 | POST | `/simulator/reset` | Wipe simulator state/data **and** the detected/completed event tables — call this before a fresh run; nothing is cleared automatically. See `SIMULATOR_PLAN.md` |
 
 Example `/agent/query` request:

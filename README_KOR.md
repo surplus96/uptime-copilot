@@ -26,12 +26,14 @@ uptime-copilot/
 │   ├── store/                    생성되는 상태(pdm_telemetry.db, checkpoints.db,
 │   │                             chroma_db/) — gitignore 대상. 소스와 분리해서 Docker 볼륨을
 │   │                             마운트해도 코드를 덮어쓰지 않음
-│   ├── tests/                    pytest 회귀 테스트 — 아래 "테스트 실행" 참고
+│   ├── tests/                    pytest 회귀 테스트 — 아래 "검사 실행" 참고
 │   ├── notify.py                 Slack 알림 — 선택 사항, "환경 변수" 참고
 │   ├── cmms_client.py             CMMS 작업지시서 전송 — 선택 사항, PHASE_7_PLAN.md 참고
+│   ├── pyproject.toml             ruff / mypy / pytest 설정 — 아래 "검사 실행" 참고
 │   └── Dockerfile
 ├── frontend/                Streamlit 채팅 UI
 │   └── Dockerfile
+├── .github/workflows/       CI: 모든 push/PR마다 ruff + mypy + pytest 실행
 └── docker-compose.yml       아래 "Docker Compose로 실행" 참고
 ```
 
@@ -58,10 +60,12 @@ docker compose up -d --build
 ```
 
 - 프론트엔드: http://localhost:8501 — 백엔드: http://localhost:8000 (`/docs`에서 대화형 API 문서)
-- **최초 실행은 몇 분 걸립니다**: 백엔드가 아래에 언급된 약 470MB 임베딩 모델을 컨테이너 안에서
-  내려받습니다. `docker compose logs -f backend`로 진행 상황을 볼 수 있고, 완료 전까지는
-  "starting"(아직 healthy 아님) 상태이며 프론트엔드 컨테이너는 자동으로 기다립니다 — 별도 조치 없이
-  기다리면 됩니다.
+- **완전히 처음 켜는 경우(cold boot) 최대 10분 정도 걸릴 수 있습니다**(헬스체크가
+  `start_period: 600s`까지 허용): 백엔드가 아래에 언급된 약 470MB 임베딩 모델을 컨테이너
+  안에서 내려받습니다. `docker compose logs -f backend`로 진행 상황을 볼 수 있고, 완료
+  전까지는 "starting"(아직 healthy 아님) 상태이며 프론트엔드 컨테이너는 자동으로
+  기다립니다 — 별도 조치 없이 기다리면 됩니다. 이후엔 모델이 named volume(`hf_cache`)에
+  캐시되어 재빌드해도 몇 분이 아니라 몇 초 만에 healthy가 됩니다.
 - **최초 1회 데이터 적재는 컨테이너 안에서 직접 실행해야 합니다**(이미지에는 의도적으로 데이터를
   넣지 않음 — `backend/.dockerignore` 참고. 그래서 처음 `docker compose up`하면 빈 DB로 시작):
   ```bash
@@ -69,7 +73,8 @@ docker compose up -d --build
   ```
 - 상태(`backend/store/`: SQLite DB와 RAG 인덱스)는 이미지가 아니라 Docker named volume에
   저장되어 `docker compose down` / `up` 사이에도 유지됩니다. `docker compose down -v`만
-  이를 삭제합니다(그 경우 위 적재 단계를 다시 실행해야 함).
+  이를 삭제합니다(그 경우 위 적재 단계를 다시 실행해야 하고, `hf_cache` 볼륨도 같이
+  지워져서 임베딩 모델도 다시 받아야 함).
 - 두 서비스 모두 `127.0.0.1`에만 바인딩됩니다(아래 수동 설정과 동일) — LAN에 노출되지 않습니다.
 - 중지는 `docker compose down`.
 
@@ -104,7 +109,9 @@ uvicorn main:app --reload --port 8000
 
 최초 실행 시 `intfloat/multilingual-e5-small` 임베딩 모델(약 470MB)을 Hugging Face에서 내려받고
 RAG 인덱스를 만듭니다 — 몇 분과 네트워크 연결이 필요하며, 멈춘 것처럼 보이지만 정상입니다.
-이후 재시작은 빠릅니다.
+이후 재시작은 빠릅니다. 다운로드가 몇 분째 진행이 없으면 uvicorn 실행 전에 셸에서
+`HF_HUB_DISABLE_XET=1`을 설정해보세요 — 일부 네트워크 환경에서는 최신 "xet" 전송 경로
+자체가 막혀 있습니다. `docker-compose.yml`에는 컨테이너 경로용으로 이미 설정돼 있습니다.
 
 ```bash
 # 프론트엔드 (별도 터미널)
@@ -115,14 +122,20 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
-## 테스트 실행
+## 검사 실행
 
 ```bash
 cd backend
 source .venv/bin/activate
+pip install ruff mypy          # requirements.txt엔 없음(개발 전용)
+ruff check .                   # 린트 + import 순서 (설정: pyproject.toml)
+mypy                           # data/ + cmms_client.py 타입 검사, 항상 0 에러 유지
 pytest tests/ --ignore=tests/test_rag_dedup.py   # 빠른 경로 - 임베딩 모델 테스트 제외
 pytest tests/                                     # 전체 스위트, 임베딩 모델 다운로드/로드 포함
 ```
+
+CI(`.github/workflows/backend-checks.yml`)가 모든 push와 PR마다 `ruff check`, `mypy`,
+빠른 경로 pytest를 실행합니다.
 
 ## 환경 변수 (`backend/.env`)
 
@@ -138,6 +151,11 @@ pytest tests/                                     # 전체 스위트, 임베딩 
 | `SIM_TICK_SECONDS` | 선택 | 기본값 `60` — 자동 열화 시뮬레이터가 켜져 있을 때 실제 몇 초마다 한 번씩 전진할지 |
 | `SIM_HOURS_PER_TICK` | 선택 | 기본값 `1` — 한 번 전진할 때 시뮬레이션 시간으로 몇 시간을 진행할지 |
 | `SIM_SEED` | 선택 | 기본값 `42` — 시뮬레이터 난수 시드. `POST /simulator/reset`을 호출하면 이 시드로 새로 시작 |
+
+> **`backend/.env.example`엔 데모용으로 조정된 시뮬레이터 값**(`SIM_TICK_SECONDS=15`,
+> `SIM_HOURS_PER_TICK=12`)이 들어있습니다 — 위 표의 코드 기본값(`60`/`1`)이 아닙니다.
+> 실제 코드 기본값 대비 약 48배 빠른 속도라, 데모에서 1분도 안 돼 이벤트가 뜹니다.
+> 더 느린(실시간에 가까운) 속도를 원하면 이 두 줄을 지우거나 `60`/`1`로 바꾸세요.
 
 > **호스트에 있는 Atlas-MCP를 Docker 안의 백엔드에서 사용할 때:** `backend` 컨테이너 안의
 > `localhost`는 호스트 머신이 아니라 컨테이너 자신을 가리키므로
@@ -161,8 +179,8 @@ pytest tests/                                     # 전체 스위트, 임베딩 
 | POST | `/events/delete` | 기록 없이 이벤트 폐기 (다음 스캔에서 다시 나타날 수 있음) |
 | POST | `/simulator/start` | 자동 열화 시뮬레이터 백그라운드 루프 시작 (현재 상태에서 이어감) |
 | POST | `/simulator/stop` | 루프 정지 |
-| GET | `/simulator/status` | 실행 여부, 시뮬레이션 시각, 열화 진행 중인 설비 목록, `has_stale_events` |
-| POST | `/simulator/inject` | 특정 설비를 강제로 강하게 열화시킴, 데모용 (`{"machine_id": 12}`) |
+| GET | `/simulator/status` | 실행 여부, 시뮬레이션 시각, 열화 진행 중인 설비 목록, `has_stale_events`, 백그라운드 틱이 실패 중이면 `last_error`/`consecutive_failures`도 포함 |
+| POST | `/simulator/inject` | 특정 설비를 강제로 강하게 열화시킴, 데모용 (`{"machine_id": 12}`, 선택적으로 `"signal"`: `volt`/`rotate`/`pressure`/`vibration` 중 하나, 생략하면 무작위) |
 | POST | `/simulator/reset` | 시뮬레이터 상태/데이터 **및** 감지/완료 이벤트 테이블 전체 초기화 — 새로 시작하기 전에 호출. 자동으로는 지워지지 않음. `SIMULATOR_PLAN.md` 참고 |
 
 `/agent/query` 요청 예시:

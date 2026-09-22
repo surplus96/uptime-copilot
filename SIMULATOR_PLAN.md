@@ -107,7 +107,7 @@ HEALTHY → DEGRADING → FAULT → (고장 + 정비, 06시) → HEALTHY
 | `pdm_operations.check_recent_failure()` | 원본 + `sim_failures` 합쳐서 조회 |
 | `pdm_operations.estimate_next_maintenance()` | 원본 + `sim_maint` 고려 |
 | `event_store._dataset_now()` | 원본과 시뮬레이션 텔레메트리 중 최댓값 |
-| 기존 `POST /simulate/tick` | 새 시뮬레이션 테이블에 쓰도록 통합 |
+| 기존 `POST /simulate/tick` | ~~새 시뮬레이션 테이블에 쓰도록 통합~~ → **삭제로 결정**(아래 "배포 전 전체 점검" 절 참고) |
 
 참고: 현재 원본 `telemetry`에는 예전 수동 틱 데이터 200행(2016-01-01 07:00~08:00)이
 이미 섞여 있다(876,300행 vs 원본 876,100행). 소량이라 그대로 두되, 기준선 계산 시
