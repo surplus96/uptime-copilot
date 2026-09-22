@@ -312,10 +312,26 @@ HEALTHY인데 `detected_events`에 행이 있으면 `true` — "지금 보이는
 - 재빌드 후 실제 컨테이너로 검증: 이상한 signal 값 → 422 확인, 정상 흐름(재시작 →
   주입 → 5회 폴링, 여러 설비 자연 발생 열화/고장 순환) → `last_error: null` 유지 확인.
 
+**즉시 반영 (3번째 커밋, 빌드/인프라)**:
+- `backend/Dockerfile`에 `ENV HF_HOME=/opt/hf_cache`, `docker-compose.yml`에 named
+  volume `hf_cache:/opt/hf_cache` 추가 - 재빌드마다 임베딩 모델(476MB)을 다시 받던
+  문제 해결. **실측**: 볼륨 비운 상태(cold)로 `docker compose up -d --build` **6분
+  29초**(그래도 정상적으로 healthy까지 도달 - 예전엔 여기서 타임아웃으로 프론트엔드가
+  못 떴었음) → 캐시 채워진 상태(warm)로 재빌드 **4.45초**.
+- `HF_HUB_DISABLE_XET=1` 추가 - xet(`cas-bridge.xethub.hf.co`) 경로가 이 환경
+  프록시와 안 맞아 멈추던 문제. 로그로 확인: 이제 일반 CDN 경로(`us.aws.cdn.hf.co`)로
+  나감.
+- healthcheck `start_period`를 180s → 600s로, `start_interval: 5s` 추가(Compose
+  v5.1.1 확인 후 적용, 2.20.2+ 필요) - 캐시 없는 최초 1회만 여유를 주고 그 외엔
+  즉시 healthy로 넘어감. `stop_grace_period: 30s` 추가.
+- `main.py`의 lifespan 종료 처리를 `try/finally` + `asyncio.wait_for(timeout=5)`로
+  강화 - yield에서 예외가 나도 `sim_task`가 정리되고, 종료 대기가 무제한이 아니게 됨
+  (`stop_grace_period`와 짝).
+- `./archive` 마운트를 `:ro`로 변경(앱이 읽기만 함).
+- `pdm_dataloader.py` 자동 미실행 문제는 README에 이미 문서화돼 있음을 확인
+  (`docker compose exec backend python data/pdm_dataloader.py`) - 추가 조치 불필요.
+
 **아직 미반영 (다음 라운드)**:
-- HF 임베딩 모델 캐시 미영속화(재빌드마다 476MB 재다운로드) + `HF_HUB_DISABLE_XET=1`
-- 새 환경 배포 시 `pdm_dataloader.py`가 자동 실행 안 되어 헬스체크는 통과하는데
-  데이터가 텅 빈 상태로 뜨는 문제 - 배포 런북 필요
 - 리셋 버튼 UX(확인 절차 없음, `completed_events` 삭제 사실 미고지), 시작/정지/리셋
   에러 처리 없음, 진행률 바에 내부 상태값 그대로 노출 등 인터페이스 항목들
 - 틱 원자성(트랜잭션 분리), DB_PATH 7곳 중복, 커넥션 누수, lint/타입체커/CI 부재

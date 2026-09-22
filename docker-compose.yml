@@ -7,15 +7,29 @@ services:
       - ./backend/.env
     environment:
       ALLOWED_HOSTS: backend
+      # xet(cas-bridge.xethub.hf.co)는 이 환경의 egress 필터와 궁합이 나빠 403/지연이 난다.
+      # 1로 두면 huggingface_hub이 평범한 HTTPS CDN 경로로 내려받는다(공식 지원 옵션,
+      # huggingface_hub 1.31.0 기준 - 2026-09-22 build-doctor 실측·확인).
+      HF_HUB_DISABLE_XET: "1"
     volumes:
-      - ./archive:/archive
+      - ./archive:/archive:ro
       - backend_store:/app/store
+      # HF 임베딩 모델 캐시. 이게 없으면 재빌드마다 476MB를 다시 받는다
+      # (실측: cold 118초 vs warm 6.4초). Dockerfile의 ENV HF_HOME=/opt/hf_cache와
+      # 반드시 같은 경로여야 한다. 주의: `docker compose down -v`는 이 캐시도 지운다.
+      - hf_cache:/opt/hf_cache
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 180s
+      # 캐시 볼륨이 비어있는 최초 1회(또는 down -v 이후)는 모델을 다시 받느라
+      # 2분 안팎 걸릴 수 있다 - 넉넉히 잡는다. start_interval이 준비되는 즉시
+      # healthy로 넘겨주므로, 평소(캐시 있음)엔 이 여유를 그대로 대가로 치르지 않는다.
+      start_period: 600s
+      start_interval: 5s
+    # 종료 시 진행 중인 시뮬레이터 틱이 끝날 시간을 준다 - 기본 10초로는 SIGKILL 날 수 있다.
+    stop_grace_period: 30s
 
 
   frontend:
@@ -30,3 +44,4 @@ services:
 
 volumes:
   backend_store:
+  hf_cache:

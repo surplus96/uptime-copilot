@@ -81,14 +81,19 @@ async def lifespan(app: FastAPI):
     event_store.init_event_table()
     sim_store.init_sim_tables()
     sim_task = asyncio.create_task(sim_loop.run_forever())
-    with SqliteSaver.from_conn_string(str(CHECKPOINT_DB_PATH)) as checkpointer:
-        agent_service.initialize_agent(langsmith_client, checkpointer)
-        yield
-    sim_task.cancel()
     try:
-        await sim_task
-    except asyncio.CancelledError:
-        pass
+        with SqliteSaver.from_conn_string(str(CHECKPOINT_DB_PATH)) as checkpointer:
+            agent_service.initialize_agent(langsmith_client, checkpointer)
+            yield
+    finally:
+        # finally: yield에서 예외가 올라와도 태스크를 반드시 정리한다.
+        sim_task.cancel()
+        # wait_for로 상한을 건다 - 틱이 도는 중이면 취소가 즉시 먹지 않는데,
+        # docker stop의 유예(stop_grace_period)가 끝나면 SIGKILL 당한다.
+        try:
+            await asyncio.wait_for(sim_task, timeout=5)
+        except (asyncio.CancelledError, TimeoutError):
+            pass
 
 
 
