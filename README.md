@@ -162,7 +162,6 @@ pytest tests/                                     # full suite, downloads/loads 
 | POST | `/rag/query` | RAG-based document Q&A |
 | POST | `/agent/query` | Multi-agent query — returns `pending_approval` on urgent findings |
 | POST | `/agent/resume` | Resume the graph after an HITL approval/rejection decision |
-| POST | `/simulate/tick` | Manually advance the static dataset's telemetry by N hours (no UI button — curl or the `/docs` Swagger page only). Writes straight to the original `telemetry` table; independent of the automated simulator below. |
 | POST | `/scan` | Sweep all 100 machines (no LLM), saving 긴급/주의 findings to the event store |
 | GET | `/events` | List pending detected events |
 | POST | `/events/complete` | Mark events completed — archived, and only re-surfaces on genuinely new evidence |

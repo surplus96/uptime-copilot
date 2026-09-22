@@ -155,7 +155,6 @@ pytest tests/                                     # 전체 스위트, 임베딩 
 | POST | `/rag/query` | RAG 기반 문서 Q&A |
 | POST | `/agent/query` | 멀티에이전트 질의 — 긴급 건이면 `pending_approval` 반환 |
 | POST | `/agent/resume` | HITL 승인/반려 결정 후 그래프 재개 |
-| POST | `/simulate/tick` | 정적 데이터셋의 telemetry를 수동으로 N시간 진행 (UI 버튼 없음 — curl 또는 `/docs` Swagger 페이지로만 호출 가능). 원본 `telemetry` 테이블에 직접 기록하며, 아래 자동 시뮬레이터와는 별개 경로 |
 | POST | `/scan` | 100대 설비 전체 스캔(LLM 미사용), 긴급/주의 건을 이벤트 스토어에 저장 |
 | GET | `/events` | 대기 중인 감지 이벤트 목록 |
 | POST | `/events/complete` | 이벤트를 완료 처리 — 보관되며, 진짜 새로운 근거가 있을 때만 다시 표면화 |

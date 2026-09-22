@@ -270,8 +270,12 @@ HEALTHY인데 `detected_events`에 행이 있으면 `true` — "지금 보이는
 
 ## 남은 선택 항목 (이번 5단계 범위 밖)
 
-- `/simulate/tick`(수동, 원본 테이블 직접 기록)과 새 자동 루프(`sim_*` 테이블)를 통합할지는
-  보류 상태 - 지금은 두 경로가 공존해도 충돌 없음.
+- ~~`/simulate/tick`(수동, 원본 테이블 직접 기록)과 새 자동 루프(`sim_*` 테이블)를
+  통합할지는 보류 상태.~~ **2026-09-22 해소**: 통합이 아니라 **삭제**로 결정
+  (code-quality-reviewer M6 — 아무도 안 부르는 경로인데, 원본 데이터가 "안 바뀐다"는
+  이번 세션의 핵심 전제와 계속 충돌했음). `backend/data/event_simulator.py` 삭제,
+  `POST /simulate/tick` 라우트 제거, README(EN/KOR) 엔드포인트 표에서도 제거.
+  `pdm_telemetry.get_recent_telemetry()`(호출자 0, L3)도 같이 삭제.
 - ~~README에 "시뮬레이터를 켜기 전에 `/simulator/reset` 먼저 호출" 같은 운영 절차
   문서화는 아직 안 함.~~ **2026-09-22 해소**: README(EN/KOR) 둘 다 `/simulator/*` 5개
   엔드포인트 표에 반영, `reset`의 설명에 "새로 시작하기 전에 호출 - 자동으로는 안
@@ -350,8 +354,9 @@ HEALTHY인데 `detected_events`에 행이 있으면 `true` — "지금 보이는
 - `DB_PATH` 8곳 통합은 기존 테스트의 `monkeypatch.setattr(module, "DB_PATH", ...)`
   패턴과 얽혀 있고 위 항목들보다 리스크 대비 실익이 낮다고 판단해 보류.
 
-**아직 미반영 (다음 라운드, 전부 P1/P2 - 배포를 막는 수준 아님)**:
-- lint/타입체커/CI 부재 (mypy가 있었으면 `sim_only_now` 삭제를 즉시 잡았을 것)
-- `/simulate/tick`(구 수동 시뮬레이터)와 `event_simulator.py` 정리 여부 - 기존 기능
-  제거라 별도 확인 필요
+**즉시 반영 (7번째 커밋)**: `/simulate/tick` 라우트, `backend/data/event_simulator.py`,
+`pdm_telemetry.get_recent_telemetry()`(호출자 0) 전부 삭제. README(EN/KOR) 엔드포인트
+표에서도 제거. 사용자 승인 하에 진행(기존 기능 제거라 별도 확인 거침).
+
+**아직 미반영 (다음 라운드, P2 - 배포를 막는 수준 아님)**:
 - `DB_PATH` 8곳 통합, `sim_loop.py`를 클래스로 전환(파일이 더 커질 경우에만)

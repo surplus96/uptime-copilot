@@ -37,7 +37,7 @@ from core.harness import (
 )
 from rag import rag_service
 from agent import agent_service
-from data import event_simulator, event_store, sim_loop, sim_store
+from data import event_store, sim_loop, sim_store
 
 
 
@@ -233,11 +233,6 @@ def agent_query(req: AgentQueryRequest):
 def agent_resume(req: AgentResumeRequest):
     """승인 대기 중인 요청에 사람의 결정을 전달해서 재개한다."""
     return agent_service.resume_agent(req.thread_id, req.approved)
-
-@app.post("/simulate/tick")
-def simulate_tick(hours: int = 1):
-    """실시간 런타임 시뮬레이터: hours시간 분량의 텔레메트리 + 소확률 오류/고장 이벤트를 생성한다."""
-    return event_simulator.generate_tick(hours=hours)
 
 @app.post("/scan")
 def trigger_scan():

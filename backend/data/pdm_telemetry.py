@@ -14,17 +14,6 @@ _BASELINE_CACHE: dict[int, dict[str, tuple[float, float]]] = {}
 DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
 
 
-def get_recent_telemetry(machine_id: int, hours: int = 24) -> list[dict]:
-    """특정 설비의 최근 N시간 센서 데이터를 조회한다."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT datetime, volt, rotate, pressure, vibration FROM telemetry "
-        "WHERE machineID = ? ORDER BY datetime DESC LIMIT ?",
-        (machine_id, hours),
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
 
 
 def _baseline(machine_id: int) -> dict[str, tuple[float, float]]:
