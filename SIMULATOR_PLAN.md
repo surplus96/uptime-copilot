@@ -278,3 +278,44 @@ HEALTHY인데 `detected_events`에 행이 있으면 `true` — "지금 보이는
   지워짐" 명시. Architecture Principles에도 자동 시뮬레이터 문단 추가.
 - ~~`SIM_TICK_SECONDS`/`SIM_HOURS_PER_TICK`/`SIM_SEED` 환경변수는 README 환경변수 표에
   아직 없음.~~ **2026-09-22 해소**: 세 변수 모두 README(EN/KOR) 환경변수 표에 추가.
+
+## 배포 전 전체 점검 (2026-09-22, 5개 전담 에이전트 병렬 실행)
+
+보안·코드품질·빌드·테스트·인터페이스 5개 관점에서 이번 세션의 시뮬레이터 변경분
+(커밋 `9b34e21`)을 병렬 점검. 발견 사항이 많아 여기서는 실제로 반영한 것만 요약하고,
+전체 findings는 세션 로그 참고.
+
+**즉시 반영 (커밋 `5f30330`)**:
+- `.env`가 Docker 이미지에 그대로 구워지고 있던 것 확인(보안+빌드 두 에이전트가
+  독립적으로 발견, 실제 컨테이너에 `/app/.env` 존재까지 확인) → `backend/.dockerignore`/
+  `frontend/.dockerignore`에 `.env` 제외 추가.
+- `conftest.py`의 `event_store_module` fixture가 `sim_query.DB_PATH`는 안 바꿔치기해서,
+  `event_store._dataset_now()`가 `sim_query`에 위임하도록 바뀐 뒤로 테스트가 진짜
+  운영 DB(67MB)를 읽고 있었음(테스트 에이전트 발견) - 그 결과 2026-09-17에 잡았던
+  `evidence_at`/`completed_at` 혼동 회귀를 다시 못 잡는 상태로 조용히 퇴행. 1줄 수정.
+- `backend/tests/test_sim_query.py` 신설(25개) - `sim_query.<이름>` 호출부를 AST로
+  전수 스캔해서 이름이 실제로 존재하는지 확인하는 테스트 포함, 이게 있었으면
+  `sim_only_now()` 삭제 사고를 즉시 잡았을 것(실제로 재현해서 검증함).
+
+**즉시 반영 (2번째 커밋, 보안 HIGH)**:
+- `/simulator/inject`에 존재하지 않는 signal 문자열을 넣으면 다음 틱에서 `KeyError`가
+  나고, 그 틱 전체가 커밋 전에 죽어서 같은 상태·같은 난수로 무한 반복되는 문제(보안
+  에이전트가 실제로 `KeyError` 발생시켜서 재현) → `main.py`의 `SimulatorInjectRequest`에
+  `Literal["volt","rotate","pressure","vibration"]` 제약 추가(422로 원천 차단) +
+  `sim_engine.py`의 두 dict 조회를 `.get()`으로 방어(2차 방어선).
+- `run_forever()`의 `is_running()`이 `try` 바깥에 있어서 DB 오류 한 번에 루프가
+  조용히 영구 정지할 수 있던 문제(코드품질+테스트 에이전트 둘 다 지적) → `try` 안으로
+  이동, `last_error`/`consecutive_failures`를 `sim_control`에 기록해서 `/simulator/status`
+  응답에 노출.
+- `_tick_once()`가 이벤트 루프에서 동기 실행되어 틱 도는 동안 `/health`까지 멈추던
+  문제(코드품질 에이전트, 실측은 안 됐으나 근거 확인) → `asyncio.to_thread()`로 오프로드.
+- 재빌드 후 실제 컨테이너로 검증: 이상한 signal 값 → 422 확인, 정상 흐름(재시작 →
+  주입 → 5회 폴링, 여러 설비 자연 발생 열화/고장 순환) → `last_error: null` 유지 확인.
+
+**아직 미반영 (다음 라운드)**:
+- HF 임베딩 모델 캐시 미영속화(재빌드마다 476MB 재다운로드) + `HF_HUB_DISABLE_XET=1`
+- 새 환경 배포 시 `pdm_dataloader.py`가 자동 실행 안 되어 헬스체크는 통과하는데
+  데이터가 텅 빈 상태로 뜨는 문제 - 배포 런북 필요
+- 리셋 버튼 UX(확인 절차 없음, `completed_events` 삭제 사실 미고지), 시작/정지/리셋
+  에러 처리 없음, 진행률 바에 내부 상태값 그대로 노출 등 인터페이스 항목들
+- 틱 원자성(트랜잭션 분리), DB_PATH 7곳 중복, 커넥션 누수, lint/타입체커/CI 부재

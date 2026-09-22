@@ -109,6 +109,8 @@ def status() -> dict:
         "has_stale_events": not degrading and has_events,
         "elapsed_seconds": round(now - float(started_at)) if running and started_at else None,
         "seconds_since_last_tick": round(now - float(last_tick_at)) if last_tick_at else None,
+        "last_error": _get_control("last_error") or None,
+        "consecutive_failures": int(_get_control("consecutive_failures", "0")),
     }
 
 
@@ -183,11 +185,27 @@ def _tick_once() -> None:
 
 async def run_forever() -> None:
     """서버 생애 동안 SIM_TICK_SECONDS마다 한 번씩 틱을 시도한다. running=0이면 그냥 쉰다.
-    한 틱이 실패해도 루프 자체는 죽지 않는다(notify.py/cmms_client.py와 같은 원칙)."""
+    한 틱이 실패해도 루프 자체는 죽지 않는다(notify.py/cmms_client.py와 같은 원칙) -
+    단, is_running() 자체가 DB 오류로 실패할 수도 있으므로 그것도 try 안에 넣는다
+    (2026-09-22 code-quality-reviewer 지적: try 밖에 있으면 그 실패는 루프를 영구
+    정지시키는데 아무 데도 안 남는다). 연속 실패가 쌓이면 last_error에 기록해서
+    /simulator/status로 드러나게 한다."""
+    consecutive = 0
     while True:
         await asyncio.sleep(SIM_TICK_SECONDS)
-        if is_running():
-            try:
-                _tick_once()
-            except Exception:
-                logger.exception("[시뮬레이터] 틱 실행 중 오류")
+        try:
+            if not is_running():
+                continue
+            await asyncio.to_thread(_tick_once)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            consecutive += 1
+            logger.exception("[시뮬레이터] 틱 실행 중 오류 (연속 %d회)", consecutive)
+            _set_control("last_error", f"{type(e).__name__}: {e}")
+            _set_control("consecutive_failures", str(consecutive))
+        else:
+            if consecutive:
+                consecutive = 0
+                _set_control("last_error", "")
+                _set_control("consecutive_failures", "0")

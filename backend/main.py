@@ -9,6 +9,7 @@ import os
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -258,7 +259,7 @@ def simulator_status():
 
 class SimulatorInjectRequest(BaseModel):
     machine_id: int
-    signal: str | None = None
+    signal: Literal["volt", "rotate", "pressure", "vibration"] | None = None
 
 
 @app.post("/simulator/inject")

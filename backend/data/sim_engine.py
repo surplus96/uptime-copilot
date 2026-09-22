@@ -37,7 +37,7 @@ class MachineSim:
 
 
 def _pick_error(signal: str | None, rng: random.Random) -> str:
-    if signal and rng.random() < SAME_ERROR_PROB:
+    if signal and signal in SIGNAL_TO_ERROR and rng.random() < SAME_ERROR_PROB:
         return SIGNAL_TO_ERROR[signal]
     return rng.choices(ERROR_IDS, weights=ERROR_WEIGHTS)[0]
 
@@ -70,7 +70,7 @@ def step(m: MachineSim, rng: random.Random, hour_of_day: int) -> dict:
             m.state = "FAULT"
 
         if m.elapsed >= m.lead_hours and hour_of_day == FAILURE_HOUR:
-            failure = maint = SIGNAL_TO_COMPONENT[m.signal]
+            failure = maint = SIGNAL_TO_COMPONENT.get(m.signal)
             m.state = "HEALTHY"
             m.signal = None
             m.direction = 0
