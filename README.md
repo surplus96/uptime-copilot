@@ -242,16 +242,10 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
   (diagrams, key engineering decisions, debugging war-stories)
 - `SIMULATOR_PLAN.md` — design record for the automated degradation simulator: measured
   calibration data, state machine, background loop, and the `/simulator/*` API
-- `SESSION_SUMMARY.md` — running engineering log of past work sessions (a narrative log,
-  not a reference — may lag behind the latest changes; verify against the code for
-  anything load-bearing)
 - `PHASE_7_PLAN.md` — **optional integration, not required to run this project.** Design/
   status record for Slack alerting + CMMS work-order push. With `SLACK_WEBHOOK_URL` /
   `CMMS_MCP_URL` / `CMMS_MCP_TOKEN` left unset, both features no-op and the app is fully
   functional without anything described in this file.
 - `frontend/UI_UPGRADE_PLAN.md` — record of the frontend upgrade pass; fully closed out,
   kept as history rather than an active backlog
-- `.claude/agents/README.md` — the nine review/diagnosis subagents installed in this repo
-  (code quality, security, pipeline, docs, interface, debugger, build-doctor, performance,
-  test-engineer) and when to reach for each
 - `LICENSE` — MIT

@@ -224,14 +224,9 @@ CI(`.github/workflows/backend-checks.yml`)가 모든 push와 PR마다 `ruff chec
   (다이어그램, 주요 엔지니어링 결정, 디버깅 사례)
 - `SIMULATOR_PLAN.md` — 자동 열화 시뮬레이터 설계 기록: 실측 보정 데이터, 상태 머신,
   백그라운드 루프, `/simulator/*` API
-- `SESSION_SUMMARY.md` — 과거 작업 세션의 엔지니어링 로그 (서술형 기록이며 참고 문서가
-  아님 — 최신 변경을 반영하지 못할 수 있으니 중요한 내용은 코드로 확인)
 - `PHASE_7_PLAN.md` — **선택적 연동, 이 프로젝트 실행에 필수 아님.** Slack 알림 + CMMS
   작업지시서 전송의 설계/진행 기록. `SLACK_WEBHOOK_URL` / `CMMS_MCP_URL` / `CMMS_MCP_TOKEN`을
   비워두면 두 기능 모두 동작하지 않고, 앱은 이 파일에 적힌 어떤 것도 없이 완전히 동작합니다.
 - `frontend/UI_UPGRADE_PLAN.md` — 프론트엔드 개선 작업 기록. 완전히 종료되었으며 진행 중인
   백로그가 아닌 이력으로 보관
-- `.claude/agents/README.md` — 이 저장소에 설치된 9개 리뷰/진단 서브에이전트(코드 품질, 보안,
-  파이프라인, 문서, 인터페이스, 디버거, build-doctor, 성능, 테스트 엔지니어)와 각각을 언제
-  쓰는지
 - `LICENSE` — MIT
