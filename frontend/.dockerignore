@@ -1,7 +1,5 @@
-store/
 .venv
 __pycache__
 *.pyc
-.pytest_cache
 .env
 !.env.example

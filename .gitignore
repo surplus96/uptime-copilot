@@ -138,6 +138,8 @@ backend/store/*
 !backend/store/.gitkeep
 .DS_Store
 claude-history.txt
+# 병렬 리뷰용 서브에이전트 임시 워크트리 (배포 전 점검 등에서 생성) - 버전 관리 대상 아님
+.claude/worktrees/
 
 # Environments
 .env

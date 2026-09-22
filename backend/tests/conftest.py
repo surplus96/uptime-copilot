@@ -15,10 +15,14 @@ def event_store_module(tmp_path, monkeypatch):
     임시 파일로 바꿔치기한 event_store 모듈을 반환한다."""
     import sqlite3
 
-    from data import event_store
+    from data import event_store, sim_query
 
     db_path = str(tmp_path / "test_events.db")
     monkeypatch.setattr(event_store, "DB_PATH", db_path)
+    # _dataset_now()는 이제 sim_query.dataset_now()에 위임한다(2026-09-22 시뮬레이터
+    # 연동) - sim_query의 DB_PATH도 같이 바꿔치기하지 않으면 이 fixture가 실제
+    # pdm_telemetry.db를 그대로 읽어버린다(2026-09-22 test-engineer 발견).
+    monkeypatch.setattr(sim_query, "DB_PATH", db_path)
     event_store.init_event_table()
 
     # complete_events()가 내부적으로 _dataset_now()로 telemetry 테이블을 조회한다 -
