@@ -331,7 +331,27 @@ HEALTHY인데 `detected_events`에 행이 있으면 `true` — "지금 보이는
 - `pdm_dataloader.py` 자동 미실행 문제는 README에 이미 문서화돼 있음을 확인
   (`docker compose exec backend python data/pdm_dataloader.py`) - 추가 조치 불필요.
 
-**아직 미반영 (다음 라운드)**:
-- 리셋 버튼 UX(확인 절차 없음, `completed_events` 삭제 사실 미고지), 시작/정지/리셋
-  에러 처리 없음, 진행률 바에 내부 상태값 그대로 노출 등 인터페이스 항목들
-- 틱 원자성(트랜잭션 분리), DB_PATH 7곳 중복, 커넥션 누수, lint/타입체커/CI 부재
+**즉시 반영 (5번째 커밋, 인터페이스)**: 리셋 확인 체크박스 + 삭제 범위 명시, 시작/정지/
+리셋 에러 처리(`raise_for_status` + `st.error`), 오인시키던 "이전 데이터" 경고를 중립
+문구로 정정, 진행률 바를 한글 라벨+퍼센트로, `last_error`/`consecutive_failures`를
+빨간 배너로 노출, 목록 8개로 제한.
+
+**즉시 반영 (6번째 커밋)**:
+- `_tick_once()`를 커넥션 하나·트랜잭션 하나로 통합 - 텔레메트리 기록 후 상태 저장
+  직전에 죽으면 다음 재시작 때 그 시간이 중복 진행되던 불일치 제거
+  (code-quality-reviewer M2). `sim_store.save_states()`에 선택적 `conn` 인자 추가해서
+  호출자가 트랜잭션을 공유할 수 있게 함(기존 호출부는 그대로 동작).
+- `threading.Lock()`으로 `_tick_once()`/`inject()`/`reset()`이 동시에 `sim_state`를
+  건드리지 못하게 함 - `inject()`로 강제 열화시켜도 마침 그때 도는 틱이 조용히
+  되돌려놓을 수 있던 문제(security-reviewer M1) 해결. 실제로 틱 도는 중에
+  inject 호출해서 유실 안 되는 것까지 확인.
+- INSERT 문에 컬럼명을 전부 명시(code-quality-reviewer M7) - 스키마 순서가 바뀌어도
+  조용히 밀리지 않도록.
+- `DB_PATH` 8곳 통합은 기존 테스트의 `monkeypatch.setattr(module, "DB_PATH", ...)`
+  패턴과 얽혀 있고 위 항목들보다 리스크 대비 실익이 낮다고 판단해 보류.
+
+**아직 미반영 (다음 라운드, 전부 P1/P2 - 배포를 막는 수준 아님)**:
+- lint/타입체커/CI 부재 (mypy가 있었으면 `sim_only_now` 삭제를 즉시 잡았을 것)
+- `/simulate/tick`(구 수동 시뮬레이터)와 `event_simulator.py` 정리 여부 - 기존 기능
+  제거라 별도 확인 필요
+- `DB_PATH` 8곳 통합, `sim_loop.py`를 클래스로 전환(파일이 더 커질 경우에만)

@@ -9,6 +9,7 @@ import os
 import pickle
 import random
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -26,6 +27,12 @@ SIM_HOURS_PER_TICK = int(os.getenv("SIM_HOURS_PER_TICK", "1"))
 SIM_SEED = int(os.getenv("SIM_SEED", "42"))
 
 logger = logging.getLogger(__name__)
+
+# _tick_once()(백그라운드 스레드)와 inject()/reset()(FastAPI 워커 스레드)가 같은
+# sim_state를 동시에 읽고-고치고-쓸 수 있다 - 둘 다 전체 100행을 한 번에 덮어쓰므로
+# 늦게 끝나는 쪽이 상대방의 변경을 통째로 지운다(2026-09-22 security-reviewer 지적:
+# inject()로 강제 열화시켜도 마침 그때 도는 틱이 조용히 되돌려놓을 수 있었다).
+_LOCK = threading.Lock()
 
 
 def _get_control(key: str, default: str | None = None) -> str | None:
@@ -72,13 +79,14 @@ def stop() -> None:
 
 def reset() -> None:
     """SIMULATOR_PLAN.md '클린 상태 보장' - 명시적으로 호출될 때만 지운다."""
-    conn = sqlite3.connect(DB_PATH)
-    for table in ("sim_telemetry", "sim_errors", "sim_failures", "sim_maint", "sim_state", "sim_control"):
-        conn.execute(f"DELETE FROM {table}")
-    conn.execute("DELETE FROM detected_events")
-    conn.execute("DELETE FROM completed_events")
-    conn.commit()
-    conn.close()
+    with _LOCK:
+        conn = sqlite3.connect(DB_PATH)
+        for table in ("sim_telemetry", "sim_errors", "sim_failures", "sim_maint", "sim_state", "sim_control"):
+            conn.execute(f"DELETE FROM {table}")
+        conn.execute("DELETE FROM detected_events")
+        conn.execute("DELETE FROM completed_events")
+        conn.commit()
+        conn.close()
 
 
 def status() -> dict:
@@ -117,21 +125,22 @@ def status() -> dict:
 
 def inject(machine_id: int, signal: str | None = None) -> dict:
     """데모용: 특정 설비를 강제로 강한 열화 상태로 만들어 곧 감지되게 한다."""
-    rng = _load_rng()
-    states = sim_store.load_states()
-    m = states.get(machine_id)
-    if m is None:
-        return {"error": f"machine_id {machine_id} 없음"}
-    m.state = "DEGRADING"
-    m.signal = signal or rng.choice(sim_engine.SIGNALS)
-    m.direction = 1
-    m.drift_sigma = sim_engine.STRONG_RANGE[1]
-    m.lead_hours = rng.randint(*sim_engine.LEAD_HOURS)
-    m.elapsed = 0
-    m.errors_emitted = 0
-    sim_store.save_states(states)
-    _save_rng(rng)
-    return {"machine_id": machine_id, "signal": m.signal, "drift_sigma": round(m.drift_sigma, 2)}
+    with _LOCK:
+        rng = _load_rng()
+        states = sim_store.load_states()
+        m = states.get(machine_id)
+        if m is None:
+            return {"error": f"machine_id {machine_id} 없음"}
+        m.state = "DEGRADING"
+        m.signal = signal or rng.choice(sim_engine.SIGNALS)
+        m.direction = 1
+        m.drift_sigma = sim_engine.STRONG_RANGE[1]
+        m.lead_hours = rng.randint(*sim_engine.LEAD_HOURS)
+        m.elapsed = 0
+        m.errors_emitted = 0
+        sim_store.save_states(states)
+        _save_rng(rng)
+        return {"machine_id": machine_id, "signal": m.signal, "drift_sigma": round(m.drift_sigma, 2)}
 
 
 def _signal_values(machine_id: int, offsets: dict[str, float], rng: random.Random) -> tuple[float, float, float, float]:
@@ -150,37 +159,61 @@ def _tick_once() -> None:
     sim_last = sim_query.sim_only_now()
     base_ts = pd.Timestamp(sim_last) if sim_last else pd.Timestamp.now().floor("h")
 
-    conn = sqlite3.connect(DB_PATH)
     changed: set[int] = set()
-    for h in range(1, SIM_HOURS_PER_TICK + 1):
-        ts = base_ts + pd.Timedelta(hours=h)
-        for m in states.values():
-            was_state = m.state
-            r = sim_engine.step(m, rng, ts.hour)
-            conn.execute(
-                "INSERT INTO sim_telemetry VALUES (?, ?, ?, ?, ?, ?)",
-                (str(ts), m.machine_id, *_signal_values(m.machine_id, r["offsets"], rng)),
-            )
-            for err in r["errors"]:
-                conn.execute("INSERT INTO sim_errors VALUES (?, ?, ?)", (str(ts), m.machine_id, err))
-            if r["failure"]:
-                conn.execute("INSERT INTO sim_failures VALUES (?, ?, ?)", (str(ts), m.machine_id, r["failure"]))
-                conn.execute("INSERT INTO sim_maint VALUES (?, ?, ?)", (str(ts), m.machine_id, r["maint"]))
-            if r["errors"] or r["failure"] or m.state != was_state:
-                changed.add(m.machine_id)
-    conn.commit()
-    conn.close()
+    with _LOCK:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            for h in range(1, SIM_HOURS_PER_TICK + 1):
+                ts = base_ts + pd.Timedelta(hours=h)
+                for m in states.values():
+                    was_state = m.state
+                    r = sim_engine.step(m, rng, ts.hour)
+                    conn.execute(
+                        'INSERT INTO sim_telemetry ("datetime", "machineID", volt, rotate, pressure, vibration) '
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (str(ts), m.machine_id, *_signal_values(m.machine_id, r["offsets"], rng)),
+                    )
+                    for err in r["errors"]:
+                        conn.execute(
+                            'INSERT INTO sim_errors ("datetime", "machineID", "errorID") VALUES (?, ?, ?)',
+                            (str(ts), m.machine_id, err),
+                        )
+                    if r["failure"]:
+                        conn.execute(
+                            'INSERT INTO sim_failures ("datetime", "machineID", "failure") VALUES (?, ?, ?)',
+                            (str(ts), m.machine_id, r["failure"]),
+                        )
+                        conn.execute(
+                            'INSERT INTO sim_maint ("datetime", "machineID", "comp") VALUES (?, ?, ?)',
+                            (str(ts), m.machine_id, r["maint"]),
+                        )
+                    if r["errors"] or r["failure"] or m.state != was_state:
+                        changed.add(m.machine_id)
 
-    sim_store.save_states(states)
-    _save_rng(rng)
+            # 상태/난수/마지막 틱 시각까지 전부 같은 트랜잭션에 묶는다 - 텔레메트리는
+            # 기록됐는데 상태 저장 직전에 죽어서 다음 재시작 때 그 시간이 중복 진행되는
+            # 불일치를 막는다(2026-09-22 code-quality-reviewer 지적).
+            sim_store.save_states(states, conn=conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO sim_control VALUES (?, ?)",
+                ("rng_state", base64.b64encode(pickle.dumps(rng.getstate())).decode()),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO sim_control VALUES (?, ?)",
+                ("last_tick_at", str(time.time())),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     scan_targets = {m.machine_id for m in states.values() if m.state != "HEALTHY"} | changed
     if scan_targets:
         detected, alerts = agent_service.scan_machines(sorted(scan_targets))
         if alerts:
             notify.send_alert(f"[자동 스캔] 새로 감지된 이상 {len(alerts)}건\n\n" + "\n\n".join(alerts))
-
-    _set_control("last_tick_at", str(time.time()))
 
 
 async def run_forever() -> None:

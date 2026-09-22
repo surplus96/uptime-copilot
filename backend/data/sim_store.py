@@ -36,12 +36,20 @@ def load_states() -> dict[int, MachineSim]:
     return states
 
 
-def save_states(states: dict[int, MachineSim]) -> None:
-    conn = sqlite3.connect(DB_PATH)
+def save_states(states: dict[int, MachineSim], conn: sqlite3.Connection | None = None) -> None:
+    """conn을 넘기면 그 커넥션의 트랜잭션에 그대로 편승한다(커밋/닫기는 호출자 책임) -
+    _tick_once()가 텔레메트리 기록과 상태 저장을 한 트랜잭션으로 묶을 때 쓴다
+    (2026-09-22 code-quality-reviewer 지적: 따로 커밋되면 그 사이에 죽었을 때
+    텔레메트리는 남고 상태는 전 틱으로 되돌아가는 불일치가 생긴다). conn 없이
+    부르면 기존처럼 자체 커넥션을 열고 바로 커밋한다."""
+    own_conn = conn is None
+    if own_conn:
+        conn = sqlite3.connect(DB_PATH)
     conn.executemany(
         "INSERT OR REPLACE INTO sim_state VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [(m.machine_id, m.state, m.signal, m.direction, m.drift_sigma, m.lead_hours, m.elapsed, m.errors_emitted)
          for m in states.values()],
     )
-    conn.commit()
-    conn.close()
+    if own_conn:
+        conn.commit()
+        conn.close()
