@@ -12,7 +12,7 @@
 
 | | | | |
 |---|---|---|---|
-| **100** monitored machines | **3-tier** severity model | **16** regression tests | **9** dedicated review agents |
+| **100** monitored machines | **3-tier** severity model | **51** regression tests | **9** dedicated review agents |
 
 ---
 
@@ -127,7 +127,40 @@ event store. Whether a completed event is allowed to resurface is decided by **w
 error logs have actually accumulated since completion; otherwise it stays quietly suppressed
 no matter how many times you scan.
 
-## 04 · External Integrations — Slack alerts · CMMS work orders (MCP)
+## 04 · Automated Degradation Simulator
+
+The source dataset is frozen at 2016-01-01 — nothing new ever happens in it unless someone
+manually advances a clock. I built a background simulator that runs its own per-machine
+state machine and keeps producing new, evolving failures on its own, so the full
+diagnose → approve → notify pipeline can run itself, unattended, for a live demo.
+
+```mermaid
+stateDiagram-v2
+    [*] --> HEALTHY
+    HEALTHY --> DEGRADING: onset (per-hour probability)
+    DEGRADING --> FAULT: precursor error fires
+    DEGRADING --> HEALTHY: lead time elapses, no error ever fired
+    FAULT --> HEALTHY: lead time elapses — failure + maintenance recorded
+```
+*Figure 3 — Per-machine lifecycle, driven by `backend/data/sim_engine.py`*
+
+> **Calibrated against measured reality, not guessed.** The first version used made-up
+> numbers. I measured the real dataset instead — 761 failures across 100 machines — and
+> rebuilt every constant around what actually happens there: the telemetry deviation at
+> failure time averages **1.6σ**, not the 6σ a naive model would climb to; the lead time
+> from first drift to failure runs **44–52 hours**; the large majority of failures are
+> preceded by *some* error in the prior week, but only a minority of errors are ever
+> followed by a failure. The simulator reproduces that same statistical texture instead of
+> an easy-to-detect caricature of it.
+
+A single `asyncio` background task, wired into FastAPI's lifespan, advances all 100
+machines together (1 real minute ≈ 1 simulated hour), writes to dedicated `sim_*` tables —
+structurally separate from the original, read-only dataset — and runs an incremental scan
+plus batched Slack alert after every tick. A `threading.Lock` serializes each tick against
+operator-triggered actions (force-inject, reset) so the two can't race on the same
+100-row state table.
+
+## 05 · External Integrations — Slack alerts · CMMS work orders (MCP)
 
 Post-approval alerts and work-order creation are not tool calls an agent decides to make on
 the fly — they are fixed actions that follow a decision already made. So instead of
@@ -140,10 +173,10 @@ that code calls one predetermined tool (`create-work-order`) directly and determ
 > (`ALLOWED_HOSTS`) against DNS rebinding. I later reused the same pattern to extend the
 > uptime-copilot backend's own `TrustedHostMiddleware`.
 
-## 05 · Engineering Notes — Problems I actually hit
+## 06 · Engineering Notes — Problems I actually hit
 
 A system that looks like it works can, on closer inspection, be quietly returning wrong
-values. Four cases where I took it all the way through reproduction, root cause, and fix:
+values. Six cases where I took it all the way through reproduction, root cause, and fix:
 
 <details>
 <summary><strong>BUG · Event suppression — "Scanning shows nothing": two clocks were being mixed</strong></summary>
@@ -183,19 +216,47 @@ settled on a separator-based alternative — without modifying another open-sour
 frontend.
 </details>
 
-## 06 · Quality & Process — Testing and review
+<details>
+<summary><strong>BUG · A function vanished mid-edit, and nothing caught it for 70 minutes</strong></summary>
+
+A function the whole simulator background loop depended on was silently deleted while
+hand-editing an unrelated part of the same file. Every tick kept "succeeding" from the
+outside — `/simulator/status` reported `running: true` the entire time — because the
+resulting exception landed in a bare `except Exception: logger.exception(...)` that just
+logged and moved on, with no surfaced count of consecutive failures. It only became visible
+as a live 500 in the browser, 70 minutes later. I wrote a test that AST-scans every call
+site of that module and asserts the referenced name still exists on it, then added mypy to
+CI — the exact class of bug a type checker catches in under a second and a test suite alone
+can miss.
+</details>
+
+<details>
+<summary><strong>RACE · Two writers, one table, no lock — a forced demo event could silently vanish</strong></summary>
+
+The background tick and the operator-triggered "force a failure now" endpoint both do a
+full read-modify-write of the same 100-row simulator state table, from separate threads.
+Whichever finished last silently overwrote the other's write — an operator forcing a
+failure for a demo could watch it get discarded by a tick landing at the same moment. A
+security review surfaced it by reasoning about the two code paths, not by reproducing it
+live; I added a `threading.Lock` around both paths and confirmed the fix by deliberately
+racing an inject against a tick.
+</details>
+
+## 07 · Quality & Process — Testing and review
 
 | Item | Details |
 |---|---|
-| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. |
+| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. 51 tests total. |
+| Static analysis + CI | ruff and mypy run in GitHub Actions on every push/PR, scoped to the modules under active development — adopted specifically because the "vanished function" bug above is exactly what a type checker catches instantly and a test suite might not. |
 | Dedicated review agents | Nine subagents, each reviewing from one lane only: security / code quality / interface / pipeline & model operations / docs / debugging / build & packaging / performance / test validity — designed on the premise that reviewing code in the same context that wrote it lets defects straight through. |
 | Observability | LangSmith tracing, with traces anonymized using the same PII regexes before being sent. |
 
-## 07 · Stack
+## 08 · Stack
 
 `FastAPI` `LangGraph` `LangChain` `OpenAI API` `Streamlit` `SQLite` `Chroma`
 `HuggingFace sentence-transformers` `rank_bm25` `Model Context Protocol SDK`
-`LangSmith` `Docker / Docker Compose` `pytest / pytest-asyncio`
+`LangSmith` `Docker / Docker Compose` `pytest / pytest-asyncio` `asyncio`
+`ruff` `mypy` `GitHub Actions`
 
 ---
 
