@@ -49,7 +49,14 @@ def build_machine_features(machine_id: int, telemetry, errors, maint, failures, 
         roll[f"{sig}_mean_24h"] = t[sig].rolling("24h").mean()
         roll[f"{sig}_std_24h"] = t[sig].rolling("24h").std()
     out = pd.DataFrame(roll, index=t.index).iloc[::SAMPLE_INTERVAL_H].copy()
+    # CP-U1 교차 검토(2026-09-23, docs/decisions.md) 지적: 설비 관측 시작 직후엔 오류
+    # 48h 창이 덜 찬 채로 값이 나오고(NaN이 아니라 0에 가깝게), 관측 끝 직전엔 라벨의
+    # 24h 창이 데이터 밖으로 나간다 - 둘 다 잘라낸다.
+    start_ok = t.index[0] + pd.Timedelta(hours=max(ERROR_WINDOWS_H))
+    end_ok = t.index[-1] - pd.Timedelta(hours=LABEL_WINDOW_H)
+    out = out[(out.index >= start_ok) & (out.index <= end_ok)]
 
+    # 아래 오류/정비 피처는 전부 (T-w, T] 구간 - T 시점 자체도 포함한다.
     for eid in ERROR_IDS:
         arr = e.loc[e["errorID"] == eid, "datetime"].values
         for w in ERROR_WINDOWS_H:
