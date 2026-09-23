@@ -23,7 +23,7 @@ from data import pdm_operations, pdm_telemetry
 from rag.pump_manual import ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES, SIGNAL_TO_COMPONENT
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY") or "sk-not-set", timeout=30.0)
 
 # 라우팅/추출/판정 계열 노드 전부가 참조하는 단일 모델 상수. main.py의 DEFAULT_MODEL과
 # 같은 OPENAI_MODEL 환경변수를 읽어서, .env 값 하나만 바꾸면 코드 수정 없이 전체가 바뀐다.

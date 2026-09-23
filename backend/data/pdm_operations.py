@@ -13,7 +13,17 @@ from data import sim_query
 DATA_DIR = str(Path(__file__).parent.parent.parent / "archive")
 DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
 
-_machines = pd.read_csv(f"{DATA_DIR}/PdM_machines.csv")
+_machines_cache: pd.DataFrame | None = None
+
+
+def _machines() -> pd.DataFrame:
+    """PdM_machines.csv는 archive/ 데이터셋(다운로드 필요)에 있어 import 시점엔
+    없을 수 있다 - 실제로 쓰일 때까지 로딩을 미뤄서 데이터 없이도 이 모듈을 import할
+    수 있게 한다 (CI/테스트에서 필요)."""
+    global _machines_cache
+    if _machines_cache is None:
+        _machines_cache = pd.read_csv(f"{DATA_DIR}/PdM_machines.csv")
+    return _machines_cache
 
 COMPONENT_DESCRIPTIONS = {
     "comp1": "전동기(모터) 구동부 - 전압 계통과 관련된 핵심 부품",
@@ -39,7 +49,7 @@ def _query_df(sql: str, params: tuple = ()) -> pd.DataFrame:
 
 
 def get_machine_info(machine_id: int) -> dict:
-    row = _machines[_machines["machineID"] == machine_id]
+    row = _machines()[_machines()["machineID"] == machine_id]
     return row.iloc[0].to_dict() if not row.empty else {"error": f"machineID {machine_id} 없음"}
 
 def get_recent_errors(machine_id: int, limit: int = 3) -> list[dict]:
@@ -90,10 +100,10 @@ def estimate_next_maintenance(machine_id: int) -> dict:
 def get_component_failure_stats(model: str | None = None) -> list[dict]:
     """모델별 부품 고장 통계를 설비 1대당 평균 고장 횟수로 정규화해서 반환한다."""
     failures_df = _query_df("SELECT machineID, failure FROM failures")
-    merged = failures_df.merge(_machines[["machineID", "model"]], on="machineID")
+    merged = failures_df.merge(_machines()[["machineID", "model"]], on="machineID")
     counts = merged.groupby(["model", "failure"]).size().reset_index(name="count")
 
-    machine_counts = _machines.groupby("model").size()
+    machine_counts = _machines().groupby("model").size()
     counts["failures_per_machine"] = counts.apply(
         lambda r: round(r["count"] / machine_counts[r["model"]], 3), axis=1
     )
