@@ -10,9 +10,9 @@
 
 `FastAPI` · `LangGraph` · `Streamlit` · `RAG (Chroma)` · `SQLite` · `Model Context Protocol` · `Docker Compose` · `pytest`
 
-| | | | |
-|---|---|---|---|
-| **100** monitored machines | **3-tier** severity model | **51** regression tests | **9** dedicated review agents |
+| | | |
+|---|---|---|
+| **100** monitored machines | **3-tier** severity model | **49** regression tests (CI-enforced) |
 
 ---
 
@@ -246,9 +246,9 @@ racing an inject against a tick.
 
 | Item | Details |
 |---|---|
-| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. 51 tests total. |
+| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. 49 run in CI (`pytest tests/ --ignore=tests/test_rag_dedup.py`); 51 total including 2 that need the live embedding model. |
 | Static analysis + CI | ruff and mypy run in GitHub Actions on every push/PR, scoped to the modules under active development — adopted specifically because the "vanished function" bug above is exactly what a type checker catches instantly and a test suite might not. |
-| Dedicated review agents | Nine subagents, each reviewing from one lane only: security / code quality / interface / pipeline & model operations / docs / debugging / build & packaging / performance / test validity — designed on the premise that reviewing code in the same context that wrote it lets defects straight through. |
+| Review-agent process | During development, used nine single-lane review subagents (security / code quality / interface / pipeline & model operations / docs / debugging / build & packaging / performance / test validity) instead of one general reviewer — reviewing code in the same context that wrote it lets defects straight through. That tooling was development-only and isn't part of the shipped repo. |
 | Observability | LangSmith tracing, with traces anonymized using the same PII regexes before being sent. |
 
 ## 08 · Stack
