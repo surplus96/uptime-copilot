@@ -148,6 +148,29 @@ pytest tests/                                     # full suite, downloads/loads 
 CI (`.github/workflows/backend-checks.yml`) runs `ruff check`, `mypy`, and the fast pytest
 path on every push and pull request.
 
+## Evaluation Baseline
+
+A 40-case golden set (`backend/tests/eval/golden.jsonl`) checks the agent's router and
+machine-ID extraction against real LLM calls. It's excluded from the default test run and
+CI (costs real API tokens) — run it explicitly with:
+
+```bash
+cd backend
+pytest tests/eval/test_golden.py -m eval -v -s
+```
+
+| Metric | Accuracy | Measured |
+|---|---|---|
+| Router (category) | 90.0% | 2026-09-23 |
+| Machine-ID extraction | 100.0% | 2026-09-23 |
+| Re-ask on missing ID | 100.0% | 2026-09-23 |
+
+Each run writes a full per-case breakdown to `backend/tests/eval/results/<timestamp>.json`
+(gitignored — regenerate rather than version-control). Expected severity is intentionally
+*not* pinned in the golden set: the background simulator changes real machine state every
+tick, so severity ground truth is computed live at eval time (`_diagnose_machine()`) rather
+than baked into the file.
+
 ## Environment Variables (`backend/.env`)
 
 | Variable | Required | Effect if unset |

@@ -140,6 +140,8 @@ backend/store/*
 claude-history.txt
 # 병렬 리뷰용 서브에이전트 임시 워크트리 (배포 전 점검 등에서 생성) - 버전 관리 대상 아님
 .claude/worktrees/
+# 골든셋 평가(pytest -m eval)를 돌릴 때마다 새로 생기는 결과물 - 재현 가능하므로 버전 관리 대상 아님
+backend/tests/eval/results/
 
 # Environments
 .env

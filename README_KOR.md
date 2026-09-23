@@ -139,6 +139,28 @@ pytest tests/                                     # 전체 스위트, 임베딩 
 CI(`.github/workflows/backend-checks.yml`)가 모든 push와 PR마다 `ruff check`, `mypy`,
 빠른 경로 pytest를 실행합니다.
 
+## 평가 기준선
+
+40문항 골든셋(`backend/tests/eval/golden.jsonl`)으로 실제 LLM 호출을 통해 에이전트의
+라우팅과 설비번호 추출 정확도를 확인합니다. 실제 API 토큰 비용이 들어서 기본 테스트
+실행과 CI에서는 제외되어 있고, 아래처럼 명시적으로 실행해야 합니다:
+
+```bash
+cd backend
+pytest tests/eval/test_golden.py -m eval -v -s
+```
+
+| 지표 | 정확도 | 측정일 |
+|---|---|---|
+| 라우터 (카테고리) | 90.0% | 2026-09-23 |
+| 설비번호 추출 | 100.0% | 2026-09-23 |
+| 번호 없을 때 되묻기 | 100.0% | 2026-09-23 |
+
+실행할 때마다 문항별 상세 결과가 `backend/tests/eval/results/<timestamp>.json`에 저장됩니다
+(gitignore 대상 — 버전 관리 대신 재실행으로 재현). 기대 긴급도는 골든셋 파일에 일부러
+고정하지 않았습니다 — 백그라운드 시뮬레이터가 매 틱마다 실제 설비 상태를 바꾸기 때문에,
+긴급도 정답은 평가 실행 시점에 `_diagnose_machine()`으로 그때그때 실측합니다.
+
 ## 환경 변수 (`backend/.env`)
 
 | 변수 | 필수 | 미설정 시 동작 |
