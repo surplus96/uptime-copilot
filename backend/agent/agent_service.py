@@ -183,8 +183,9 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
                     f"텔레메트리 이상(사전 경보): {signal} 신호가 통계적으로 벗어남"
                 )
     if top_risk_proba >= RISK_THRESHOLD and top_risk_comp:
+        top_feature_names = ", ".join(f["feature"] for f in risk[top_risk_comp]["top_features"])
         component_evidence.setdefault(top_risk_comp, []).append(
-            f"예측 모델: 24시간 내 고장확률 {top_risk_proba:.0%}"
+            f"예측 모델: 24시간 내 고장확률 {top_risk_proba:.0%}, 주요 근거: {top_feature_names}"
         )
 
     if failure:

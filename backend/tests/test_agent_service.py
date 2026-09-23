@@ -112,7 +112,7 @@ def test_diagnose_machine_uses_risk_model_for_caution(monkeypatch):
     assert result["evidence_at"] is not None  # 추가: None이면 알림이 영원히 억제됨
     assert "comp2" in result["component_evidence"]
     assert "87%" in result["diagnosis"]
-
+    assert "error3_count_24h" in result["component_evidence"]["comp2"]  # 3-7: 주요 근거 포함
 
 
 def test_diagnose_machine_falls_back_to_zscore_when_model_missing(monkeypatch):
