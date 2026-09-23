@@ -53,6 +53,7 @@ class SupervisorState(BaseModel):
     component_manuals: dict[str, str] = {}   # 부품별 매뉴얼 증상 설명
     component_actions: dict[str, str] = {}   # 부품별 표준 조치사항
     perspectives: Annotated[list[str], operator.add] = []
+    perspective_assessments: Annotated[list[dict], operator.add] = []    
     approved: bool | None = None
     work_order: str | None = None
     result: str | None = None
@@ -65,6 +66,14 @@ class RouteDecision(BaseModel):
 
 class IncidentExtraction(BaseModel):
     machine_id: int | None = None
+
+
+class PerspectiveAssessment(BaseModel):
+    risk_level: Literal["낮음", "중간", "높음"]
+    recommended_window: Literal["즉시", "24시간 이내", "1주 이내", "정기 점검 시"]
+    requires_shutdown: bool
+    rationale: str
+
 
 
 def _extract_machine_id(user_message: str) -> int | None:
@@ -338,44 +347,58 @@ def work_order_node(state: SupervisorState) -> dict:
     blocks = [build_section(comp) for comp in state.involved_components]
     return {"work_order": f"설비 #{state.machine_id}\n\n" + "\n\n".join(blocks)}
 
+_DEFAULT_ASSESSMENT = {
+    "risk_level": "중간",
+    "recommended_window": "24시간 이내",
+    "requires_shutdown": False,
+    "rationale": "(자동 평가 실패 - 사람이 직접 판단 필요)",
+}
+
+
+def _assess_perspective(label: str, system_prompt: str, diagnosis: str) -> dict:
+    """세 관점 노드(안전/생산/정비)가 공유하는 평가 로직. 구조화 출력이 거부되거나
+    예외가 나면 '위험도 중간·정지 불필요·24시간 이내 조치'라는 보수적 기본값으로
+    대체한다 - 관점이 아예 빠지는 것보다 사람이 알아챌 수 있는 형태로 안전하게 죽인다."""
+    try:
+        completion = client.chat.completions.parse(
+            model=MODEL,
+            reasoning_effort="none",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": diagnosis},
+            ],
+            response_format=PerspectiveAssessment,
+        )
+        message = completion.choices[0].message
+        if message.refusal or message.parsed is None:
+            raise ValueError(f"관점 평가 모델이 응답을 거부함: {message.refusal}")
+        assessment = message.parsed.model_dump()
+    except Exception as e:
+        logger.warning(f"[{label}] 관점 평가 실패, 안전한 기본값으로 대체: {e}")
+        assessment = dict(_DEFAULT_ASSESSMENT)
+
+    return {
+        "perspectives": [f"[{label}] {assessment['rationale']}"],
+        "perspective_assessments": [{"label": label, **assessment}],
+    }
+
 
 def safety_perspective_node(state: SupervisorState) -> dict:
-    completion = client.chat.completions.create(
-        model=MODEL,
-        reasoning_effort="none",
-        max_completion_tokens=150,
-        messages=[
-            {"role": "system", "content": "당신은 현장 안전 담당자입니다. 아래 사고 상황의 안전 위험도를 2문장 이내로 평가하세요."},
-            {"role": "user", "content": state.diagnosis},
-        ],
+    return _assess_perspective(
+        "안전", "당신은 현장 안전 담당자입니다. 아래 사고 상황의 안전 위험도를 평가하세요.", state.diagnosis
     )
-    return {"perspectives": [f"[안전] {completion.choices[0].message.content}"]}
 
 
 def production_perspective_node(state: SupervisorState) -> dict:
-    completion = client.chat.completions.create(
-        model=MODEL,
-        reasoning_effort="none",
-        max_completion_tokens=150,
-        messages=[
-            {"role": "system", "content": "당신은 생산 관리자입니다. 아래 사고 상황이 생산에 미치는 영향을 2문장 이내로 평가하세요."},
-            {"role": "user", "content": state.diagnosis},
-        ],
+    return _assess_perspective(
+        "생산", "당신은 생산 관리자입니다. 아래 사고 상황이 생산에 미치는 영향을 평가하세요.", state.diagnosis
     )
-    return {"perspectives": [f"[생산] {completion.choices[0].message.content}"]}
 
 
 def maintenance_perspective_node(state: SupervisorState) -> dict:
-    completion = client.chat.completions.create(
-        model=MODEL,
-        reasoning_effort="none",
-        max_completion_tokens=150,
-        messages=[
-            {"role": "system", "content": "당신은 정비 기술자입니다. 아래 사고 상황의 수리 난이도를 2문장 이내로 평가하세요."},
-            {"role": "user", "content": state.diagnosis},
-        ],
+    return _assess_perspective(
+        "정비", "당신은 정비 기술자입니다. 아래 사고 상황의 수리 난이도를 평가하세요.", state.diagnosis
     )
-    return {"perspectives": [f"[정비] {completion.choices[0].message.content}"]}
 
 
 def approval_node(state: SupervisorState) -> dict:

@@ -149,3 +149,37 @@ def test_diagnose_machine_real_failure_always_urgent_regardless_of_risk(monkeypa
     result = svc._diagnose_machine(1)
 
     assert result["severity"] == "긴급"
+
+
+def test_assess_perspective_returns_structured_fields(monkeypatch):
+    class _FakeParsedCompletions:
+        def parse(self, *, response_format, **kwargs):
+            assert response_format is agent_service.PerspectiveAssessment
+            parsed = agent_service.PerspectiveAssessment(
+                risk_level="높음", recommended_window="즉시", requires_shutdown=True, rationale="테스트 근거",
+            )
+            msg = type("M", (), {"parsed": parsed, "refusal": None})()
+            return type("C", (), {"choices": [type("Ch", (), {"message": msg})()]})()
+
+    fake_client = type("Client", (), {"chat": type("Chat", (), {"completions": _FakeParsedCompletions()})()})()
+    monkeypatch.setattr(agent_service, "client", fake_client)
+
+    result = agent_service._assess_perspective("안전", "테스트 프롬프트", "테스트 진단")
+
+    assert result["perspectives"] == ["[안전] 테스트 근거"]
+    assert result["perspective_assessments"][0]["risk_level"] == "높음"
+    assert result["perspective_assessments"][0]["requires_shutdown"] is True
+
+
+def test_assess_perspective_falls_back_on_failure(monkeypatch):
+    class _FakeFailingCompletions:
+        def parse(self, *, response_format, **kwargs):
+            raise ValueError("모델 호출 실패")
+
+    fake_client = type("Client", (), {"chat": type("Chat", (), {"completions": _FakeFailingCompletions()})()})()
+    monkeypatch.setattr(agent_service, "client", fake_client)
+
+    result = agent_service._assess_perspective("생산", "테스트 프롬프트", "테스트 진단")
+
+    assert result["perspective_assessments"][0]["risk_level"] == "중간"
+    assert result["perspective_assessments"][0]["requires_shutdown"] is False
