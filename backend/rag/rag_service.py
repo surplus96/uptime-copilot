@@ -49,7 +49,7 @@ def _load_documents() -> list[Document]:
     return documents
 
 
-def initialize_rag(openai_api_key: str, model_name: str, langsmith_client=None) -> None:
+def initialize_rag(openai_api_key: str, model_name: str, langsmith_client=None, *, base_url: str | None = None) -> None:
     """서버 시작 시 1회 호출: 문서 로드 -> 청킹 -> 임베딩 -> 벡터DB -> RAG 체인 구성."""
     global _rag_chain, _retriever, _tracer
 
@@ -89,7 +89,7 @@ def initialize_rag(openai_api_key: str, model_name: str, langsmith_client=None) 
         weights=[0.5, 0.5],
     )
 
-    model = ChatOpenAI(model=model_name, api_key=openai_api_key)
+    model = ChatOpenAI(model=model_name, api_key=openai_api_key, base_url=base_url)
 
     # 5-1(RAG 정리, 2026-09-23): Multi-Query·Self-RAG 계층 제거. 문서 코퍼스 규모(원본
     # 문서 몇 개 분량 청크) 대비 과잉설계였고, RAG 역량 시연은 SpecGuard에서 한다

@@ -161,12 +161,36 @@ pytest tests/eval/test_golden.py -m eval -v -s
 고정하지 않았습니다 — 백그라운드 시뮬레이터가 매 틱마다 실제 설비 상태를 바꾸기 때문에,
 긴급도 정답은 평가 실행 시점에 `_diagnose_machine()`으로 그때그때 실측합니다.
 
+### 로컬(Ollama) vs 클라우드
+
+같은 골든셋을 완전 로컬 `LLM_PROVIDER=ollama`(Qwen3-8B, Apple Silicon, GPU 가속 없이 Metal만)로
+돌린 결과입니다:
+
+| 지표 | 클라우드 (gpt-5.6-luna) | 로컬 (Ollama Qwen3-8B) |
+|---|---|---|
+| 라우터 정확도 | 90.0% | 77.5% |
+| 설비번호 추출 | 100.0% | 100.0% |
+| 번호 없을 때 되묻기 | 100.0% | 100.0% |
+| 호출당 평균 지연 | 약 1.2초 | 13.6초(라우팅) / 10.8초(추출) |
+
+추출·되묻기는 로컬에서도 똑같이 나옵니다 — 범위가 좁고 형태가 정해진 작업이라 그렇습니다.
+라우팅은 12.5%p 떨어지고, 모든 호출이 자릿수 하나만큼 느려집니다. 골든셋에는 없지만(라우팅·추출만
+다룸) 안전/생산/정비 관점 평가를 따로 확인해 보니, 클라우드에서는 안 나오던 모순된 출력이
+로컬에서 나왔습니다 — `risk_level: "중간"`인데 `requires_shutdown: true`(정지 필요). CP-U2
+교차 검토(`docs/decisions.md`)가 이미 우려했던 지점이 실측으로 재현된 것입니다. 결론: 어댑터
+(`LLM_PROVIDER=ollama`)는 지금 그대로 동작하지만, 완전 로컬 전환은 API 비용 0원·완전 폐쇄망
+운영을 얻는 대신 정확도와 지연에서 측정 가능한 손실을 감수해야 합니다 — 폐쇄망 환경이라면
+감수할 가치가 있지만, 아무 대가 없는 무료 업그레이드는 아닙니다.
+
 ## 환경 변수 (`backend/.env`)
 
 | 변수 | 필수 | 미설정 시 동작 |
 |---|---|---|
-| `OPENAI_API_KEY` | **필수** | 백엔드가 시작되지 않음 |
-| `OPENAI_MODEL` | 선택 | 기본값 `gpt-5.6-luna` |
+| `LLM_PROVIDER` | 선택 | 기본값 `openai`. `ollama`로 설정하면 완전히 로컬 Ollama 서버로만 동작(`backend/core/llm_provider.py`) — API 키·인터넷 불필요, 대신 실측 가능한 정확도/지연 손실 있음(아래 평가 기준선 참고) |
+| `OPENAI_API_KEY` | **`LLM_PROVIDER=ollama`가 아니면 필수** | 백엔드가 시작되지 않음 |
+| `OPENAI_MODEL` | 선택 | 기본값 `gpt-5.6-luna`. `LLM_PROVIDER=openai`일 때만 사용 |
+| `OLLAMA_BASE_URL` | 선택 | 기본값 `http://localhost:11434/v1`. `LLM_PROVIDER=ollama`일 때만 사용 |
+| `OLLAMA_MODEL` | 선택 | 기본값 `qwen3:8b`. `LLM_PROVIDER=ollama`일 때만 사용 — 먼저 `ollama pull qwen3:8b`로 받아야 함 |
 | `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` | 선택 | LangSmith 트레이싱 비활성화 |
 | `SLACK_WEBHOOK_URL` | 선택 | 긴급/주의 감지 시 Slack 알림을 조용히 건너뜀 (`backend/notify.py`) |
 | `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | 선택 | 승인 시 CMMS 작업지시서 전송을 조용히 건너뜀 (`backend/cmms_client.py`). 설정한다면 실행 중인 Atlas-MCP + Atlas CMMS 인스턴스가 필요 — `docs/design/PHASE_7_PLAN.md` 참고 |

@@ -10,11 +10,12 @@
 """
 
 import logging
-import os
 import re
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+from core import llm_provider
 
 # main.py의 import 순서상 이 모듈이 main.py 자신의 load_dotenv() 호출보다 먼저 로드되므로,
 # .env 값을 확실히 읽으려면 이 모듈이 스스로 호출해야 한다(agent_service.py와 동일한 패턴).
@@ -56,10 +57,7 @@ def check_output_forbidden_words(text: str) -> None:
 
 
 # --------------- Inferential checks ---------------
-
-# agent_service.py의 MODEL, main.py의 DEFAULT_MODEL과 같은 OPENAI_MODEL 환경변수를
-# 읽는다 - .env 값 하나만 바꾸면 코드 수정 없이 judge를 포함한 전체 모델이 바뀐다.
-JUDGE_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+JUDGE_MODEL = llm_provider.get_model()
 
 class JudgeResult(BaseModel):
     """LLM-as-judge 출력 구조를 강제하는 스키마. 'pass'는 파이썬 예약어라 alias로 우회."""

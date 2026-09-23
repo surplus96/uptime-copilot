@@ -6,7 +6,6 @@ HITL 체크포인트를 추가한다.
 
 import logging
 import operator
-import os
 import time
 from typing import Annotated, Literal
 
@@ -14,11 +13,11 @@ from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from langsmith.wrappers import wrap_openai
-from openai import OpenAI
 from pydantic import BaseModel
 
 import cmms_client
 import notify
+from core import llm_provider
 from core.harness import check_output_forbidden_words
 from data import pdm_operations, pdm_telemetry, sim_query
 from ml.predict import predict_failure_risk
@@ -26,11 +25,9 @@ from rag.pump_manual import ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES, SIG
 
 load_dotenv()
 logger = logging.getLogger(__name__)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY") or "sk-not-set", timeout=30.0)
+client = llm_provider.get_client()
 
-# 라우팅/추출/판정 계열 노드 전부가 참조하는 단일 모델 상수. main.py의 DEFAULT_MODEL과
-# 같은 OPENAI_MODEL 환경변수를 읽어서, .env 값 하나만 바꾸면 코드 수정 없이 전체가 바뀐다.
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+MODEL = llm_provider.get_model()
 
 def initialize_agent(langsmith_client, checkpointer) -> None:
     """main.py의 lifespan에서 호출: main.py와 같은 LangSmith Client(PII 익명화 포함)로
@@ -82,7 +79,8 @@ class PerspectiveAssessment(BaseModel):
 
 
 def _extract_machine_id(user_message: str) -> int | None:
-    completion = client.chat.completions.parse(
+    completion = llm_provider.parse_with_retry(
+        client,
         model=MODEL,
         reasoning_effort="none",
         messages=[
@@ -91,11 +89,13 @@ def _extract_machine_id(user_message: str) -> int | None:
         ],
         response_format=IncidentExtraction,
     )
+
     return completion.choices[0].message.parsed.machine_id
 
 
 def route_node(state: SupervisorState) -> dict:
-    completion = client.chat.completions.parse(
+    completion = llm_provider.parse_with_retry(
+        client,
         model=MODEL,
         reasoning_effort="none",
         messages=[
@@ -113,6 +113,7 @@ def route_node(state: SupervisorState) -> dict:
         ],
         response_format=RouteDecision,
     )
+
     decision = completion.choices[0].message.parsed
     logger.info(f"[라우터] {decision.category}")
     return {"category": decision.category}
@@ -291,7 +292,7 @@ def schedule_node(state: SupervisorState) -> dict:
 
     completion2 = client.chat.completions.create(
         model=MODEL,
-        reasoning_effort="none",
+        **llm_provider.filter_kwargs(reasoning_effort="none"),
         max_completion_tokens=300,
         messages=[
             {"role": "system", "content": (
@@ -309,7 +310,7 @@ def schedule_node(state: SupervisorState) -> dict:
 def general_node(state: SupervisorState) -> dict:
     completion = client.chat.completions.create(
         model=MODEL,
-        reasoning_effort="none",
+        **llm_provider.filter_kwargs(reasoning_effort="none"),
         max_completion_tokens=500,
         messages=[
             {"role": "system", "content": "제조 설비 관련 일반적인 질문에 간단히 답하세요."},
@@ -380,7 +381,8 @@ def _assess_perspective(label: str, system_prompt: str, diagnosis: str) -> dict:
     예외가 나면 '위험도 중간·정지 불필요·24시간 이내 조치'라는 보수적 기본값으로
     대체한다 - 관점이 아예 빠지는 것보다 사람이 알아챌 수 있는 형태로 안전하게 죽인다."""
     try:
-        completion = client.chat.completions.parse(
+        completion = llm_provider.parse_with_retry(
+            client,
             model=MODEL,
             reasoning_effort="none",
             messages=[
@@ -389,6 +391,7 @@ def _assess_perspective(label: str, system_prompt: str, diagnosis: str) -> dict:
             ],
             response_format=PerspectiveAssessment,
         )
+
         message = completion.choices[0].message
         if message.refusal or message.parsed is None:
             raise ValueError(f"관점 평가 모델이 응답을 거부함: {message.refusal}")

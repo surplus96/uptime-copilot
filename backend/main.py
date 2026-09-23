@@ -20,11 +20,11 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langsmith import Client, traceable
 from langsmith.anonymizer import create_anonymizer
 from langsmith.wrappers import wrap_openai
-from openai import OpenAI
 from pydantic import BaseModel, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from agent import agent_service
+from core import llm_provider
 from core.harness import (
     PII_PATTERNS,
     HarnessRejectedError,
@@ -43,11 +43,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+DEFAULT_MODEL = llm_provider.get_model()
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY가 .env에 설정되어 있지 않습니다.")
+if os.getenv("LLM_PROVIDER", "openai") == "openai" and not os.getenv("OPENAI_API_KEY"):
+    raise RuntimeError("OPENAI_API_KEY가 .env에 설정되어 있지 않습니다 (LLM_PROVIDER=openai일 때 필수).")
 
 # LangSmith로 나가는 트레이스에서 PII를 마스킹 (harness의 PII_PATTERNS 재사용 - 같은 기준으로 응답/트레이스 양쪽 방어)
 anonymizer = create_anonymizer([
@@ -56,9 +55,8 @@ anonymizer = create_anonymizer([
 ])
 langsmith_client = Client(anonymizer=anonymizer)
 
-# 서버 전역에서 재사용할 OpenAI 클라이언트 - wrap_openai로 감싸서 judge 호출까지 자동 추적 + 익명화
 client = wrap_openai(
-    OpenAI(api_key=OPENAI_API_KEY, timeout=30.0),
+    llm_provider.get_client(),
     tracing_extra={"client": langsmith_client},
 )
 
@@ -71,7 +69,7 @@ CHECKPOINT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)  # 최초 실행(�
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    rag_service.initialize_rag(OPENAI_API_KEY, DEFAULT_MODEL, langsmith_client)
+    rag_service.initialize_rag(llm_provider.get_api_key(), DEFAULT_MODEL, langsmith_client, base_url=llm_provider.get_base_url())
     event_store.init_event_table()
     sim_store.init_sim_tables()
     sim_task = asyncio.create_task(sim_loop.run_forever())

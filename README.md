@@ -171,12 +171,38 @@ Each run writes a full per-case breakdown to `backend/tests/eval/results/<timest
 tick, so severity ground truth is computed live at eval time (`_diagnose_machine()`) rather
 than baked into the file.
 
+### Local (Ollama) vs cloud
+
+The same golden set, run against a fully local `LLM_PROVIDER=ollama` (Qwen3-8B, Apple
+Silicon, no GPU acceleration beyond Metal) instead of the cloud model:
+
+| Metric | Cloud (gpt-5.6-luna) | Local (Ollama Qwen3-8B) |
+|---|---|---|
+| Router accuracy | 90.0% | 77.5% |
+| Machine-ID extraction | 100.0% | 100.0% |
+| Re-ask on missing ID | 100.0% | 100.0% |
+| Mean latency / call | ~1.2s | 13.6s (routing) / 10.8s (extraction) |
+
+Extraction and re-ask hold up identically locally — those are narrow, closed-form tasks.
+Routing drops 12.5 points and every call is an order of magnitude slower. A spot check of
+the safety/production/maintenance perspective assessments (not part of the golden set,
+which only covers routing/extraction) surfaced a contradiction the local model produced
+that the cloud model didn't in the same testing: `risk_level: "중간"` (medium) together
+with `requires_shutdown: true` — internally inconsistent output that CP-U2's cross-review
+(`docs/decisions.md`) had already flagged as a risk worth watching for. Bottom line: the
+adapter (`LLM_PROVIDER=ollama`) works end-to-end today, but going fully local trades
+measurable accuracy and an order of magnitude of latency for no API cost and full
+air-gapped operation — worth it for a closed environment, not a drop-in free upgrade.
+
 ## Environment Variables (`backend/.env`)
 
 | Variable | Required | Effect if unset |
 |---|---|---|
-| `OPENAI_API_KEY` | **Yes** | Backend refuses to start |
-| `OPENAI_MODEL` | No | Defaults to `gpt-5.6-luna` |
+| `LLM_PROVIDER` | No | Defaults to `openai`. Set to `ollama` to run entirely against a local Ollama server instead (`backend/core/llm_provider.py`) — no API key or internet needed, at a real accuracy/latency cost (see Evaluation Baseline below) |
+| `OPENAI_API_KEY` | **Yes, unless `LLM_PROVIDER=ollama`** | Backend refuses to start |
+| `OPENAI_MODEL` | No | Defaults to `gpt-5.6-luna`. Only used when `LLM_PROVIDER=openai` |
+| `OLLAMA_BASE_URL` | No | Defaults to `http://localhost:11434/v1`. Only used when `LLM_PROVIDER=ollama` |
+| `OLLAMA_MODEL` | No | Defaults to `qwen3:8b`. Only used when `LLM_PROVIDER=ollama` — pull it first with `ollama pull qwen3:8b` |
 | `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` | No | LangSmith tracing disabled |
 | `SLACK_WEBHOOK_URL` | No | Slack alerts on 긴급/주의 detections are silently skipped (`backend/notify.py`) |
 | `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | No | CMMS work-order push on approval is silently skipped (`backend/cmms_client.py`); needs a running Atlas-MCP + Atlas CMMS instance if you do set these — see `docs/design/PHASE_7_PLAN.md` |

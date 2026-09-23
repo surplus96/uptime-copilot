@@ -141,3 +141,25 @@ PR-AUC가 0.94~1.00으로 나옴(Z-score 기준선은 0.05~0.5) — H2의 "결�
 **미해결 항목**
 - 없음 (제거 후 기존 테스트 전부 통과 확인: 빠른 경로 70개 + 무거운 RAG 재적재
   테스트 2개, `docs/decisions.md` 기록으로 종료)
+
+## 2026-09-23 — 11-1~11-3: LLM 제공자 어댑터 + 로컬(Ollama) 실측
+
+**조치**
+- `core/llm_provider.py` 신설: `LLM_PROVIDER` 환경변수로 OpenAI ↔ Ollama(OpenAI 호환)
+  전환. 클라이언트/모델 생성, 제공자별 미지원 파라미터 필터링(`reasoning_effort` 등),
+  구조화 출력 1회 재시도를 전부 여기로 모음.
+- `agent_service.py`/`main.py`/`rag_service.py`/`harness.py`의 직접 `OpenAI(...)`/
+  `ChatOpenAI(...)` 생성을 전부 어댑터 경유로 교체. `main.py`의 "OPENAI_API_KEY 없으면
+  시작 거부" 체크도 `LLM_PROVIDER=openai`일 때만 걸리도록 수정.
+- 로컬 Ollama(qwen3:8b) 서버를 실제로 띄우고 골든셋(40문항) 전체를 재실행해서 클라우드와
+  비교: 추출/되묻기는 100%로 동일, 라우터는 90.0%→77.5%로 하락, 지연은 호출당 ~1.2초→
+  13.6초(라우팅)/10.8초(추출)로 10배 이상 증가.
+- 추가로 관점 평가(golden set 범위 밖)를 스팟 체크하다가, 로컬 모델에서
+  `risk_level: "중간"`인데 `requires_shutdown: true`인 모순된 구조화 출력을 실제로
+  관측함 — CP-U2가 "관점 평가 실패/모순은 최소한 로그로 남겨야 한다"고 지적했던
+  우려가 실측으로 재현됨. README(EN/KOR)에 수치와 함께 기록.
+
+**미해결 항목**
+- 관점 평가 모순 탐지(`requires_shutdown=True`인데 `risk_level`이 "낮음"/"중간")를
+  코드로 로깅하는 건 아직 안 함 — CP-U2 원문 지적 4번("최소한 로그로 남겨야 한다")이
+  아직 미반영 상태. 사소한 후속 작업으로 남겨둠.
