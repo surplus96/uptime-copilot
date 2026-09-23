@@ -43,6 +43,7 @@ class _FakeStreams:
 
 @pytest.mark.asyncio
 async def test_create_work_order_raises_on_isError(monkeypatch):
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://localhost:3100/mcp")
     fake_result = _FakeCallToolResult(is_error=True, content="Atlas API request failed: POST /work-orders (500)")
     monkeypatch.setattr(cmms_client, "streamablehttp_client", lambda *a, **kw: _FakeStreams())
     monkeypatch.setattr(cmms_client, "ClientSession", lambda *a, **kw: _FakeSession(fake_result))
@@ -53,6 +54,7 @@ async def test_create_work_order_raises_on_isError(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_work_order_succeeds_when_not_isError(monkeypatch):
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://localhost:3100/mcp")
     fake_result = _FakeCallToolResult(is_error=False)
     monkeypatch.setattr(cmms_client, "streamablehttp_client", lambda *a, **kw: _FakeStreams())
     monkeypatch.setattr(cmms_client, "ClientSession", lambda *a, **kw: _FakeSession(fake_result))
