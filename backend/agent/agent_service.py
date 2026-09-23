@@ -20,7 +20,8 @@ from pydantic import BaseModel
 import cmms_client
 import notify
 from core.harness import check_output_forbidden_words
-from data import pdm_operations, pdm_telemetry
+from data import pdm_operations, pdm_telemetry, sim_query
+from ml.predict import predict_failure_risk
 from rag.pump_manual import ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES, SIGNAL_TO_COMPONENT
 
 load_dotenv()
@@ -103,6 +104,24 @@ def route_node(state: SupervisorState) -> dict:
     return {"category": decision.category}
 
 
+RISK_THRESHOLD = 0.5  # docs/model_card.md 7절: 이 값에서 이미 오경보 <=0.001/설비/일
+
+_risk_model_warned = False
+
+def _predict_risk_safe(machine_id: int) -> dict | None:
+    """모델 파일이 없으면(python -m ml.train 미실행) None을 반환하고 Z-score로 대체한다 -
+    위험도 모델은 선택 기능이라 없다고 진단 자체가 막히면 안 된다."""
+    global _risk_model_warned
+    try:
+        return predict_failure_risk(machine_id)
+    except FileNotFoundError:
+        if not _risk_model_warned:
+            logger.warning("위험도 모델 파일이 없어 Z-score만으로 판정합니다 (python -m ml.train 필요)")
+            _risk_model_warned = True
+        return None
+
+
+
 def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     machine_info = pdm_operations.get_machine_info(machine_id)
     if "error" in machine_info:
@@ -118,6 +137,11 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     recent_errors = pdm_operations.get_recent_errors(machine_id, limit=3)
     failure = pdm_operations.check_recent_failure(machine_id, within_days=within_days)
     anomaly = pdm_telemetry.detect_anomaly(machine_id)
+    risk = _predict_risk_safe(machine_id)
+    top_risk_comp, top_risk_proba = (None, 0.0)
+    if risk:
+        top_risk_comp = max(risk, key=lambda c: risk[c]["probability"])
+        top_risk_proba = risk[top_risk_comp]["probability"]
 
     error_summary = (
         "; ".join(f"{e['datetime']} {e['errorID']}({e['description']})" for e in recent_errors)
@@ -129,6 +153,8 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     if anomaly.get("has_anomaly"):
         flagged_desc = ", ".join(anomaly["flagged_signals"])
         diagnosis_text += f" / 텔레메트리 이상 감지(사전 경보): {flagged_desc} 신호가 평소 대비 통계적으로 벗어남"
+    if top_risk_proba >= RISK_THRESHOLD:
+        diagnosis_text += f" / 예측 모델: 24시간 내 {top_risk_comp} 고장확률 {top_risk_proba:.0%}"
 
     model = machine_info.get("model")
     if model:
@@ -156,11 +182,17 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
                 component_evidence.setdefault(comp, []).append(
                     f"텔레메트리 이상(사전 경보): {signal} 신호가 통계적으로 벗어남"
                 )
+    if top_risk_proba >= RISK_THRESHOLD and top_risk_comp:
+        component_evidence.setdefault(top_risk_comp, []).append(
+            f"예측 모델: 24시간 내 고장확률 {top_risk_proba:.0%}"
+        )
 
     if failure:
         severity = "긴급"
-    elif anomaly.get("has_anomaly"):
-        severity = "주의"
+    elif top_risk_proba >= RISK_THRESHOLD:
+        severity = "주의"  # 위험도 모델 근거 (계획서 3-6: Z-score는 보조 근거로 격하)
+    elif risk is None and anomaly.get("has_anomaly"):
+        severity = "주의"  # 모델 파일이 없을 때만 Z-score로 대체(하위 호환)
     else:
         severity = "일반"
 
@@ -172,6 +204,9 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
         evidence_times.append(failure["datetime"])
     if anomaly.get("has_anomaly"):
         evidence_times.append(anomaly["as_of"])
+    if top_risk_proba >= RISK_THRESHOLD:
+        evidence_times.append(sim_query.dataset_now())
+
     evidence_at = max(evidence_times) if evidence_times else None
 
     return {

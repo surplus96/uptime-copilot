@@ -90,3 +90,59 @@ def test_normal_severity_routes_straight_to_end(monkeypatch):
     assert result["status"] == "done"
     assert "테스트 일반 진단" in result["result"]
 
+def test_diagnose_machine_uses_risk_model_for_caution(monkeypatch):
+    import agent.agent_service as svc
+
+    monkeypatch.setattr(svc.pdm_operations, "get_machine_info", lambda mid: {"model": "model1", "age": 5})
+    monkeypatch.setattr(svc.pdm_operations, "get_recent_errors", lambda mid, limit=3: [])
+    monkeypatch.setattr(svc.pdm_operations, "check_recent_failure", lambda mid, within_days=30: None)
+    monkeypatch.setattr(svc.pdm_telemetry, "detect_anomaly", lambda mid: {"has_anomaly": False})
+    monkeypatch.setattr(svc.sim_query, "dataset_now", lambda: "2026-01-01T00:00:00")
+    monkeypatch.setattr(svc, "_predict_risk_safe", lambda mid: {
+        "comp2": {"probability": 0.87, "top_features": [{"feature": "error3_count_24h", "value": 3, "contribution": 0.5}]},
+        "comp1": {"probability": 0.1, "top_features": []},
+        "comp3": {"probability": 0.05, "top_features": []},
+        "comp4": {"probability": 0.02, "top_features": []},
+    })
+
+    result = svc._diagnose_machine(1)
+
+    assert result["severity"] == "주의"
+    assert result["evidence_at"] is not None  # 추가: None이면 알림이 영원히 억제됨
+    assert "comp2" in result["component_evidence"]
+    assert "87%" in result["diagnosis"]
+
+
+
+def test_diagnose_machine_falls_back_to_zscore_when_model_missing(monkeypatch):
+    import agent.agent_service as svc
+
+    monkeypatch.setattr(svc.pdm_operations, "get_machine_info", lambda mid: {"model": "model1", "age": 5})
+    monkeypatch.setattr(svc.pdm_operations, "get_recent_errors", lambda mid, limit=3: [])
+    monkeypatch.setattr(svc.pdm_operations, "check_recent_failure", lambda mid, within_days=30: None)
+    monkeypatch.setattr(svc.pdm_telemetry, "detect_anomaly", lambda mid: {
+        "has_anomaly": True, "flagged_signals": ["volt"], "as_of": "2026-01-01T00:00:00",
+    })
+    monkeypatch.setattr(svc, "_predict_risk_safe", lambda mid: None)
+
+    result = svc._diagnose_machine(1)
+
+    assert result["severity"] == "주의"
+
+
+def test_diagnose_machine_real_failure_always_urgent_regardless_of_risk(monkeypatch):
+    import agent.agent_service as svc
+
+    monkeypatch.setattr(svc.pdm_operations, "get_machine_info", lambda mid: {"model": "model1", "age": 5})
+    monkeypatch.setattr(svc.pdm_operations, "get_recent_errors", lambda mid, limit=3: [])
+    monkeypatch.setattr(svc.pdm_operations, "check_recent_failure", lambda mid, within_days=30: {
+        "datetime": "2026-01-01T00:00:00", "component": "comp1", "description": "테스트 고장",
+    })
+    monkeypatch.setattr(svc.pdm_telemetry, "detect_anomaly", lambda mid: {"has_anomaly": False})
+    monkeypatch.setattr(svc, "_predict_risk_safe", lambda mid: {
+        c: {"probability": 0.01, "top_features": []} for c in ("comp1", "comp2", "comp3", "comp4")
+    })
+
+    result = svc._diagnose_machine(1)
+
+    assert result["severity"] == "긴급"
