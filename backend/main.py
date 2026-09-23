@@ -158,6 +158,7 @@ class RAGResponse(BaseModel):
     question: str
     answer: str
     context: str | None = None
+    verified: bool = True
 
 
 class AgentQueryRequest(BaseModel):
@@ -214,8 +215,8 @@ def rag_query(req: RAGRequest):
             f"RAG 답변이 검색 문맥에 근거하지 않음(hallucination 의심): {faithfulness_result.get('reason')}"
         )
 
-    return RAGResponse(question=req.question, answer=answer, context=context)
-
+    verified = faithfulness_result.get("score") is not None
+    return RAGResponse(question=req.question, answer=answer, context=context, verified=verified)
 
 
 @app.post("/agent/query")

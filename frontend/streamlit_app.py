@@ -279,6 +279,8 @@ with tab2:
     rag_result = st.session_state.get("rag_result")
     if rag_result:
         st.markdown(f"**답변**\n\n{rag_result['answer']}")
+        if rag_result.get("verified") is False:
+            st.warning("⚠️ 이 답변은 출처 문맥과 일치하는지 자동 검증되지 못했습니다 (검증 시스템 일시 오류) — 내용을 직접 확인해 주세요.")
         if rag_result.get("context"):
             with st.expander("📄 참고한 매뉴얼 원문 보기"):
                 st.text(rag_result["context"])

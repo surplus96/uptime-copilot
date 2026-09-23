@@ -61,7 +61,20 @@ class RouteDecision(BaseModel):
 
 
 class IncidentExtraction(BaseModel):
-    machine_id: int
+    machine_id: int | None = None
+
+
+def _extract_machine_id(user_message: str) -> int | None:
+    completion = client.chat.completions.parse(
+        model=MODEL,
+        reasoning_effort="none",
+        messages=[
+            {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요. 설비 번호가 명시되지 않았으면 machine_id를 null로 반환하세요."},
+            {"role": "user", "content": user_message},
+        ],
+        response_format=IncidentExtraction,
+    )
+    return completion.choices[0].message.parsed.machine_id
 
 
 def route_node(state: SupervisorState) -> dict:
@@ -171,16 +184,9 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
 
 def diagnosis_node(state: SupervisorState) -> dict:
     """자연어 질문에서 설비 번호를 추출한 뒤 _diagnose_machine()으로 진단한다."""
-    completion = client.chat.completions.parse(
-        model=MODEL,
-        reasoning_effort="none",
-        messages=[
-            {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
-            {"role": "user", "content": state.user_message},
-        ],
-        response_format=IncidentExtraction,
-    )
-    machine_id = completion.choices[0].message.parsed.machine_id
+    machine_id = _extract_machine_id(state.user_message)
+    if machine_id is None:
+        return {"severity": "일반", "diagnosis": "몇 번 설비인지 알려주시겠어요? 예: '3번 설비 상태가 이상해요'"}
     result = _diagnose_machine(machine_id)
     print(f"[진단] machine #{machine_id} -> {result['severity']}")
     return {k: v for k, v in result.items() if k != "evidence_at"}
@@ -220,19 +226,10 @@ def scan_all_machines() -> list[dict]:
     return detected
 
 
-
-
 def schedule_node(state: SupervisorState) -> dict:
-    completion = client.chat.completions.parse(
-        model=MODEL,
-        reasoning_effort="none",
-        messages=[
-            {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요."},
-            {"role": "user", "content": state.user_message},
-        ],
-        response_format=IncidentExtraction,
-    )
-    machine_id = completion.choices[0].message.parsed.machine_id
+    machine_id = _extract_machine_id(state.user_message)
+    if machine_id is None:
+        return {"machine_id": None, "result": "몇 번 설비의 정비 일정인지 알려주시겠어요?"}
     schedule_info = pdm_operations.estimate_next_maintenance(machine_id)
 
     completion2 = client.chat.completions.create(
@@ -277,6 +274,13 @@ def manual_lookup_node(state: SupervisorState) -> dict:
         component_actions[comp] = " ".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
     return {"component_manuals": component_manuals, "component_actions": component_actions}
 
+
+def validate_work_order_node(state: SupervisorState) -> dict:
+    """work_order가 승인 요청·Slack·CMMS 전송에 쓰이기 전에 반드시 통과해야 하는 검증
+    관문. 그래프 노드로 만들어서, 검증 실패 시 예외가 여기서 그래프 실행을 멈추므로
+    approval_node/finalize_node는 구조적으로 절대 도달할 수 없다."""
+    check_output_forbidden_words(state.work_order)
+    return {}
 
 
 def work_order_node(state: SupervisorState) -> dict:
@@ -365,7 +369,7 @@ def finalize_node(state: SupervisorState) -> dict:
     elif state.severity == "주의":
         result = f"[사전 경보 - 예방 조치 권장]\n{state.work_order}"
     else:
-        result = f"설비 #{state.machine_id}: {state.diagnosis}"
+        result = state.diagnosis if state.machine_id is None else f"설비 #{state.machine_id}: {state.diagnosis}"
     return {"result": result}
 
 
@@ -395,6 +399,7 @@ graph.add_node("schedule", schedule_node)
 graph.add_node("general", general_node)
 graph.add_node("manual_lookup", manual_lookup_node)
 graph.add_node("work_order", work_order_node)
+graph.add_node("validate_work_order", validate_work_order_node)
 graph.add_node("approval", approval_node)
 graph.add_node("finalize", finalize_node)
 graph.add_node("safety", safety_perspective_node)
@@ -416,7 +421,8 @@ graph.add_edge("safety", "merge_perspectives")
 graph.add_edge("production", "merge_perspectives")
 graph.add_edge("maintenance", "merge_perspectives")
 graph.add_edge("merge_perspectives", "work_order")
-graph.add_conditional_edges("work_order", needs_approval_condition, {
+graph.add_edge("work_order", "validate_work_order")
+graph.add_conditional_edges("validate_work_order", needs_approval_condition, {
     "approval": "approval", "finalize": "finalize",
 })
 graph.add_edge("approval", "finalize")
