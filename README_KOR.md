@@ -3,6 +3,8 @@
 [![English](https://img.shields.io/badge/English-switch-555555?style=for-the-badge)](README.md)
 [![한국어](https://img.shields.io/badge/한국어-현재-0c7c8c?style=for-the-badge)](README_KOR.md)
 
+[![Backend checks](https://github.com/surplus96/uptime-copilot/actions/workflows/backend-checks.yml/badge.svg)](https://github.com/surplus96/uptime-copilot/actions/workflows/backend-checks.yml)
+
 OpenAI 기반 RAG + 멀티에이전트 백엔드와 Streamlit 프론트엔드로 구성된 프로젝트입니다.
 제조 설비 정비 도메인을 배경으로 하며, Azure Predictive Maintenance 데이터셋을 사용합니다.
 

@@ -3,6 +3,8 @@
 [![English](https://img.shields.io/badge/English-current-0c7c8c?style=for-the-badge)](README.md)
 [![한국어](https://img.shields.io/badge/한국어-switch-555555?style=for-the-badge)](README_KOR.md)
 
+[![Backend checks](https://github.com/surplus96/uptime-copilot/actions/workflows/backend-checks.yml/badge.svg)](https://github.com/surplus96/uptime-copilot/actions/workflows/backend-checks.yml)
+
 An OpenAI-based RAG + multi-agent backend, paired with a Streamlit frontend. Built around a
 manufacturing equipment maintenance domain example, backed by the Azure Predictive
 Maintenance dataset.
