@@ -30,10 +30,8 @@ from core.harness import (
     HarnessRejectedError,
     check_output_forbidden_words,
     judge_faithfulness,
-    should_retrieve,
     validate_input,
 )
-from core.prompts import SYSTEM_PROMPT
 from data import event_store, sim_loop, sim_store
 from rag import rag_service
 
@@ -188,24 +186,15 @@ def health_check():
 @app.post("/rag/query", response_model=RAGResponse)
 @traceable(name="rag_query", client=langsmith_client)
 def rag_query(req: RAGRequest):
-    """docs/ 폴더에 적재된 문서를 근거로 질문에 답한다 (RAG)."""
+    """매뉴얼 Q&A 보조 기능 - docs/ 폴더에 적재된 문서만 근거로 답한다. 일반 잡담이나
+    설비 진단은 이 엔드포인트의 역할이 아니다(설비 진단은 /agent/query가 담당)."""
     validate_input(req.question)
-
-    if not should_retrieve(client, req.question):
-        completion = client.chat.completions.create(
-            model=DEFAULT_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": req.question},
-            ]
-        )
-        answer = completion.choices[0].message.content
-        return RAGResponse(question=req.question, answer=answer, context=None)
 
     try:
         context, answer = rag_service.answer_with_context(req.question)
     except Exception as e:
         raise LLMAPIError(str(e))
+
 
     check_output_forbidden_words(answer)
 

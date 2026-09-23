@@ -111,3 +111,33 @@ PR-AUC가 0.94~1.00으로 나옴(Z-score 기준선은 0.05~0.5) — H2의 "결�
 **미해결 항목**
 - 동일 우선순위 내 정렬(고장 최근순 등)은 이 노드의 책임 범위 밖으로 남겨둠 — 여러 건을
   동시에 보여주는 화면(스캔 목록 등)이 생기면 그때 다룬다.
+
+## 2026-09-23 — 5-1/5-2: RAG 역할 축소 (Multi-Query·Self-RAG 제거)
+
+**지적 사항** (계획서 6-2 원안)
+- 에이전트(`/agent/query`)는 RAG를 전혀 쓰지 않는다 — `manual_lookup_node`가
+  `PUMP_MAINTENANCE_PROCEDURES`(코드에 이미 정확히 아는 데이터)를 직접 조회한다
+  (`agent_service.py` 주석: "매뉴얼 문서가 작아 RAG 검색이 부품을 정밀하게
+  구분하지 못하는 문제가 있어" 직접 조회로 전환했다는 기존 기록).
+- `/rag/query`(순수 문서 Q&A 보조 기능)의 코퍼스는 생성된 txt 문서 몇 개 분량인데,
+  그 규모에 Multi-Query(질문 재작성) + Self-RAG(검색 필요 여부 판단) + 하이브리드
+  검색 3단 파이프라인이 얹혀 있었다 — 코퍼스 규모 대비 과잉설계.
+
+**조치**
+- Multi-Query 제거: `rag_service.py`에서 `MultiQueryRetriever` 래핑을 걷어내고
+  하이브리드(Dense+BM25) 검색기를 그대로 사용.
+- Self-RAG 제거: `main.py`의 `/rag/query`에서 `should_retrieve()` 분기(검색 필요
+  여부를 LLM이 판단해서 아니면 일반 잡담으로 빠지는 경로)를 삭제 — 이 엔드포인트는
+  이제 "매뉴얼 Q&A 보조 기능"으로 역할이 고정되고, 일반 잡담/설비 진단은
+  각각 `/agent/query`의 `general_node`/`diagnosis_node`가 담당한다(역할 중복 제거).
+  하이브리드 검색 + 충실도(faithfulness) 판정은 그대로 유지.
+- 죽은 코드 정리: `should_retrieve()`, `RetrievalDecision`, `ROUTING_PROMPT_TEMPLATE`
+  (`core/harness.py`)와 `core/prompts.py`(Self-RAG 분기에서만 쓰이던 일반 챗봇용
+  `SYSTEM_PROMPT`) 전체 삭제 — 호출부가 0건이 됨.
+- **RAG 역량을 축소하는 이유**: 이 코퍼스 규모에서 RAG 고급 기법(Multi-Query, Self-RAG)을
+  시연하는 건 실익이 없고, RAG 역량 자체는 후속 프로젝트 SpecGuard(계획서 서두 참고)에서
+  더 큰 코퍼스로 제대로 시연할 예정이라 여기서는 걷어낸다.
+
+**미해결 항목**
+- 없음 (제거 후 기존 테스트 전부 통과 확인: 빠른 경로 70개 + 무거운 RAG 재적재
+  테스트 2개, `docs/decisions.md` 기록으로 종료)

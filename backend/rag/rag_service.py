@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 from langchain_chroma import Chroma
-from langchain_classic.retrievers import EnsembleRetriever, MultiQueryRetriever
+from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
@@ -91,10 +91,11 @@ def initialize_rag(openai_api_key: str, model_name: str, langsmith_client=None) 
 
     model = ChatOpenAI(model=model_name, api_key=openai_api_key)
 
-    # Multi-Query가 하이브리드 검색기를 감싼다: 재작성된 질문마다 Dense+Sparse를 함께 수행
-    retriever = MultiQueryRetriever.from_llm(retriever=hybrid_retriever, llm=model)
-    _retriever = retriever  # get_context()에서도 재작성된 검색 결과를 그대로 재사용
-    
+    # 5-1(RAG 정리, 2026-09-23): Multi-Query·Self-RAG 계층 제거. 문서 코퍼스 규모(원본
+    # 문서 몇 개 분량 청크) 대비 과잉설계였고, RAG 역량 시연은 SpecGuard에서 한다
+    # (docs/decisions.md 참고) - 하이브리드 검색 + 충실도 판정만 남긴다.
+    _retriever = hybrid_retriever
+
     rag_prompt = ChatPromptTemplate([
         ("system", "당신은 주어진 [문맥]만 근거로 답하는 어시스턴트입니다. "
                    "문맥에 없는 내용은 모른다고 답하세요.\n\n[문맥]\n{context}"),
@@ -104,7 +105,8 @@ def initialize_rag(openai_api_key: str, model_name: str, langsmith_client=None) 
     # 검색(retriever)은 체인에서 분리한다 - 검색은 answer_with_context()에서 딱 1번만 수행하고,
     # 그 결과를 이 체인에 {"context": ..., "question": ...}로 직접 넘긴다.
     _rag_chain = rag_prompt | model | StrOutputParser()
-    logger.info("RAG 파이프라인 초기화 완료 (Multi-Query 적용, OpenAI)")
+    logger.info("RAG 파이프라인 초기화 완료 (하이브리드 검색, OpenAI)")
+
 
 
 def answer_with_context(question: str) -> tuple[str, str]:
