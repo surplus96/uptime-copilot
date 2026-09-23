@@ -4,6 +4,7 @@
 HITL 체크포인트를 추가한다.
 """
 
+import logging
 import operator
 import os
 import time
@@ -23,6 +24,7 @@ from data import pdm_operations, pdm_telemetry
 from rag.pump_manual import ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES, SIGNAL_TO_COMPONENT
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY") or "sk-not-set", timeout=30.0)
 
 # 라우팅/추출/판정 계열 노드 전부가 참조하는 단일 모델 상수. main.py의 DEFAULT_MODEL과
@@ -97,7 +99,7 @@ def route_node(state: SupervisorState) -> dict:
         response_format=RouteDecision,
     )
     decision = completion.choices[0].message.parsed
-    print(f"[라우터] {decision.category}")
+    logger.info(f"[라우터] {decision.category}")
     return {"category": decision.category}
 
 
@@ -188,7 +190,7 @@ def diagnosis_node(state: SupervisorState) -> dict:
     if machine_id is None:
         return {"severity": "일반", "diagnosis": "몇 번 설비인지 알려주시겠어요? 예: '3번 설비 상태가 이상해요'"}
     result = _diagnose_machine(machine_id)
-    print(f"[진단] machine #{machine_id} -> {result['severity']}")
+    logger.info(f"[진단] machine #{machine_id} -> {result['severity']}")
     return {k: v for k, v in result.items() if k != "evidence_at"}
 
 
@@ -351,7 +353,7 @@ def approval_node(state: SupervisorState) -> dict:
         "perspectives": state.perspectives,
     })
 
-    print(f"[승인 재개] 사람의 결정: {decision}")
+    logger.info(f"[승인 재개] 사람의 결정: {decision}")
     return {"approved": decision}
 
 
@@ -363,7 +365,7 @@ def finalize_node(state: SupervisorState) -> dict:
             try:
                 cmms_client.push_work_order(state.machine_id, state.work_order)
             except Exception as e:
-                print(f"[CMMS push 실패] {e}")
+                logger.error(f"[CMMS push 실패] {e}")
         else:
             result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 반려 처리되었습니다. 별도 조치는 이루어지지 않았습니다."
     elif state.severity == "주의":

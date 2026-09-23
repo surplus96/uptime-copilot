@@ -78,7 +78,7 @@ def stop() -> None:
 
 
 def reset() -> None:
-    """SIMULATOR_PLAN.md '클린 상태 보장' - 명시적으로 호출될 때만 지운다."""
+    """docs/design/SIMULATOR_PLAN.md '클린 상태 보장' - 명시적으로 호출될 때만 지운다."""
     with _LOCK:
         conn = sqlite3.connect(DB_PATH)
         for table in ("sim_telemetry", "sim_errors", "sim_failures", "sim_maint", "sim_state", "sim_control"):

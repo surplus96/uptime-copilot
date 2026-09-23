@@ -2,11 +2,12 @@
 Atlas CMMS 작업지시서 push - 결정론적 트리거(긴급 승인)에서만 호출된다.
 Stage 1(notify.py)과 같은 원칙: 이미 승인이 끝난 뒤의 고정된 행동이라 에이전트가 도구를
 고를 필요가 없다. 그래서 langchain-mcp-adapters(LLM에게 도구 선택을 맡기는 프레임워크) 대신
-mcp SDK로 정해진 도구 하나를 직접, 결정론적으로 호출한다 (PHASE_7_PLAN.md Stage 2 참고).
+mcp SDK로 정해진 도구 하나를 직접, 결정론적으로 호출한다 (docs/design/PHASE_7_PLAN.md Stage 2 참고).
 CMMS 장애가 승인 흐름을 막으면 안 되므로 예외는 호출부(finalize_node)에서 삼킨다.
 """
 
 import asyncio
+import logging
 import os
 import re
 from datetime import timedelta
@@ -16,6 +17,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 CMMS_MCP_URL = os.getenv("CMMS_MCP_URL")
 CMMS_MCP_TOKEN = os.getenv("CMMS_MCP_TOKEN")
 
@@ -72,7 +74,7 @@ def push_work_order(machine_id: int, work_order_text: str) -> None:
     # 실수로 토큰을 네트워크에 노출시키게 되므로 아예 막는다 (security-reviewer 지적,
     # 2026-09-18). 지금(Atlas-MCP를 같은 호스트에 두는 구성)은 http://localhost가 정상이다.
     if CMMS_MCP_URL.startswith("http://") and not _is_loopback_url(CMMS_MCP_URL):
-        print("[CMMS push 실패] CMMS_MCP_URL이 루프백이 아닌데 http://를 사용 - 토큰 평문 노출 위험, 요청 차단")
+        logger.warning("[CMMS push 실패] CMMS_MCP_URL이 루프백이 아닌데 http://를 사용 - 토큰 평문 노출 위험, 요청 차단")
         return
     title = f"설비 #{machine_id} 긴급 정비"
     asset_id = MACHINE_ID_TO_ASSET_ID.get(machine_id)

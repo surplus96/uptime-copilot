@@ -2,7 +2,7 @@
 독립적으로 찾아낸 버그 - MCP는 도구 실행 실패(Atlas 쪽 거부 등)를 예외가 아니라
 성공 응답 안의 isError 필드로 보고하는데, _create_work_order()가 call_tool()의
 반환값을 아예 버려서 CMMS가 거부해도 성공으로 착각했다. 실제로 존재하지 않는
-assetId로 Atlas-MCP를 호출해 isError: true를 재현한 뒤 고쳤음(PHASE_7_PLAN.md 참고) -
+assetId로 Atlas-MCP를 호출해 isError: true를 재현한 뒤 고쳤음(docs/design/PHASE_7_PLAN.md 참고) -
 여기서는 그 실제 재현을 네트워크 없이 mock으로 반복 가능하게 만든다.
 """
 import pytest
@@ -83,7 +83,7 @@ def test_push_work_order_noop_when_unconfigured(monkeypatch):
     cmms_client.push_work_order(84, "작업지시서 텍스트")  # 예외 없이 조용히 반환
 
 
-def test_push_work_order_blocks_non_loopback_http(monkeypatch, capsys):
+def test_push_work_order_blocks_non_loopback_http(monkeypatch, caplog):
     """회귀 대상(security-reviewer): 루프백이 아닌 주소에 http://를 쓰면 토큰이
     평문으로 나가므로 아예 차단해야 한다."""
     monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://example.com/mcp")
@@ -91,7 +91,8 @@ def test_push_work_order_blocks_non_loopback_http(monkeypatch, capsys):
 
     cmms_client.push_work_order(84, "작업지시서 텍스트")
 
-    assert "차단" in capsys.readouterr().out
+    assert "차단" in caplog.text
+
 
 
 def test_push_work_order_allows_loopback_http(monkeypatch):

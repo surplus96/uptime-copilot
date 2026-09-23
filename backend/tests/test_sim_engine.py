@@ -1,7 +1,7 @@
 """시뮬레이터 1단계(sim_engine.py 상태 머신 / sim_store.py 저장소) 회귀 테스트.
-2026-09-22 실측 근거(SIMULATOR_PLAN.md "실측 근거" 표)를 코드가 실제로 지키는지 확인한다.
+2026-09-22 실측 근거(docs/design/SIMULATOR_PLAN.md "실측 근거" 표)를 코드가 실제로 지키는지 확인한다.
 각 테스트는 대응하는 규칙을 코드에서 지웠을 때 실패하는 것까지 직접 검증했다
-(변이 테스트 - SIMULATOR_PLAN.md 진행 상태 1번 참고)."""
+(변이 테스트 - docs/design/SIMULATOR_PLAN.md 진행 상태 1번 참고)."""
 import random
 
 import pytest

@@ -25,13 +25,13 @@ uptime-copilot/
 │   ├── agent/                  LangGraph multi-agent graph (routing + HITL + event scanner)
 │   ├── data/                    PdM data ingestion/query layer + event store (SQLite)
 │   │                             (`sim_*.py`: automated runtime degradation simulator —
-│   │                             see "Architecture Principles" and `SIMULATOR_PLAN.md`)
+│   │                             see "Architecture Principles" and `docs/design/SIMULATOR_PLAN.md`)
 │   ├── store/                    Generated state (pdm_telemetry.db, checkpoints.db,
 │   │                             chroma_db/) — gitignored, separate from source so a
 │   │                             Docker volume can be mounted here without shadowing code
 │   ├── tests/                    pytest regression suite — see "Running the Checks" below
 │   ├── notify.py                 Slack alerting — optional, see Environment Variables
-│   ├── cmms_client.py             CMMS work-order push — optional, see PHASE_7_PLAN.md
+│   ├── cmms_client.py             CMMS work-order push — optional, see docs/design/PHASE_7_PLAN.md
 │   ├── pyproject.toml             ruff / mypy / pytest config — see "Running the Checks"
 │   └── Dockerfile
 ├── frontend/                Streamlit chat UI
@@ -156,7 +156,7 @@ path on every push and pull request.
 | `OPENAI_MODEL` | No | Defaults to `gpt-5.6-luna` |
 | `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` | No | LangSmith tracing disabled |
 | `SLACK_WEBHOOK_URL` | No | Slack alerts on 긴급/주의 detections are silently skipped (`backend/notify.py`) |
-| `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | No | CMMS work-order push on approval is silently skipped (`backend/cmms_client.py`); needs a running Atlas-MCP + Atlas CMMS instance if you do set these — see `PHASE_7_PLAN.md` |
+| `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | No | CMMS work-order push on approval is silently skipped (`backend/cmms_client.py`); needs a running Atlas-MCP + Atlas CMMS instance if you do set these — see `docs/design/PHASE_7_PLAN.md` |
 | `ALLOWED_HOSTS` | No | Extra comma-separated hostnames allowed past `TrustedHostMiddleware` (`backend/main.py`), in addition to the always-allowed `localhost`/`127.0.0.1`. `docker-compose.yml` sets this to `backend` for you (its `environment:` block always wins over whatever you put in `backend/.env` for this key) — only needed manually if you put the backend behind another hostname or reverse proxy. |
 | `BACKEND_URL` (frontend, not `backend/.env`) | No | Where the Streamlit app looks for the backend. Defaults to `http://localhost:8000`; `docker-compose.yml` sets it to `http://backend:8000` for you. |
 | `SIM_TICK_SECONDS` | No | Defaults to `60` — how often (real seconds) the background degradation simulator advances, when running (see below) |
@@ -192,7 +192,7 @@ path on every push and pull request.
 | POST | `/simulator/stop` | Stop the background loop |
 | GET | `/simulator/status` | Running state, simulated clock, degrading-machine list, `has_stale_events`, and `last_error`/`consecutive_failures` if a background tick has been failing |
 | POST | `/simulator/inject` | Force a specific machine into a strong degradation, for demos (`{"machine_id": 12}`, optional `"signal"`: one of `volt`/`rotate`/`pressure`/`vibration`, random if omitted) |
-| POST | `/simulator/reset` | Wipe simulator state/data **and** the detected/completed event tables — call this before a fresh run; nothing is cleared automatically. See `SIMULATOR_PLAN.md` |
+| POST | `/simulator/reset` | Wipe simulator state/data **and** the detected/completed event tables — call this before a fresh run; nothing is cleared automatically. See `docs/design/SIMULATOR_PLAN.md` |
 
 Example `/agent/query` request:
 ```json
@@ -224,7 +224,7 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 - **Automated simulator**: `backend/data/sim_engine.py`/`sim_store.py`/`sim_query.py`/`sim_loop.py`
   drive a background degradation model (state machine per machine: HEALTHY → DEGRADING →
   FAULT → failure+repair), calibrated against measured statistics from the real dataset
-  (drift magnitude, lead time, error co-occurrence — see `SIMULATOR_PLAN.md`). It writes to
+  (drift magnitude, lead time, error co-occurrence — see `docs/design/SIMULATOR_PLAN.md`). It writes to
   separate `sim_*` tables (never touching the original read-only data), an
   `asyncio` background task ticks it forward every `SIM_TICK_SECONDS`, and each tick
   triggers an incremental scan + a batched Slack alert for genuinely new detections. Fully
@@ -242,12 +242,12 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 
 - `docs/PORTFOLIO.md` — architecture/design case study written for a portfolio audience
   (diagrams, key engineering decisions, debugging war-stories)
-- `SIMULATOR_PLAN.md` — design record for the automated degradation simulator: measured
+- `docs/design/SIMULATOR_PLAN.md` — design record for the automated degradation simulator: measured
   calibration data, state machine, background loop, and the `/simulator/*` API
-- `PHASE_7_PLAN.md` — **optional integration, not required to run this project.** Design/
+- `docs/design/PHASE_7_PLAN.md` — **optional integration, not required to run this project.** Design/
   status record for Slack alerting + CMMS work-order push. With `SLACK_WEBHOOK_URL` /
   `CMMS_MCP_URL` / `CMMS_MCP_TOKEN` left unset, both features no-op and the app is fully
   functional without anything described in this file.
-- `frontend/UI_UPGRADE_PLAN.md` — record of the frontend upgrade pass; fully closed out,
+- `docs/design/UI_UPGRADE_PLAN.md` — record of the frontend upgrade pass; fully closed out,
   kept as history rather than an active backlog
 - `LICENSE` — MIT

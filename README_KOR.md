@@ -24,13 +24,13 @@ uptime-copilot/
 │   ├── agent/                  LangGraph 멀티에이전트 그래프(라우팅 + HITL + 이벤트 스캐너)
 │   ├── data/                    PdM 데이터 적재/조회 계층 + 이벤트 스토어(SQLite)
 │   │                             (`sim_*.py`: 자동 열화 시뮬레이터 —
-│   │                             "아키텍처 원칙"과 `SIMULATOR_PLAN.md` 참고)
+│   │                             "아키텍처 원칙"과 `docs/design/SIMULATOR_PLAN.md` 참고)
 │   ├── store/                    생성되는 상태(pdm_telemetry.db, checkpoints.db,
 │   │                             chroma_db/) — gitignore 대상. 소스와 분리해서 Docker 볼륨을
 │   │                             마운트해도 코드를 덮어쓰지 않음
 │   ├── tests/                    pytest 회귀 테스트 — 아래 "검사 실행" 참고
 │   ├── notify.py                 Slack 알림 — 선택 사항, "환경 변수" 참고
-│   ├── cmms_client.py             CMMS 작업지시서 전송 — 선택 사항, PHASE_7_PLAN.md 참고
+│   ├── cmms_client.py             CMMS 작업지시서 전송 — 선택 사항, docs/design/PHASE_7_PLAN.md 참고
 │   ├── pyproject.toml             ruff / mypy / pytest 설정 — 아래 "검사 실행" 참고
 │   └── Dockerfile
 ├── frontend/                Streamlit 채팅 UI
@@ -147,7 +147,7 @@ CI(`.github/workflows/backend-checks.yml`)가 모든 push와 PR마다 `ruff chec
 | `OPENAI_MODEL` | 선택 | 기본값 `gpt-5.6-luna` |
 | `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` | 선택 | LangSmith 트레이싱 비활성화 |
 | `SLACK_WEBHOOK_URL` | 선택 | 긴급/주의 감지 시 Slack 알림을 조용히 건너뜀 (`backend/notify.py`) |
-| `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | 선택 | 승인 시 CMMS 작업지시서 전송을 조용히 건너뜀 (`backend/cmms_client.py`). 설정한다면 실행 중인 Atlas-MCP + Atlas CMMS 인스턴스가 필요 — `PHASE_7_PLAN.md` 참고 |
+| `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | 선택 | 승인 시 CMMS 작업지시서 전송을 조용히 건너뜀 (`backend/cmms_client.py`). 설정한다면 실행 중인 Atlas-MCP + Atlas CMMS 인스턴스가 필요 — `docs/design/PHASE_7_PLAN.md` 참고 |
 | `ALLOWED_HOSTS` | 선택 | 항상 허용되는 `localhost`/`127.0.0.1` 외에 `TrustedHostMiddleware`(`backend/main.py`)를 통과시킬 추가 호스트명(쉼표 구분). `docker-compose.yml`이 `backend`로 자동 설정하며(이 키에 한해 compose의 `environment:` 블록이 `backend/.env` 값보다 항상 우선) — 백엔드를 다른 호스트명이나 리버스 프록시 뒤에 둘 때만 직접 설정 필요. |
 | `BACKEND_URL` (프론트엔드용, `backend/.env` 아님) | 선택 | Streamlit 앱이 백엔드를 찾는 주소. 기본값 `http://localhost:8000`, `docker-compose.yml`이 `http://backend:8000`으로 자동 설정. |
 | `SIM_TICK_SECONDS` | 선택 | 기본값 `60` — 자동 열화 시뮬레이터가 켜져 있을 때 실제 몇 초마다 한 번씩 전진할지 |
@@ -183,7 +183,7 @@ CI(`.github/workflows/backend-checks.yml`)가 모든 push와 PR마다 `ruff chec
 | POST | `/simulator/stop` | 루프 정지 |
 | GET | `/simulator/status` | 실행 여부, 시뮬레이션 시각, 열화 진행 중인 설비 목록, `has_stale_events`, 백그라운드 틱이 실패 중이면 `last_error`/`consecutive_failures`도 포함 |
 | POST | `/simulator/inject` | 특정 설비를 강제로 강하게 열화시킴, 데모용 (`{"machine_id": 12}`, 선택적으로 `"signal"`: `volt`/`rotate`/`pressure`/`vibration` 중 하나, 생략하면 무작위) |
-| POST | `/simulator/reset` | 시뮬레이터 상태/데이터 **및** 감지/완료 이벤트 테이블 전체 초기화 — 새로 시작하기 전에 호출. 자동으로는 지워지지 않음. `SIMULATOR_PLAN.md` 참고 |
+| POST | `/simulator/reset` | 시뮬레이터 상태/데이터 **및** 감지/완료 이벤트 테이블 전체 초기화 — 새로 시작하기 전에 호출. 자동으로는 지워지지 않음. `docs/design/SIMULATOR_PLAN.md` 참고 |
 
 `/agent/query` 요청 예시:
 ```json
@@ -208,7 +208,7 @@ CI(`.github/workflows/backend-checks.yml`)가 모든 push와 PR마다 `ruff chec
   이후 스캔에서 다시 표면화됩니다 — `backend/data/event_store.py` 참고.
 - **자동 시뮬레이터**: `backend/data/sim_engine.py`/`sim_store.py`/`sim_query.py`/`sim_loop.py`가
   백그라운드 열화 모델을 돌립니다(설비별 상태 머신: HEALTHY → DEGRADING → FAULT → 고장+정비).
-  실제 데이터셋에서 측정한 통계(편차 크기, 리드 타임, 오류 동시발생 등 — `SIMULATOR_PLAN.md`
+  실제 데이터셋에서 측정한 통계(편차 크기, 리드 타임, 오류 동시발생 등 — `docs/design/SIMULATOR_PLAN.md`
   참고)로 보정했습니다. 원본과 분리된 `sim_*` 테이블에만 기록하고(원본 읽기 전용 데이터는
   건드리지 않음), `asyncio` 백그라운드 태스크가 `SIM_TICK_SECONDS`마다 한 번씩 전진시키며,
   매 틱마다 증분 스캔과 새로 감지된 건을 묶은 Slack 알림이 뒤따릅니다. 완전히 선택 사항이라
@@ -224,11 +224,11 @@ CI(`.github/workflows/backend-checks.yml`)가 모든 push와 PR마다 `ruff chec
 
 - `docs/PORTFOLIO_KOR.md` — 포트폴리오 독자를 위한 아키텍처/설계 케이스 스터디
   (다이어그램, 주요 엔지니어링 결정, 디버깅 사례)
-- `SIMULATOR_PLAN.md` — 자동 열화 시뮬레이터 설계 기록: 실측 보정 데이터, 상태 머신,
+- `docs/design/SIMULATOR_PLAN.md` — 자동 열화 시뮬레이터 설계 기록: 실측 보정 데이터, 상태 머신,
   백그라운드 루프, `/simulator/*` API
-- `PHASE_7_PLAN.md` — **선택적 연동, 이 프로젝트 실행에 필수 아님.** Slack 알림 + CMMS
+- `docs/design/PHASE_7_PLAN.md` — **선택적 연동, 이 프로젝트 실행에 필수 아님.** Slack 알림 + CMMS
   작업지시서 전송의 설계/진행 기록. `SLACK_WEBHOOK_URL` / `CMMS_MCP_URL` / `CMMS_MCP_TOKEN`을
   비워두면 두 기능 모두 동작하지 않고, 앱은 이 파일에 적힌 어떤 것도 없이 완전히 동작합니다.
-- `frontend/UI_UPGRADE_PLAN.md` — 프론트엔드 개선 작업 기록. 완전히 종료되었으며 진행 중인
+- `docs/design/UI_UPGRADE_PLAN.md` — 프론트엔드 개선 작업 기록. 완전히 종료되었으며 진행 중인
   백로그가 아닌 이력으로 보관
 - `LICENSE` — MIT
