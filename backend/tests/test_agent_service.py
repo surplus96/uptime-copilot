@@ -183,3 +183,107 @@ def test_assess_perspective_falls_back_on_failure(monkeypatch):
 
     assert result["perspective_assessments"][0]["risk_level"] == "중간"
     assert result["perspective_assessments"][0]["requires_shutdown"] is False
+    assert result["perspective_assessments"][0]["is_fallback"] is True  # CP-U2: 정직한 중간과 구분
+
+
+def _assessment(label, risk_level="낮음", window="24시간 이내", shutdown=False, is_fallback=False):
+    return {
+        "label": label, "risk_level": risk_level, "recommended_window": window,
+        "requires_shutdown": shutdown, "rationale": "테스트", "is_fallback": is_fallback,
+    }
+
+
+def test_priority_rule_safety_high_alone_forces_p1(monkeypatch):
+    state = agent_service.SupervisorState(
+        user_message="x",
+        perspective_assessments=[
+            _assessment("안전", risk_level="높음"),
+            _assessment("생산"),
+            _assessment("정비"),
+        ],
+    )
+    result = agent_service.priority_rule_node(state)
+    assert result["priority"] == "P1"
+    assert result["recommend_shutdown"] is False
+    assert any("안전" in r for r in result["priority_reasons"])
+
+
+def test_priority_rule_no_signal_at_all_is_p3(monkeypatch):
+    state = agent_service.SupervisorState(
+        user_message="x",
+        perspective_assessments=[_assessment("안전"), _assessment("생산"), _assessment("정비")],
+        risk_probability=None,
+    )
+    result = agent_service.priority_rule_node(state)
+    assert result["priority"] == "P3"
+    assert result["recommend_shutdown"] is False
+
+
+def test_priority_rule_model_alarm_alone_is_p1_without_shutdown(monkeypatch):
+    state = agent_service.SupervisorState(
+        user_message="x",
+        perspective_assessments=[_assessment("안전"), _assessment("생산"), _assessment("정비")],
+        risk_probability=0.9,
+        risk_component="comp2",
+    )
+    result = agent_service.priority_rule_node(state)
+    assert result["priority"] == "P1"
+    assert result["recommend_shutdown"] is False  # 모델 단독 경보로는 정지 권고 안 냄
+    assert any("모델" in r for r in result["priority_reasons"])
+
+
+def test_priority_rule_all_perspectives_failed_floors_at_p2(monkeypatch):
+    state = agent_service.SupervisorState(
+        user_message="x",
+        perspective_assessments=[
+            _assessment("안전", is_fallback=True),
+            _assessment("생산", is_fallback=True),
+            _assessment("정비", is_fallback=True),
+        ],
+        risk_probability=None,
+    )
+    result = agent_service.priority_rule_node(state)
+    assert result["priority"] == "P2"  # P3로 방치하지 않음 - CP-U2 지적
+    assert any("판정 근거 부족" in r for r in result["priority_reasons"])
+
+
+def test_priority_rule_shutdown_vote_sets_recommend_shutdown(monkeypatch):
+    state = agent_service.SupervisorState(
+        user_message="x",
+        perspective_assessments=[
+            _assessment("안전", shutdown=True),
+            _assessment("생산"),
+            _assessment("정비"),
+        ],
+    )
+    result = agent_service.priority_rule_node(state)
+    assert result["priority"] == "P1"
+    assert result["recommend_shutdown"] is True
+
+
+def test_priority_rule_wired_between_merge_and_work_order():
+    graph = agent_service.graph
+    assert "priority_rule" in graph.nodes
+
+
+def test_work_order_includes_priority_block_when_set():
+    state = agent_service.SupervisorState(
+        user_message="x", machine_id=1, severity="긴급",
+        involved_components=["comp1"],
+        component_evidence={"comp1": "테스트 증상"},
+        priority="P1", recommend_shutdown=True, priority_reasons=["안전 관점 정지 필요"],
+    )
+    result = agent_service.work_order_node(state)
+    assert "[우선순위] P1" in result["work_order"]
+    assert "[정지 권고] 예" in result["work_order"]
+    assert "안전 관점 정지 필요" in result["work_order"]
+
+
+def test_work_order_omits_priority_block_for_caution():
+    state = agent_service.SupervisorState(
+        user_message="x", machine_id=1, severity="주의",
+        involved_components=["comp1"],
+        component_evidence={"comp1": "테스트 증상"},
+    )
+    result = agent_service.work_order_node(state)
+    assert "[우선순위]" not in result["work_order"]

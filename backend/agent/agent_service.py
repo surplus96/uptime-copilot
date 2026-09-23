@@ -53,7 +53,12 @@ class SupervisorState(BaseModel):
     component_manuals: dict[str, str] = {}   # 부품별 매뉴얼 증상 설명
     component_actions: dict[str, str] = {}   # 부품별 표준 조치사항
     perspectives: Annotated[list[str], operator.add] = []
-    perspective_assessments: Annotated[list[dict], operator.add] = []    
+    perspective_assessments: Annotated[list[dict], operator.add] = []
+    risk_probability: float | None = None
+    risk_component: str | None = None
+    priority: str | None = None
+    recommend_shutdown: bool | None = None
+    priority_reasons: list[str] = []
     approved: bool | None = None
     work_order: str | None = None
     result: str | None = None
@@ -147,10 +152,13 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     failure = pdm_operations.check_recent_failure(machine_id, within_days=within_days)
     anomaly = pdm_telemetry.detect_anomaly(machine_id)
     risk = _predict_risk_safe(machine_id)
-    top_risk_comp, top_risk_proba = (None, 0.0)
+    top_risk_comp, top_risk_proba = (None, None)
     if risk:
         top_risk_comp = max(risk, key=lambda c: risk[c]["probability"])
         top_risk_proba = risk[top_risk_comp]["probability"]
+    # CP-U2(2026-09-23, docs/decisions.md) 지적: 0.0을 기본값으로 쓰면 "모델이 없음"과
+    # "모델이 0%라고 답함"이 구분이 안 된다 - None으로 유지하고, 비교는 이 플래그로만 한다.
+    risk_alarm = top_risk_proba is not None and top_risk_proba >= RISK_THRESHOLD
 
     error_summary = (
         "; ".join(f"{e['datetime']} {e['errorID']}({e['description']})" for e in recent_errors)
@@ -162,7 +170,7 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     if anomaly.get("has_anomaly"):
         flagged_desc = ", ".join(anomaly["flagged_signals"])
         diagnosis_text += f" / 텔레메트리 이상 감지(사전 경보): {flagged_desc} 신호가 평소 대비 통계적으로 벗어남"
-    if top_risk_proba >= RISK_THRESHOLD:
+    if risk_alarm:
         diagnosis_text += f" / 예측 모델: 24시간 내 {top_risk_comp} 고장확률 {top_risk_proba:.0%}"
 
     model = machine_info.get("model")
@@ -191,7 +199,7 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
                 component_evidence.setdefault(comp, []).append(
                     f"텔레메트리 이상(사전 경보): {signal} 신호가 통계적으로 벗어남"
                 )
-    if top_risk_proba >= RISK_THRESHOLD and top_risk_comp:
+    if risk_alarm and top_risk_comp:
         top_feature_names = ", ".join(f["feature"] for f in risk[top_risk_comp]["top_features"])
         component_evidence.setdefault(top_risk_comp, []).append(
             f"예측 모델: 24시간 내 고장확률 {top_risk_proba:.0%}, 주요 근거: {top_feature_names}"
@@ -199,7 +207,7 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
 
     if failure:
         severity = "긴급"
-    elif top_risk_proba >= RISK_THRESHOLD:
+    elif risk_alarm:
         severity = "주의"  # 위험도 모델 근거 (계획서 3-6: Z-score는 보조 근거로 격하)
     elif risk is None and anomaly.get("has_anomaly"):
         severity = "주의"  # 모델 파일이 없을 때만 Z-score로 대체(하위 호환)
@@ -214,7 +222,7 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
         evidence_times.append(failure["datetime"])
     if anomaly.get("has_anomaly"):
         evidence_times.append(anomaly["as_of"])
-    if top_risk_proba >= RISK_THRESHOLD:
+    if risk_alarm:
         evidence_times.append(sim_query.dataset_now())
 
     evidence_at = max(evidence_times) if evidence_times else None
@@ -226,6 +234,8 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
         "involved_components": list(component_evidence.keys()),
         "component_evidence": {comp: "; ".join(v) for comp, v in component_evidence.items()},
         "evidence_at": evidence_at,
+        "risk_probability": top_risk_proba,
+        "risk_component": top_risk_comp,
     }
 
 
@@ -344,14 +354,24 @@ def work_order_node(state: SupervisorState) -> dict:
             f"[긴급도] {state.severity}"
         )
 
+    header = f"설비 #{state.machine_id}"
+    if state.priority:
+        # priority_rule_node는 severity="긴급"일 때만 실행되므로, "주의" 건에는 이 블록이 안 붙는다.
+        header += (
+            f"\n[우선순위] {state.priority}"
+            f"\n[정지 권고] {'예' if state.recommend_shutdown else '아니오'}"
+            f"\n[근거 관점] {'; '.join(state.priority_reasons)}"
+        )
+
     blocks = [build_section(comp) for comp in state.involved_components]
-    return {"work_order": f"설비 #{state.machine_id}\n\n" + "\n\n".join(blocks)}
+    return {"work_order": f"{header}\n\n" + "\n\n".join(blocks)}
 
 _DEFAULT_ASSESSMENT = {
     "risk_level": "중간",
     "recommended_window": "24시간 이내",
     "requires_shutdown": False,
     "rationale": "(자동 평가 실패 - 사람이 직접 판단 필요)",
+    "is_fallback": True,  # CP-U2 지적: 정직한 "중간" 판정과 구분해야 priority_rule이 오판 안 함
 }
 
 
@@ -373,6 +393,7 @@ def _assess_perspective(label: str, system_prompt: str, diagnosis: str) -> dict:
         if message.refusal or message.parsed is None:
             raise ValueError(f"관점 평가 모델이 응답을 거부함: {message.refusal}")
         assessment = message.parsed.model_dump()
+        assessment["is_fallback"] = False
     except Exception as e:
         logger.warning(f"[{label}] 관점 평가 실패, 안전한 기본값으로 대체: {e}")
         assessment = dict(_DEFAULT_ASSESSMENT)
@@ -399,6 +420,58 @@ def maintenance_perspective_node(state: SupervisorState) -> dict:
     return _assess_perspective(
         "정비", "당신은 정비 기술자입니다. 아래 사고 상황의 수리 난이도를 평가하세요.", state.diagnosis
     )
+
+
+def priority_rule_node(state: SupervisorState) -> dict:
+    """3관점(안전/생산/정비) + 위험도 모델을 결정론 규칙으로 종합해 우선순위(P1~P3)와
+    정지 권고를 낸다. LLM 호출 없음 - 전부 이미 state에 있는 값으로 계산.
+
+    CP-U2 교차 검토(2026-09-23, docs/decisions.md) 반영:
+    - 평가 실패(is_fallback)로 대체된 관점은 '정직한 중간'과 구분해서 판정에서 제외한다.
+    - 관점을 과반 투표로 세지 않는다 - 셋 다 같은 모델·같은 입력에서 프롬프트만 다르게
+      뽑힌 것이라 독립적인 세 명의 판단이 아니다. 안전 관점의 '높음'은 다른 두 관점이
+      반박해도 격하되지 않는다.
+    - 위험도 모델 확률은 보정되지 않은 값(학습 시 is_unbalance=True)이라 세부 구간으로
+      나누지 않고, 이미 검증된 RISK_THRESHOLD 하나로 on/off 경보로만 쓴다.
+    - 모델 경보 단독으로는 정지 권고를 내지 않는다(model_card.md 8절 일반화 한계 경고) -
+      정지 권고는 관점 판단에서만 나오고, 모델 경보는 우선순위를 올리는 '근거'로만 반영.
+    - 유효한 관점 평가가 2개 미만이면(평가 대부분 실패) P3로 방치하지 않고 P2를 하한으로
+      한다 - 이 노드는 severity='긴급'(실제 고장 확인됨)일 때만 도니까, "판정 근거가
+      부족하다"는 이유로 우선순위 목록 맨 아래로 밀려나면 안 된다.
+    """
+    valid = [p for p in state.perspective_assessments if not p.get("is_fallback")]
+    shutdown = [p["label"] for p in valid if p["requires_shutdown"]]
+    high = [p["label"] for p in valid if p["risk_level"] == "높음"]
+    immediate = [p["label"] for p in valid if p["recommended_window"] == "즉시"]
+    model_alarm = state.risk_probability is not None and state.risk_probability >= RISK_THRESHOLD
+    insufficient = len(valid) < 2
+
+    reasons = []
+    if shutdown:
+        reasons.append(f"{'·'.join(shutdown)} 관점 정지 필요")
+    if "안전" in high:
+        reasons.append("안전 관점 위험도 높음")
+    if model_alarm:
+        reasons.append(f"위험도 모델 경보 ({state.risk_component} {state.risk_probability:.0%})")
+    if high and "안전" not in high:
+        reasons.append(f"{'·'.join(label for label in high if label != '안전')} 관점 위험도 높음")
+    if immediate:
+        reasons.append(f"{'·'.join(immediate)} 관점 즉시 조치 권장")
+    if insufficient:
+        reasons.append(f"관점 평가 {3 - len(valid)}건 실패 - 판정 근거 부족")
+
+    if shutdown or "안전" in high or model_alarm:
+        priority = "P1"
+    elif high or immediate or insufficient:
+        priority = "P2"
+    else:
+        priority = "P3"
+
+    return {
+        "priority": priority,
+        "recommend_shutdown": bool(shutdown),  # 정지 권고는 관점 판단에서만 나온다 - 모델 단독 경보로는 안 냄
+        "priority_reasons": reasons or ["특이 사항 없음"],
+    }
 
 
 def approval_node(state: SupervisorState) -> dict:
@@ -467,6 +540,7 @@ graph.add_node("safety", safety_perspective_node)
 graph.add_node("production", production_perspective_node)
 graph.add_node("maintenance", maintenance_perspective_node)
 graph.add_node("merge_perspectives", lambda state: {})
+graph.add_node("priority_rule", priority_rule_node)
 
 graph.add_edge(START, "route")
 graph.add_conditional_edges("route", route_condition, {
@@ -481,7 +555,8 @@ graph.add_conditional_edges("manual_lookup", after_manual_condition, {
 graph.add_edge("safety", "merge_perspectives")
 graph.add_edge("production", "merge_perspectives")
 graph.add_edge("maintenance", "merge_perspectives")
-graph.add_edge("merge_perspectives", "work_order")
+graph.add_edge("merge_perspectives", "priority_rule")
+graph.add_edge("priority_rule", "work_order")
 graph.add_edge("work_order", "validate_work_order")
 graph.add_conditional_edges("validate_work_order", needs_approval_condition, {
     "approval": "approval", "finalize": "finalize",
