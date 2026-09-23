@@ -96,6 +96,7 @@ def test_diagnose_machine_uses_risk_model_for_caution(monkeypatch):
     monkeypatch.setattr(svc.pdm_operations, "get_machine_info", lambda mid: {"model": "model1", "age": 5})
     monkeypatch.setattr(svc.pdm_operations, "get_recent_errors", lambda mid, limit=3: [])
     monkeypatch.setattr(svc.pdm_operations, "check_recent_failure", lambda mid, within_days=30: None)
+    monkeypatch.setattr(svc.pdm_operations, "get_component_failure_stats", lambda model: [])
     monkeypatch.setattr(svc.pdm_telemetry, "detect_anomaly", lambda mid: {"has_anomaly": False})
     monkeypatch.setattr(svc.sim_query, "dataset_now", lambda: "2026-01-01T00:00:00")
     monkeypatch.setattr(svc, "_predict_risk_safe", lambda mid: {
@@ -120,6 +121,7 @@ def test_diagnose_machine_falls_back_to_zscore_when_model_missing(monkeypatch):
     monkeypatch.setattr(svc.pdm_operations, "get_machine_info", lambda mid: {"model": "model1", "age": 5})
     monkeypatch.setattr(svc.pdm_operations, "get_recent_errors", lambda mid, limit=3: [])
     monkeypatch.setattr(svc.pdm_operations, "check_recent_failure", lambda mid, within_days=30: None)
+    monkeypatch.setattr(svc.pdm_operations, "get_component_failure_stats", lambda model: [])
     monkeypatch.setattr(svc.pdm_telemetry, "detect_anomaly", lambda mid: {
         "has_anomaly": True, "flagged_signals": ["volt"], "as_of": "2026-01-01T00:00:00",
     })
@@ -138,6 +140,7 @@ def test_diagnose_machine_real_failure_always_urgent_regardless_of_risk(monkeypa
     monkeypatch.setattr(svc.pdm_operations, "check_recent_failure", lambda mid, within_days=30: {
         "datetime": "2026-01-01T00:00:00", "component": "comp1", "description": "테스트 고장",
     })
+    monkeypatch.setattr(svc.pdm_operations, "get_component_failure_stats", lambda model: [])
     monkeypatch.setattr(svc.pdm_telemetry, "detect_anomaly", lambda mid: {"has_anomaly": False})
     monkeypatch.setattr(svc, "_predict_risk_safe", lambda mid: {
         c: {"probability": 0.01, "top_features": []} for c in ("comp1", "comp2", "comp3", "comp4")
