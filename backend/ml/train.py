@@ -10,6 +10,7 @@ CP-U1 교차 검토(2026-09-23, docs/decisions.md)를 거쳐 확정된 설계:
 """
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
@@ -22,6 +23,7 @@ VAL_END = pd.Timestamp("2015-11-01")
 SIGNAL_TO_COMPONENT = {"volt": "comp1", "rotate": "comp2", "pressure": "comp3", "vibration": "comp4"}
 COMPONENT_TO_SIGNAL = {v: k for k, v in SIGNAL_TO_COMPONENT.items()}
 RESULTS_PATH = Path(__file__).parent.parent / "store" / "ml_features" / "eval_results.csv"
+MODEL_DIR = Path(__file__).parent.parent / "store" / "ml_models"
 
 
 def _time_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -52,6 +54,13 @@ def evaluate_component(comp: str, train: pd.DataFrame, test: pd.DataFrame, featu
         is_unbalance=True, random_state=42, verbosity=-1,
     )
     clf.fit(train[feature_cols], train[label])
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(
+        {"model": clf, "feature_cols": feature_cols, "model_categories": list(train["model"].cat.categories)},
+        MODEL_DIR / f"model_{comp}.pkl",
+    )
+    proba = clf.predict_proba(test[feature_cols])[:, 1]
+
     proba = clf.predict_proba(test[feature_cols])[:, 1]
     pred = pd.Series((proba >= 0.5).astype(int), index=test.index)
     base_pred = _zscore_baseline(train, test, comp)
