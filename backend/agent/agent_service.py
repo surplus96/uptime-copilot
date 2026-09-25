@@ -650,8 +650,8 @@ def check_pending(thread_id: str) -> dict | None:
     if not state.next:  # interrupt 대기 중이 아니면 next가 비어있음
         return None
     for task in state.tasks:
-        for interrupt in task.interrupts:
-            payload = interrupt.value
+        for pending in task.interrupts:
+            payload = pending.value
             _validate_output(payload)
             return {
                 "status": "pending_approval",
