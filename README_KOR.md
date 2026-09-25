@@ -73,6 +73,15 @@ docker compose up -d --build
   ```bash
   docker compose exec backend python data/pdm_dataloader.py
   ```
+- **고장 위험 예측 모델도 똑같이 최초 1회 실행이 필요합니다** — `backend/store/`가 이미지에
+  안 들어가는 별도 볼륨이라, 새 컨테이너엔 학습된 모델도 없습니다. 이걸 안 하면
+  `_diagnose_machine()`이 (훨씬 약한) Z-score 기준선으로 조용히 대체되고
+  `위험도 모델 파일이 없어 Z-score만으로 판정합니다`라는 경고 로그가 뜹니다 — 이건
+  이 단계를 실행하기 전까지는 정상적으로 나오는 로그이지 뭔가 고장난 게 아닙니다:
+  ```bash
+  docker compose exec backend python -m ml.build_features
+  docker compose exec backend python -m ml.train
+  ```
 - 상태(`backend/store/`: SQLite DB와 RAG 인덱스)는 이미지가 아니라 Docker named volume에
   저장되어 `docker compose down` / `up` 사이에도 유지됩니다. `docker compose down -v`만
   이를 삭제합니다(그 경우 위 적재 단계를 다시 실행해야 하고, `hf_cache` 볼륨도 같이
@@ -110,6 +119,12 @@ cp .env.example .env             # Windows: copy .env.example .env
 3. 최초 1회 SQLite 적재를 실행합니다 (`backend/`에서, 위 venv 활성화 상태로):
    ```bash
    python data/pdm_dataloader.py
+   ```
+4. 고장 위험 예측 모델의 피처를 만들고 학습합니다(이것도 최초 1회 — 안 하면
+   `_diagnose_machine()`이 더 약한 Z-score 기준선으로 대체되고 경고 로그가 뜹니다):
+   ```bash
+   python -m ml.build_features
+   python -m ml.train
    ```
 
 ### 첫 실행

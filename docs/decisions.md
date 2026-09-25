@@ -234,3 +234,34 @@ U2 완료 후 실사용 중, "도커 이미지로 띄울 땐 폐쇄망 우선(Ol
 - `agent_service.py`의 provider 로그가 import 순서 때문에 안 보이는 것 — 사소해서
   이번엔 넘어감. 고치려면 `main.py`가 `logging.basicConfig()`를 다른 import보다
   먼저 호출하도록 순서를 바꿔야 함.
+
+## 2026-09-25 — 실제 버그: `pyarrow`가 requirements.txt에 없어서 도커에서 모델 학습이 실패
+
+**배경**
+브라우저로 런타임 테스트 중 `위험도 모델 파일이 없어 Z-score만으로 판정합니다` 경고 로그를
+발견 — 도커 빌드가 잘못됐는지 확인 요청받음.
+
+**원인**
+- `backend/store/`는 이미지가 아니라 별도 볼륨이라, `data/pdm_dataloader.py`처럼
+  `ml.build_features`/`ml.train`도 컨테이너 안에서 최초 1회 실행해야 하는데, 이 단계가
+  README에 아예 빠져 있었음(3-2/3-3 작업 때 이 문서화를 놓침) — 여기까지는 "설계대로".
+- 그런데 실제로 컨테이너 안에서 `ml.build_features`를 실행해보니 `ImportError: pyarrow`로
+  실패 — **이건 진짜 버그.** 3-2에서 Parquet 캐싱을 설계할 때 로컬 venv에 `pyarrow`가
+  이미 설치돼 있어서(다른 패키지가 전이 의존성으로 끌고 옴) 문제없이 검증됐지만,
+  `requirements.txt`에 명시적으로 넣지 않아서 도커 이미지의 의존성 해석 결과에는
+  빠져 있었음 — "로컬에서 됐으니 됐다"고 확인한 게 실제로는 우연에 의존한 것이었음.
+
+**조치**
+- `backend/requirements.txt`에 `pyarrow` 명시적으로 추가.
+- 도커 재빌드 → 컨테이너 안에서 `ml.build_features` + `ml.train` 실행 → 실측치가
+  이전 세션에서 로컬로 측정한 값과 정확히 일치함을 확인(행 재현율 0.992~1.000 등) →
+  `predict_failure_risk` 실제 동작 확인 → `/agent/query` 실제 요청으로 경고 로그가
+  더 이상 안 뜨는 것까지 확인.
+- README(EN/KOR) 양쪽에 "모델 학습도 데이터 적재처럼 최초 1회 실행 필요" 단계 추가
+  (도커 경로 + 로컬 venv 경로 둘 다).
+
+**교훈**
+- "로컬에서 확인했다"는 게 의존성이 `requirements.txt`에 명시돼 있는지까지 보장하진
+  않는다 — 전이 의존성으로 우연히 있는 패키지는 다른 환경(도커, CI, 신규 clone)에서
+  똑같이 있으리라는 보장이 없다. `import X`가 로컬에서 성공한다고 `requirements.txt`에
+  `X`가 있는지 확인 없이 넘어가면 안 됨.

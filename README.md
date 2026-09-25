@@ -78,6 +78,15 @@ docker compose up -d --build
   ```bash
   docker compose exec backend python data/pdm_dataloader.py
   ```
+- **The failure-risk model needs the same one-time treatment** — `backend/store/` is a
+  named volume, not baked into the image, so a fresh container has no trained model either.
+  Without this, `_diagnose_machine()` silently falls back to the (much weaker) Z-score
+  threshold and logs `위험도 모델 파일이 없어 Z-score만으로 판정합니다` — that log line is
+  expected until you run this once, not a sign anything is broken:
+  ```bash
+  docker compose exec backend python -m ml.build_features
+  docker compose exec backend python -m ml.train
+  ```
 - State (`backend/store/`: the SQLite DBs and the RAG index) lives in a named Docker
   volume, not in the image — it survives `docker compose down` / `up`. Only
   `docker compose down -v` wipes it (you'd need to re-run the ingestion step above
@@ -118,6 +127,12 @@ cp .env.example .env             # Windows: copy .env.example .env
 3. Run the one-time SQLite ingestion (from `backend/`, with the venv above active):
    ```bash
    python data/pdm_dataloader.py
+   ```
+4. Build the failure-risk model's features and train it (also one-time; without this,
+   `_diagnose_machine()` falls back to the weaker Z-score threshold and logs a warning):
+   ```bash
+   python -m ml.build_features
+   python -m ml.train
    ```
 
 ### First run

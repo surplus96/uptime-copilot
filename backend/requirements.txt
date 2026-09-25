@@ -22,3 +22,4 @@ mcp==1.30.0
 pytest
 pytest-asyncio
 lightgbm
+pyarrow
