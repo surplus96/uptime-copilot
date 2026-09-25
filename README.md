@@ -86,6 +86,15 @@ docker compose up -d --build
 - Both services bind to `127.0.0.1` only, same as the manual setup below — nothing is
   exposed on your LAN.
 - `docker compose down` to stop.
+- **`docker-compose.yml` defaults the backend to `LLM_PROVIDER=ollama`** (the plain code
+  default, e.g. when running the backend directly without Docker, is `openai` — this override
+  lives in `docker-compose.yml`'s `environment:` block, which always wins over
+  `backend/.env`; see Evaluation Baseline below for what that trade-off actually costs). For
+  the container to reach it, start Ollama on the host with `OLLAMA_HOST=0.0.0.0 ollama serve`
+  (its default, loopback-only, isn't reachable from inside the container) — `docker-compose.yml`
+  already points `OLLAMA_BASE_URL` at `host.docker.internal` for you. Pull the model once
+  with `ollama pull qwen3:8b`. Set `LLM_PROVIDER: openai` in `docker-compose.yml` instead if
+  you'd rather the containers use the cloud model.
 
 ## Running Without Docker
 
@@ -198,8 +207,8 @@ air-gapped operation — worth it for a closed environment, not a drop-in free u
 
 | Variable | Required | Effect if unset |
 |---|---|---|
-| `LLM_PROVIDER` | No | Defaults to `openai`. Set to `ollama` to run entirely against a local Ollama server instead (`backend/core/llm_provider.py`) — no API key or internet needed, at a real accuracy/latency cost (see Evaluation Baseline below) |
-| `OPENAI_API_KEY` | **Yes, unless `LLM_PROVIDER=ollama`** | Backend refuses to start |
+| `LLM_PROVIDER` | No | Code default is `openai`; set to `ollama` to run entirely against a local Ollama server instead (`backend/core/llm_provider.py`) — no API key or internet needed, at a real accuracy/latency cost (see Evaluation Baseline below). **`docker-compose.yml` overrides this to `ollama`** for the containerized path regardless of what's in `.env` — see "Running with Docker Compose" above. |
+| `OPENAI_API_KEY` | **Yes, unless `LLM_PROVIDER=ollama`** | Backend refuses to start. Not needed for the Docker path by default, since compose sets `LLM_PROVIDER=ollama`. |
 | `OPENAI_MODEL` | No | Defaults to `gpt-5.6-luna`. Only used when `LLM_PROVIDER=openai` |
 | `OLLAMA_BASE_URL` | No | Defaults to `http://localhost:11434/v1`. Only used when `LLM_PROVIDER=ollama` |
 | `OLLAMA_MODEL` | No | Defaults to `qwen3:8b`. Only used when `LLM_PROVIDER=ollama` — pull it first with `ollama pull qwen3:8b` |

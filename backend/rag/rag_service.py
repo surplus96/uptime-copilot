@@ -25,6 +25,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from core import llm_provider
+
 logger = logging.getLogger(__name__)
 
 # CWD(실행 위치)가 아니라 이 파일 자신의 위치를 기준으로 경로를 잡는다 -
@@ -105,7 +107,7 @@ def initialize_rag(openai_api_key: str, model_name: str, langsmith_client=None, 
     # 검색(retriever)은 체인에서 분리한다 - 검색은 answer_with_context()에서 딱 1번만 수행하고,
     # 그 결과를 이 체인에 {"context": ..., "question": ...}로 직접 넘긴다.
     _rag_chain = rag_prompt | model | StrOutputParser()
-    logger.info("RAG 파이프라인 초기화 완료 (하이브리드 검색, OpenAI)")
+    logger.info(f"RAG 파이프라인 초기화 완료 (하이브리드 검색, provider={llm_provider.get_provider_name()})")
 
 
 

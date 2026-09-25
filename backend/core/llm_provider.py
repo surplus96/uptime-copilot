@@ -24,6 +24,11 @@ def _provider() -> str:
     return os.getenv("LLM_PROVIDER", "openai")
 
 
+def get_provider_name() -> str:
+    """로그·상태 표시용 - 지금 실제로 어느 제공자가 선택돼 있는지 (`"openai"` | `"ollama"`)."""
+    return _provider()
+
+
 def get_client() -> OpenAI:
     """제공자에 맞는 OpenAI SDK 클라이언트를 만든다. agent_service.py/main.py가
     module-level에서 한 번만 호출해서 재사용한다 - 매 요청마다 새로 만들지 않는다."""

@@ -205,3 +205,32 @@ U1/U2 작업을 반영한 케이스 스터디 새 섹션(§05 고장 위험 예�
 
 **미해결 항목**
 - 없음 (지적 사항 전부 반영 후 이 기록으로 종료)
+
+## 2026-09-23 — Docker 경로의 LLM_PROVIDER 기본값을 ollama로 변경
+
+**배경**
+U2 완료 후 실사용 중, "도커 이미지로 띄울 땐 폐쇄망 우선(Ollama)이 기본이어야 한다"는
+요청을 받음.
+
+**조치**
+- `docker-compose.yml`의 backend `environment:` 블록에 `LLM_PROVIDER: ollama` +
+  `OLLAMA_BASE_URL: http://host.docker.internal:11434/v1` 추가 — `ALLOWED_HOSTS`와
+  같은 이유로 `.env`보다 항상 우선하게 함. 코드 자체의 기본값(`openai`)은 안 건드림 —
+  도커 없이 직접 실행(로컬 venv, 테스트)할 땐 그대로 클라우드가 기본.
+- 부수적으로 발견: `rag_service.py`의 초기화 로그가 provider와 무관하게 항상
+  "OpenAI"라고 하드코딩되어 있어서 실제로 뭘 쓰는지 로그로 확인이 안 됐음 —
+  `llm_provider.get_provider_name()`을 추가하고 로그를 동적으로 고침. `agent_service.py`에도
+  같은 로그를 추가했으나, `main.py`에서 `agent_service` import(26번 줄)가
+  `logging.basicConfig()` 호출(40번 줄)보다 먼저 일어나서 그 사이의 INFO 로그가 핸들러
+  없이 조용히 버려짐 — 기능에는 영향 없고 로그 한 줄만 안 보이는 사소한 결함으로,
+  당장 고치지 않고 기록만 남김.
+- 실측 검증: Ollama를 `OLLAMA_HOST=0.0.0.0`으로 띄우고 도커를 재빌드한 뒤, `/rag/query`
+  로그에서 `provider=ollama` 확인 + `/agent/query`(설비 15번 정비일정 문의)에 실제
+  요청을 보내 정답을 정확히 반환하는 것까지 확인. 소요시간 40.5초로, 개별 측정한
+  Ollama 호출 지연(10~14초/call) × 이 요청에 필요한 호출 수와 일치 — 실제로 Ollama를
+  거쳐서 나온 응답임을 지연 시간으로도 교차 확인.
+
+**미해결 항목**
+- `agent_service.py`의 provider 로그가 import 순서 때문에 안 보이는 것 — 사소해서
+  이번엔 넘어감. 고치려면 `main.py`가 `logging.basicConfig()`를 다른 import보다
+  먼저 호출하도록 순서를 바꿔야 함.

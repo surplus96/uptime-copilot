@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 client = llm_provider.get_client()
 
 MODEL = llm_provider.get_model()
+logger.info(f"agent_service: provider={llm_provider.get_provider_name()}, model={MODEL}")
 
 def initialize_agent(langsmith_client, checkpointer) -> None:
     """main.py의 lifespan에서 호출: main.py와 같은 LangSmith Client(PII 익명화 포함)로

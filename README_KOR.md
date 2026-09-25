@@ -79,6 +79,15 @@ docker compose up -d --build
   지워져서 임베딩 모델도 다시 받아야 함).
 - 두 서비스 모두 `127.0.0.1`에만 바인딩됩니다(아래 수동 설정과 동일) — LAN에 노출되지 않습니다.
 - 중지는 `docker compose down`.
+- **`docker-compose.yml`은 백엔드 기본값을 `LLM_PROVIDER=ollama`로 강제합니다**(코드 자체의
+  기본값 — 도커 없이 직접 실행할 때 등 — 은 `openai`입니다. 이 override는
+  `docker-compose.yml`의 `environment:` 블록에 있고, `backend/.env`보다 항상 우선합니다.
+  이 트레이드오프가 실제로 뭘 의미하는지는 아래 평가 기준선 참고). 컨테이너가 접근하려면
+  호스트에서 `OLLAMA_HOST=0.0.0.0 ollama serve`로 Ollama를 켜야 합니다(기본값인 루프백
+  전용 바인딩은 컨테이너에서 접근 불가) — `docker-compose.yml`이 `OLLAMA_BASE_URL`을 이미
+  `host.docker.internal`로 맞춰뒀습니다. 모델은 한 번 `ollama pull qwen3:8b`로 받아두면
+  됩니다. 컨테이너에서 클라우드 모델을 쓰고 싶으시면 `docker-compose.yml`의
+  `LLM_PROVIDER: openai`로 바꾸시면 됩니다.
 
 ## Docker 없이 실행
 
@@ -186,8 +195,8 @@ pytest tests/eval/test_golden.py -m eval -v -s
 
 | 변수 | 필수 | 미설정 시 동작 |
 |---|---|---|
-| `LLM_PROVIDER` | 선택 | 기본값 `openai`. `ollama`로 설정하면 완전히 로컬 Ollama 서버로만 동작(`backend/core/llm_provider.py`) — API 키·인터넷 불필요, 대신 실측 가능한 정확도/지연 손실 있음(아래 평가 기준선 참고) |
-| `OPENAI_API_KEY` | **`LLM_PROVIDER=ollama`가 아니면 필수** | 백엔드가 시작되지 않음 |
+| `LLM_PROVIDER` | 선택 | 코드 기본값은 `openai`. `ollama`로 설정하면 완전히 로컬 Ollama 서버로만 동작(`backend/core/llm_provider.py`) — API 키·인터넷 불필요, 대신 실측 가능한 정확도/지연 손실 있음(아래 평가 기준선 참고). **`docker-compose.yml`은 이 값을 `ollama`로 강제** — `.env`에 뭐라고 써도 도커 경로에선 이게 이깁니다. 위 "Docker Compose로 실행" 참고. |
+| `OPENAI_API_KEY` | **`LLM_PROVIDER=ollama`가 아니면 필수** | 백엔드가 시작되지 않음. 도커 경로는 compose가 기본으로 `LLM_PROVIDER=ollama`를 설정하므로 필요 없음. |
 | `OPENAI_MODEL` | 선택 | 기본값 `gpt-5.6-luna`. `LLM_PROVIDER=openai`일 때만 사용 |
 | `OLLAMA_BASE_URL` | 선택 | 기본값 `http://localhost:11434/v1`. `LLM_PROVIDER=ollama`일 때만 사용 |
 | `OLLAMA_MODEL` | 선택 | 기본값 `qwen3:8b`. `LLM_PROVIDER=ollama`일 때만 사용 — 먼저 `ollama pull qwen3:8b`로 받아야 함 |
