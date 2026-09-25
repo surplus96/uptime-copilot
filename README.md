@@ -104,6 +104,11 @@ docker compose up -d --build
   already points `OLLAMA_BASE_URL` at `host.docker.internal` for you. Pull the model once
   with `ollama pull qwen3:8b`. Set `LLM_PROVIDER: openai` in `docker-compose.yml` instead if
   you'd rather the containers use the cloud model.
+- **Recommended**: run Ollama on the host with `OLLAMA_KEEP_ALIVE=30m ollama serve` so the
+  model doesn't get evicted from memory after a short idle period. With the default (usually
+  5 minutes), the first request after a lull pays a cold reload from disk on top of normal
+  inference latency (the backend sends one warm-up call on startup, but a long idle gap after
+  that will still evict it again).
 
 ## Running Without Docker
 
@@ -202,21 +207,42 @@ Silicon, no GPU acceleration beyond Metal) instead of the cloud model:
 
 | Metric | Cloud (gpt-5.6-luna) | Local (Ollama Qwen3-8B) |
 |---|---|---|
-| Router accuracy | 90.0% | 77.5% |
+| Router accuracy | 90.0% | 90.0% |
 | Machine-ID extraction | 100.0% | 100.0% |
 | Re-ask on missing ID | 100.0% | 100.0% |
-| Mean latency / call | ~1.2s | 13.6s (routing) / 10.8s (extraction) |
+| Dangerous misroute (named machine → ungrounded node) | 0 | 0 |
+| Mean latency / call | ~1.2s | ~13s (routing+extraction merged into one call; occasional outliers up to ~40s under memory pressure, see below) |
 
-Extraction and re-ask hold up identically locally — those are narrow, closed-form tasks.
-Routing drops 12.5 points and every call is an order of magnitude slower. A spot check of
-the safety/production/maintenance perspective assessments (not part of the golden set,
-which only covers routing/extraction) surfaced a contradiction the local model produced
-that the cloud model didn't in the same testing: `risk_level: "중간"` (medium) together
-with `requires_shutdown: true` — internally inconsistent output that CP-U2's cross-review
-(`docs/decisions.md`) had already flagged as a risk worth watching for. Bottom line: the
-adapter (`LLM_PROVIDER=ollama`) works end-to-end today, but going fully local trades
-measurable accuracy and an order of magnitude of latency for no API cost and full
-air-gapped operation — worth it for a closed environment, not a drop-in free upgrade.
+Extraction and re-ask held up identically locally from the start — those are narrow,
+closed-form tasks. Routing initially trailed the cloud model by 12.5 points (77.5%) and
+every call ran roughly 10x slower as two separate calls (routing, then a follow-up
+extraction call). Both gaps were closed on the code side, not by using a bigger model:
+router+extraction were merged into a single structured-output call (removing a full
+round trip for every diagnosis/schedule request), and a deterministic post-classification
+check now catches the specific phrasings the local model kept misrouting into the
+ungrounded free-chat node — first machine-number word order ("설비 46번" vs "46번 설비"),
+then symptom-only reports with no machine number at all ("설비가 이상해요"). Measured router
+accuracy went from 77.5% to 90.0% (matching the cloud figure above) once both landed; a
+golden-set regression test (`tests/eval/test_golden.py`) now specifically fails if any
+query naming a real machine ID lands in the ungrounded node, separately from the overall
+accuracy number, since that combination is what actually produces a false "everything's
+fine" answer about a real failure (see `docs/decisions.md`, 2026-09-25).
+
+A spot check of the safety/production/maintenance perspective assessments (outside the
+golden set, which only covers routing/extraction) had also surfaced a contradiction the
+local model produced that the cloud model didn't: `risk_level: "중간"` (medium) together
+with `requires_shutdown: true`. This is now structurally impossible rather than just
+logged — `requires_shutdown` is no longer an LLM-set field; it's derived in code from
+`risk_level`/`recommended_window`, so the model has no way to set it inconsistently.
+
+Bottom line: the adapter (`LLM_PROVIDER=ollama`) now matches the cloud model on every
+measured accuracy metric and roughly halved its latency gap versus the cloud model
+through call-merging alone — remaining costs are the still-real ~10x per-call latency
+(mitigated by warm-up + `OLLAMA_KEEP_ALIVE`, not eliminated) and this machine's memory
+headroom (16GB unified memory already runs close to its limit with Docker Desktop and
+the app's own containers running, which is the likely cause of the occasional latency
+outlier above) — worth it for a closed environment, no longer a straightforward
+accuracy/latency trade for going fully local.
 
 ## Environment Variables (`backend/.env`)
 

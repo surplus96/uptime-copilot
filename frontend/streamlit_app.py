@@ -12,6 +12,22 @@ st.title("Uptime Copilot")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
+# 어느 LLM 프로바이더로 떠 있는지는 세션당 한 번만 조회해서 캐싱한다 - 매 재실행마다
+# 다시 호출하면 리런 잦은 Streamlit 특성상 불필요한 지연이 생긴다. 모든 답변이 프로바이더
+# 무관하게 동일한 신뢰도로 보이는 문제(interface-reviewer 지적)를 막기 위해 전역으로 노출한다.
+if "backend_info" not in st.session_state:
+    try:
+        st.session_state.backend_info = requests.get(f"{BACKEND_URL}/health", timeout=5).json()
+    except requests.exceptions.RequestException:
+        st.session_state.backend_info = {}
+
+_provider = st.session_state.backend_info.get("llm_provider")
+if _provider:
+    _caption = f"🔌 응답 모델: {_provider} / {st.session_state.backend_info.get('llm_model', '?')}"
+    if _provider == "ollama":
+        _caption += " — 로컬 모델. 분류·추출 정확도가 클라우드 모델보다 낮을 수 있습니다."
+    st.sidebar.caption(_caption)
+
 
 ERROR_LABELS = {
     "llm_api_error": "AI 응답 실패",
@@ -236,8 +252,27 @@ with tab1:
                     res.raise_for_status()
                     data = res.json()
                 except requests.exceptions.RequestException as e:
-                    st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
+                    st.warning(
+                        f"응답을 받지 못했습니다: {_extract_error_message(e)}\n\n"
+                        "서버에서는 계속 처리 중이었을 수 있습니다. 아래 버튼으로 이 설비 요청이 "
+                        "실제로 처리됐는지 확인하세요."
+                    )
+                    if st.button("이 요청 상태 확인"):
+                        try:
+                            check = requests.get(f"{BACKEND_URL}/agent/status/{thread_id}", timeout=10).json()
+                        except requests.exceptions.RequestException:
+                            check = {"status": "not_found"}
+                        if check.get("status") == "pending_approval":
+                            st.session_state.pending_approval = {
+                                "message": check["message"],
+                                "work_order": check.get("work_order"),
+                                "perspectives": check.get("perspectives", []),
+                            }
+                            st.rerun()
+                        else:
+                            st.info("아직 대기 중인 작업지시서가 없습니다. 잠시 후 다시 확인해보세요.")
                     request_ok = False
+
 
             if request_ok:
                 if data["status"] == "pending_approval":
@@ -280,7 +315,13 @@ with tab2:
     if rag_result:
         st.markdown(f"**답변**\n\n{rag_result['answer']}")
         if rag_result.get("verified") is False:
-            st.warning("⚠️ 이 답변은 출처 문맥과 일치하는지 자동 검증되지 못했습니다 (검증 시스템 일시 오류) — 내용을 직접 확인해 주세요.")
+            reason = rag_result.get("verified_reason") or "채점 결과를 구조화된 형식으로 받지 못함"
+            st.warning(
+                f"⚠️ 이 답변은 출처 문맥과 일치하는지 자동 검증되지 못했습니다 ({reason}) — 내용을 직접 확인해 주세요."
+            )
+        # "검증됨"이 독립 기관의 확인처럼 읽히지 않도록, 답변을 생성한 것과 같은 모델이
+        # 스스로 채점한다는 사실을 항상 명시한다 (interface-reviewer 지적).
+        st.caption("검증은 답변을 생성한 것과 같은 모델이 스스로 채점한 결과이며, 독립적인 검증이 아닙니다.")
         if rag_result.get("context"):
             with st.expander("📄 참고한 매뉴얼 원문 보기"):
                 st.text(rag_result["context"])

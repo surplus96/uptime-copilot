@@ -67,6 +67,22 @@ CHECKPOINT_DB_PATH = Path(__file__).parent / "store" / "checkpoints.db"
 CHECKPOINT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)  # 최초 실행(예: 도커 첫 부팅) 시 store/가 아직 없을 수 있음
 
 
+async def _warm_up_ollama() -> None:
+    """Ollama는 유휴 시간이 지나면 모델을 메모리에서 내렸다가 다음 요청에서 디스크부터
+    다시 로드한다 - 첫 실제 사용자 요청이 이 콜드로드 지연까지 떠안지 않도록, 기동 직후
+    백그라운드로 더미 호출 한 번을 보내 모델을 미리 올려둔다. 헬스체크/기동을 막지 않게
+    fire-and-forget으로 실행하고 실패해도 무시한다(2026-09-25, 지연시간 개선)."""
+    try:
+        agent_service.client.chat.completions.create(
+            model=agent_service.MODEL,
+            max_completion_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        logging.getLogger(__name__).info("Ollama 워밍업 완료")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Ollama 워밍업 실패(무시하고 계속 진행): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     rag_service.initialize_rag(llm_provider.get_api_key(), DEFAULT_MODEL, langsmith_client, base_url=llm_provider.get_base_url())
@@ -76,6 +92,8 @@ async def lifespan(app: FastAPI):
     try:
         with SqliteSaver.from_conn_string(str(CHECKPOINT_DB_PATH)) as checkpointer:
             agent_service.initialize_agent(langsmith_client, checkpointer)
+            if llm_provider.get_provider_name() == "ollama":
+                asyncio.create_task(_warm_up_ollama())
             yield
     finally:
         # finally: yield에서 예외가 올라와도 태스크를 반드시 정리한다.
@@ -90,7 +108,7 @@ async def lifespan(app: FastAPI):
 
 
 
-app = FastAPI(title="AI Agent RAG Backend (OpenAI)", lifespan=lifespan)
+app = FastAPI(title=f"AI Agent RAG Backend ({llm_provider.get_provider_name()})", lifespan=lifespan)
 
 # ---------- 커스텀 예외 ---------------
 
@@ -155,6 +173,7 @@ class RAGResponse(BaseModel):
     answer: str
     context: str | None = None
     verified: bool = True
+    verified_reason: str | None = None  # verified=False일 때만 채움 - 실패 사유를 프론트가 추측하지 않게
 
 
 class AgentQueryRequest(BaseModel):
@@ -178,7 +197,11 @@ class AgentResumeRequest(BaseModel):
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "llm_provider": llm_provider.get_provider_name(),
+        "llm_model": llm_provider.get_model(),
+    }
 
 
 @app.post("/rag/query", response_model=RAGResponse)
@@ -203,7 +226,11 @@ def rag_query(req: RAGRequest):
         )
 
     verified = faithfulness_result.get("score") is not None
-    return RAGResponse(question=req.question, answer=answer, context=context, verified=verified)
+    verified_reason = None if verified else faithfulness_result.get("reason")
+    return RAGResponse(
+        question=req.question, answer=answer, context=context,
+        verified=verified, verified_reason=verified_reason,
+    )
 
 
 @app.post("/agent/query")
@@ -217,6 +244,12 @@ def agent_query(req: AgentQueryRequest):
 def agent_resume(req: AgentResumeRequest):
     """승인 대기 중인 요청에 사람의 결정을 전달해서 재개한다."""
     return agent_service.resume_agent(req.thread_id, req.approved)
+
+@app.get("/agent/status/{thread_id}")
+def agent_status(thread_id: str):
+    pending = agent_service.check_pending(thread_id)
+    return pending or {"status": "not_found"}
+
 
 @app.post("/scan")
 def trigger_scan():

@@ -6,6 +6,7 @@ HITL 체크포인트를 추가한다.
 
 import logging
 import operator
+import re
 import time
 from typing import Annotated, Literal
 
@@ -64,34 +65,49 @@ class SupervisorState(BaseModel):
 
 class RouteDecision(BaseModel):
     category: Literal["오류_진단", "정비_일정", "일반_문의"]
+    machine_id: int | None = None  # 언급된 설비 번호. 분류와 한 번에 뽑아서 별도 추출 호출을 없앤다
     reason: str
-
-
-class IncidentExtraction(BaseModel):
-    machine_id: int | None = None
 
 
 class PerspectiveAssessment(BaseModel):
     risk_level: Literal["낮음", "중간", "높음"]
     recommended_window: Literal["즉시", "24시간 이내", "1주 이내", "정기 점검 시"]
-    requires_shutdown: bool
     rationale: str
+    # requires_shutdown은 여기 없다 - _derive_requires_shutdown()이 risk_level/
+    # recommended_window로부터 코드로 계산한다. 로컬 모델(Ollama)이 이 필드를 독립적으로
+    # 채우면서 risk_level="중간"인데 requires_shutdown=true 같은 내적 모순을 실제로 냈다
+    # (2026-09-25 실측, docs/decisions.md) - 세 번째 필드를 LLM에게 맡기는 대신 앞의 두
+    # 필드로부터 결정론적으로 유도해서 모순 자체가 구조적으로 불가능하게 만든다.
 
 
+def _derive_requires_shutdown(risk_level: str, recommended_window: str) -> bool:
+    """위험도와 권장 조치 시점이 둘 다 최고 수준으로 일치할 때만 정지를 권고한다 - LLM이
+    임의로 고르던 것보다 발동 조건이 좁아졌지만(보수적), '위험도 중간인데 정지 필요' 같은
+    모순은 이 정의로는 애초에 나올 수 없다."""
+    return risk_level == "높음" and recommended_window == "즉시"
 
-def _extract_machine_id(user_message: str) -> int | None:
-    completion = llm_provider.parse_with_retry(
-        client,
-        model=MODEL,
-        reasoning_effort="none",
-        messages=[
-            {"role": "system", "content": "사용자 문의에서 설비 번호(machine_id, 정수)를 추출하세요. 설비 번호가 명시되지 않았으면 machine_id를 null로 반환하세요."},
-            {"role": "user", "content": user_message},
-        ],
-        response_format=IncidentExtraction,
-    )
 
-    return completion.choices[0].message.parsed.machine_id
+_MACHINE_NUMBER_RE = re.compile(r"(설비|기계|장비)\s*\d+\s*번|\d+\s*번\s*(설비|기계|장비)")
+# 2026-09-25 실측(docs/decisions.md): 설비 번호 없이 증상만 신고하는 문장("설비가
+# 이상해요", "소음이 심해요")도 일반_문의로 오분류되면 general_node(DB 조회 없는
+# 자유생성)로 빠진다. "오류"처럼 너무 넓은 단어는 "오류 코드 종류에는 어떤 게 있어?"
+# 같은 순수 정보성 질문까지 잘못 낚아채므로(골든셋 g40), 실제 증상 신고 문형에만
+# 맞는 구체적인 구절을 쓴다 - 이 목록은 완전하지 않고, 골든셋 평가가 새 빈틈을
+# 찾을 때마다 넓혀가는 걸 전제로 한다(tests/eval/test_golden.py의
+# misroute_to_ungrounded 회귀 검사 참고).
+_SYMPTOM_PHRASES = ("이상해", "오류가", "소음이", "고장났", "고장이 났", "안 움직", "멈췄")
+# 설비 번호 없는 점검/정비 일정 문의도 같은 이유로 새는 걸 실측함("점검은 보통 얼마나
+# 자주 해야 해?" 같은 순수 정보성 질문(골든셋 g35)과 겹치지 않게, 특정 대상을 전제하는
+# 구절만 쓴다.
+_SCHEDULE_PHRASES = ("다음 점검", "정비 스케줄", "점검 일정", "정비 일정")
+
+
+def _mentions_machine_trouble(message: str) -> bool:
+    return bool(_MACHINE_NUMBER_RE.search(message)) or any(p in message for p in _SYMPTOM_PHRASES)
+
+
+def _mentions_schedule_request(message: str) -> bool:
+    return any(p in message for p in _SCHEDULE_PHRASES)
 
 
 def route_node(state: SupervisorState) -> dict:
@@ -101,23 +117,31 @@ def route_node(state: SupervisorState) -> dict:
         reasoning_effort="none",
         messages=[
             {"role": "system", "content": (
-                "사용자 문의를 아래 세 카테고리 중 하나로 분류하세요.\n"
+                "사용자 문의를 아래 세 카테고리 중 하나로 분류하고, 언급된 설비 번호가 있으면 "
+                "함께 추출하세요(없으면 machine_id는 null).\n"
                 "- 오류_진단: 특정 설비 번호의 오류/증상에 대한 원인·조치 문의\n"
                 "- 정비_일정: 다음 점검일 문의\n"
                 "- 일반_문의: 그 외 일반적인 질문"
             )},
             {"role": "user", "content": "3번 설비에서 오류 났는데 뭐가 문제야?"},
-            {"role": "assistant", "content": '{"category": "오류_진단", "reason": "특정 설비 번호를 언급하며 원인을 묻고 있음"}'},
+            {"role": "assistant", "content": '{"category": "오류_진단", "machine_id": 3, "reason": "특정 설비 번호를 언급하며 원인을 묻고 있음"}'},
             {"role": "user", "content": "15번 설비 다음 점검은 언제야?"},
-            {"role": "assistant", "content": '{"category": "정비_일정", "reason": "특정 설비의 다음 점검일을 묻고 있음"}'},
+            {"role": "assistant", "content": '{"category": "정비_일정", "machine_id": 15, "reason": "특정 설비의 다음 점검일을 묻고 있음"}'},
             {"role": "user", "content": state.user_message},
         ],
         response_format=RouteDecision,
     )
 
     decision = completion.choices[0].message.parsed
-    logger.info(f"[라우터] {decision.category}")
-    return {"category": decision.category}
+    category = decision.category
+    if category == "일반_문의" and _mentions_machine_trouble(state.user_message):
+        logger.info(f"[라우터] LLM 판정({category})을 안전장치가 오류_진단으로 전환 (설비 이상 언급됨)")
+        category = "오류_진단"
+    elif category == "일반_문의" and _mentions_schedule_request(state.user_message):
+        logger.info(f"[라우터] LLM 판정({category})을 안전장치가 정비_일정으로 전환 (점검 일정 언급됨)")
+        category = "정비_일정"
+    logger.info(f"[라우터] {category}")
+    return {"category": category, "machine_id": decision.machine_id}
 
 
 RISK_THRESHOLD = 0.5  # docs/model_card.md 7절: 이 값에서 이미 오경보 <=0.001/설비/일
@@ -173,7 +197,13 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
         flagged_desc = ", ".join(anomaly["flagged_signals"])
         diagnosis_text += f" / 텔레메트리 이상 감지(사전 경보): {flagged_desc} 신호가 평소 대비 통계적으로 벗어남"
     if risk_alarm:
-        diagnosis_text += f" / 예측 모델: 24시간 내 {top_risk_comp} 고장확률 {top_risk_proba:.0%}"
+        # "고장확률"이라 쓰면 보정된 확률로 읽히지만 이 값은 보정되지 않은 모델 출력값이다
+        # (priority_rule_node 주석 참조) - 캘리브레이션 없이 "72%"만 보여주면 현장에서
+        # 실제 사고 발생 비율로 오독할 수 있어 라벨과 괄호로 명시한다 (interface-reviewer 지적).
+        diagnosis_text += (
+            f" / 예측 모델: 24시간 내 {top_risk_comp} 위험도 점수 {top_risk_proba:.0%}"
+            "(모델 출력값, 보정되지 않은 값이라 실제 발생 확률과 다를 수 있음)"
+        )
 
     model = machine_info.get("model")
     if model:
@@ -204,7 +234,7 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     if risk_alarm and top_risk_comp:
         top_feature_names = ", ".join(f["feature"] for f in risk[top_risk_comp]["top_features"])
         component_evidence.setdefault(top_risk_comp, []).append(
-            f"예측 모델: 24시간 내 고장확률 {top_risk_proba:.0%}, 주요 근거: {top_feature_names}"
+            f"예측 모델: 24시간 내 위험도 점수 {top_risk_proba:.0%}(보정되지 않은 값), 주요 근거: {top_feature_names}"
         )
 
     if failure:
@@ -242,12 +272,12 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
 
 
 def diagnosis_node(state: SupervisorState) -> dict:
-    """자연어 질문에서 설비 번호를 추출한 뒤 _diagnose_machine()으로 진단한다."""
-    machine_id = _extract_machine_id(state.user_message)
-    if machine_id is None:
+    """route_node가 분류와 함께 뽑아둔 설비 번호(state.machine_id)로 진단한다 - 별도
+    추출 호출을 하지 않는다(2026-09-25, 라우팅+추출 호출 병합으로 지연 절감)."""
+    if state.machine_id is None:
         return {"severity": "일반", "diagnosis": "몇 번 설비인지 알려주시겠어요? 예: '3번 설비 상태가 이상해요'"}
-    result = _diagnose_machine(machine_id)
-    logger.info(f"[진단] machine #{machine_id} -> {result['severity']}")
+    result = _diagnose_machine(state.machine_id)
+    logger.info(f"[진단] machine #{state.machine_id} -> {result['severity']}")
     return {k: v for k, v in result.items() if k != "evidence_at"}
 
 
@@ -286,10 +316,11 @@ def scan_all_machines() -> list[dict]:
 
 
 def schedule_node(state: SupervisorState) -> dict:
-    machine_id = _extract_machine_id(state.user_message)
-    if machine_id is None:
+    """route_node가 분류와 함께 뽑아둔 설비 번호(state.machine_id)를 쓴다 - 별도 추출
+    호출을 하지 않는다(2026-09-25, 라우팅+추출 호출 병합으로 지연 절감)."""
+    if state.machine_id is None:
         return {"machine_id": None, "result": "몇 번 설비의 정비 일정인지 알려주시겠어요?"}
-    schedule_info = pdm_operations.estimate_next_maintenance(machine_id)
+    schedule_info = pdm_operations.estimate_next_maintenance(state.machine_id)
 
     completion2 = client.chat.completions.create(
         model=MODEL,
@@ -297,7 +328,7 @@ def schedule_node(state: SupervisorState) -> dict:
         max_completion_tokens=300,
         messages=[
             {"role": "system", "content": (
-                f"설비 #{machine_id}의 정비 이력 데이터: {schedule_info}\n"
+                f"설비 #{state.machine_id}의 정비 이력 데이터: {schedule_info}\n"
                 "이 정보를 바탕으로 답하세요. 실제 오늘 날짜가 언제인지는 알 수 없으니, "
                 "'현재 날짜'나 '오늘 기준으로' 같은 표현으로 임의의 날짜를 추측하거나 언급하지 마세요. "
                 "데이터에 있는 마지막 점검일과 다음 점검 예정일만 그대로 전달하세요."
@@ -305,7 +336,7 @@ def schedule_node(state: SupervisorState) -> dict:
             {"role": "user", "content": state.user_message},
         ],
     )
-    return {"machine_id": machine_id, "result": completion2.choices[0].message.content}
+    return {"machine_id": state.machine_id, "result": completion2.choices[0].message.content}
 
 
 def general_node(state: SupervisorState) -> dict:
@@ -371,7 +402,6 @@ def work_order_node(state: SupervisorState) -> dict:
 _DEFAULT_ASSESSMENT = {
     "risk_level": "중간",
     "recommended_window": "24시간 이내",
-    "requires_shutdown": False,
     "rationale": "(자동 평가 실패 - 사람이 직접 판단 필요)",
     "is_fallback": True,  # CP-U2 지적: 정직한 "중간" 판정과 구분해야 priority_rule이 오판 안 함
 }
@@ -379,8 +409,8 @@ _DEFAULT_ASSESSMENT = {
 
 def _assess_perspective(label: str, system_prompt: str, diagnosis: str) -> dict:
     """세 관점 노드(안전/생산/정비)가 공유하는 평가 로직. 구조화 출력이 거부되거나
-    예외가 나면 '위험도 중간·정지 불필요·24시간 이내 조치'라는 보수적 기본값으로
-    대체한다 - 관점이 아예 빠지는 것보다 사람이 알아챌 수 있는 형태로 안전하게 죽인다."""
+    예외가 나면 '위험도 중간·24시간 이내 조치'라는 보수적 기본값으로 대체한다 - 관점이
+    아예 빠지는 것보다 사람이 알아챌 수 있는 형태로 안전하게 죽인다."""
     try:
         completion = llm_provider.parse_with_retry(
             client,
@@ -402,6 +432,9 @@ def _assess_perspective(label: str, system_prompt: str, diagnosis: str) -> dict:
         logger.warning(f"[{label}] 관점 평가 실패, 안전한 기본값으로 대체: {e}")
         assessment = dict(_DEFAULT_ASSESSMENT)
 
+    assessment["requires_shutdown"] = _derive_requires_shutdown(
+        assessment["risk_level"], assessment["recommended_window"]
+    )
     return {
         "perspectives": [f"[{label}] {assessment['rationale']}"],
         "perspective_assessments": [{"label": label, **assessment}],
@@ -608,3 +641,22 @@ def resume_agent(thread_id: str, approved: bool) -> dict:
     result = app.invoke(Command(resume=approved), config=config)
     _validate_output(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}
+
+def check_pending(thread_id: str) -> dict | None:
+    """타임아웃 등으로 잃어버린 pending_approval을 thread_id로 복구 조회한다.
+    app.invoke를 다시 하지 않고 체크포인트 상태만 읽는다 - 재실행/중복 side-effect 없음."""
+    config = {"configurable": {"thread_id": thread_id}}
+    state = app.get_state(config)
+    if not state.next:  # interrupt 대기 중이 아니면 next가 비어있음
+        return None
+    for task in state.tasks:
+        for interrupt in task.interrupts:
+            payload = interrupt.value
+            _validate_output(payload)
+            return {
+                "status": "pending_approval",
+                "message": payload["message"],
+                "work_order": payload.get("work_order"),
+                "perspectives": payload.get("perspectives", []),
+            }
+    return None

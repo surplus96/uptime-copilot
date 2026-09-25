@@ -16,10 +16,13 @@ class _FakeCompletion:
 
 
 class _FakeCompletions:
+    def __init__(self, machine_id=1):
+        self._machine_id = machine_id
+
     def parse(self, *, response_format, **kwargs):
         assert response_format is agent_service.RouteDecision
         return _FakeCompletion(_FakeMessage(
-            parsed=agent_service.RouteDecision(category="오류_진단", reason="테스트")
+            parsed=agent_service.RouteDecision(category="오류_진단", machine_id=self._machine_id, reason="테스트")
         ))
 
     def create(self, **kwargs):
@@ -27,12 +30,15 @@ class _FakeCompletions:
 
 
 class _FakeClient:
-    chat = type("Chat", (), {"completions": _FakeCompletions()})()
+    def __init__(self, machine_id=1):
+        self.chat = type("Chat", (), {"completions": _FakeCompletions(machine_id)})()
 
 
 def _patch_common(monkeypatch, severity, machine_id=1):
-    monkeypatch.setattr(agent_service, "client", _FakeClient())
-    monkeypatch.setattr(agent_service, "_extract_machine_id", lambda msg: machine_id)
+    # route_node가 분류와 함께 machine_id도 한 번에 뽑으므로(2026-09-25 호출 병합),
+    # 이 가짜 클라이언트의 RouteDecision 응답에 machine_id를 실어서 diagnosis_node가
+    # state.machine_id로 그대로 받게 한다 - 더 이상 별도 추출 함수를 몽키패치하지 않는다.
+    monkeypatch.setattr(agent_service, "client", _FakeClient(machine_id))
     monkeypatch.setattr(agent_service, "_diagnose_machine", lambda mid, **kw: {
         "machine_id": mid,
         "diagnosis": f"테스트 {severity} 진단",
@@ -43,9 +49,9 @@ def _patch_common(monkeypatch, severity, machine_id=1):
     })
     agent_service.app = agent_service.graph.compile(checkpointer=InMemorySaver())
 
-def test_diagnosis_node_asks_for_machine_id_when_missing(monkeypatch):
-    monkeypatch.setattr(agent_service, "_extract_machine_id", lambda msg: None)
-
+def test_diagnosis_node_asks_for_machine_id_when_missing():
+    # machine_id는 이제 route_node가 미리 채워서 state로 넘겨준다(2026-09-25 호출 병합) -
+    # diagnosis_node는 그 값을 그대로 볼 뿐이라, 채워지지 않은 기본값(None)으로 충분하다.
     state = agent_service.SupervisorState(user_message="설비가 이상해")
     result = agent_service.diagnosis_node(state)
 
@@ -151,17 +157,22 @@ def test_diagnose_machine_real_failure_always_urgent_regardless_of_risk(monkeypa
     assert result["severity"] == "긴급"
 
 
-def test_assess_perspective_returns_structured_fields(monkeypatch):
+def _make_perspective_completions(risk_level, recommended_window):
     class _FakeParsedCompletions:
         def parse(self, *, response_format, **kwargs):
             assert response_format is agent_service.PerspectiveAssessment
             parsed = agent_service.PerspectiveAssessment(
-                risk_level="높음", recommended_window="즉시", requires_shutdown=True, rationale="테스트 근거",
+                risk_level=risk_level, recommended_window=recommended_window, rationale="테스트 근거",
             )
             msg = type("M", (), {"parsed": parsed, "refusal": None})()
             return type("C", (), {"choices": [type("Ch", (), {"message": msg})()]})()
+    return _FakeParsedCompletions()
 
-    fake_client = type("Client", (), {"chat": type("Chat", (), {"completions": _FakeParsedCompletions()})()})()
+
+def test_assess_perspective_returns_structured_fields(monkeypatch):
+    fake_client = type("Client", (), {
+        "chat": type("Chat", (), {"completions": _make_perspective_completions("높음", "즉시")})()
+    })()
     monkeypatch.setattr(agent_service, "client", fake_client)
 
     result = agent_service._assess_perspective("안전", "테스트 프롬프트", "테스트 진단")
@@ -169,6 +180,23 @@ def test_assess_perspective_returns_structured_fields(monkeypatch):
     assert result["perspectives"] == ["[안전] 테스트 근거"]
     assert result["perspective_assessments"][0]["risk_level"] == "높음"
     assert result["perspective_assessments"][0]["requires_shutdown"] is True
+
+
+def test_assess_perspective_cannot_produce_contradictory_shutdown(monkeypatch):
+    # 2026-09-25 로컬 모델(Ollama) 실측: risk_level="중간"인데 requires_shutdown=true인
+    # 내적 모순 출력이 나온 적이 있다(docs/decisions.md). PerspectiveAssessment에서
+    # requires_shutdown 필드 자체를 없애고 코드가 유도하므로, risk_level이 "중간"이면서
+    # recommended_window도 "즉시"가 아니면 requires_shutdown은 항상 False여야 한다 -
+    # LLM이 뭐라고 "말하고 싶어 하든" 애초에 그 필드를 설정할 방법이 없다.
+    fake_client = type("Client", (), {
+        "chat": type("Chat", (), {"completions": _make_perspective_completions("중간", "24시간 이내")})()
+    })()
+    monkeypatch.setattr(agent_service, "client", fake_client)
+
+    result = agent_service._assess_perspective("정비", "테스트 프롬프트", "테스트 진단")
+
+    assert result["perspective_assessments"][0]["risk_level"] == "중간"
+    assert result["perspective_assessments"][0]["requires_shutdown"] is False
 
 
 def test_assess_perspective_falls_back_on_failure(monkeypatch):
