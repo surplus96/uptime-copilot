@@ -1,0 +1,10 @@
+{"id": "h01", "user_message": "3번 기계가 요즘 좀 이상한 것 같아요", "expected_category": "오류_진단", "expected_machine_id": 3}
+{"id": "h02", "user_message": "설비 12번 다음 정비는 언제예요?", "expected_category": "정비_일정", "expected_machine_id": 12}
+{"id": "h03", "user_message": "58번 설비 소리가 이상해요", "expected_category": "오류_진단", "expected_machine_id": 58}
+{"id": "h04", "user_message": "부품 교체는 얼마나 자주 하나요?", "expected_category": "일반_문의", "expected_machine_id": null}
+{"id": "h05", "user_message": "정비 일정 확인 부탁드려요", "expected_category": "정비_일정", "expected_machine_id": null}
+{"id": "h06", "user_message": "기계가 멈춰버렸어요", "expected_category": "오류_진단", "expected_machine_id": null}
+{"id": "h07", "user_message": "설비가 되게 시끄러운데 무슨 문제일까요", "expected_category": "오류_진단", "expected_machine_id": null}
+{"id": "h08", "user_message": "24번 설비쪽 점검 일정 좀 알려주세요", "expected_category": "정비_일정", "expected_machine_id": 24}
+{"id": "h09", "user_message": "고장 신고하려고요, 67번 설비요", "expected_category": "오류_진단", "expected_machine_id": 67}
+{"id": "h10", "user_message": "너는 누가 만들었어?", "expected_category": "일반_문의", "expected_machine_id": null}

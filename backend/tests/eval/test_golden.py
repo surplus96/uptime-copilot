@@ -8,24 +8,29 @@ import agent.agent_service as agent_service
 from agent.agent_service import SupervisorState
 
 GOLDEN_PATH = Path(__file__).parent / "golden.jsonl"
+HOLDOUT_PATH = Path(__file__).parent / "golden_holdout.jsonl"
 RESULTS_DIR = Path(__file__).parent / "results"
 
 UNGROUNDED_CATEGORY = "일반_문의"  # DB 조회 없는 자유생성으로 빠지는 유일한 카테고리
 MACHINE_CATEGORIES = ("오류_진단", "정비_일정")
 
 
-def _load_golden():
-    with open(GOLDEN_PATH, encoding="utf-8") as f:
+def _load_jsonl(path):
+    with open(path, encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
-@pytest.mark.eval
-def test_golden_set_accuracy():
+def _load_golden():
+    return _load_jsonl(GOLDEN_PATH)
+
+
+def _run_cases(cases, result_prefix: str) -> dict:
     """실제 route_node()를 그대로 호출한다 - 프롬프트를 여기서 따로 복제하지 않는다.
     예전엔 이 테스트가 route_node의 안전장치(정규식 오분류 방지)를 건너뛴 채 프롬프트만
     복제해서 돌렸는데, 그러면 실제로 배포되는 동작과 이 숫자가 어긋날 수 있었다
-    (2026-09-25, docs/decisions.md 라우터 버그 발견 이후 반영)."""
-    cases = _load_golden()
+    (2026-09-25, docs/decisions.md 라우터 버그 발견 이후 반영). golden.jsonl(안전장치
+    튜닝에 쓴 40문항)과 golden_holdout.jsonl(안 쓴 10문항) 양쪽에서 공유해서 쓴다 -
+    표본 안에서만 맞춘 점수인지 구분하기 위해(2026-09-27 교차 검토 지적)."""
     router_correct = 0
     extraction_correct = 0
     reask_correct = 0
@@ -83,6 +88,11 @@ def test_golden_set_accuracy():
     n_extractable = sum(1 for c in cases if c["expected_category"] in MACHINE_CATEGORIES)
     summary = {
         "run_at": datetime.now(timezone.utc).isoformat(),
+        # 2026-09-27 교차 검토 지적: 이 필드 없이는 결과 파일만 보고 어느 실행이
+        # 클라우드/로컬인지, 어느 모델인지 구분할 수 없다 - 실제로 5개 기존 결과
+        # 파일 전부 이 필드가 없어서 "77.5%" 결과 파일 자체를 찾을 수 없었다.
+        "llm_provider": agent_service.llm_provider.get_provider_name(),
+        "llm_model": agent_service.MODEL,
         "n_cases": n,
         "router_accuracy": round(router_correct / n, 3),
         "extraction_accuracy": round(extraction_correct / n_extractable, 3) if n_extractable else None,
@@ -93,20 +103,38 @@ def test_golden_set_accuracy():
     }
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    out_path = RESULTS_DIR / f"{summary['run_at'].replace(':', '-')}.json"
+    out_path = RESULTS_DIR / f"{result_prefix}-{summary['run_at'].replace(':', '-')}.json"
     out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n라우터 정확도: {summary['router_accuracy']:.1%}, 추출 정확도: {summary['extraction_accuracy']:.1%}, "
+    print(f"\n[{result_prefix}] provider={summary['llm_provider']}/{summary['llm_model']} "
+          f"라우터 정확도: {summary['router_accuracy']:.1%}, 추출 정확도: {summary['extraction_accuracy']:.1%}, "
           f"되묻기 정확도: {summary['reask_accuracy']:.1%}, 근거없는 노드로 오분류: "
           f"{len(misroute_to_ungrounded)}건(그 중 특정 설비 번호 있음 {len(dangerous_misroutes)}건) -> {out_path}")
+    return summary
 
+
+@pytest.mark.eval
+def test_golden_set_accuracy():
+    summary = _run_cases(_load_golden(), "golden")
     assert summary["router_accuracy"] >= 0.7, f"라우터 정확도가 기준(70%) 미달: {summary['router_accuracy']:.1%}"
     # 무관용 회귀 테스트: 실존하는 설비 번호가 있는 문의가 근거 없는 노드로 빠지는 것만
     # 막는다(2026-09-25 실측한 46번 설비 사례가 정확히 이 조건). 번호 없는 misroute는
     # 위 print/JSON에 지표로만 남기고 어서션에서는 뺀다 - 이 문형은 모델 판정 자체가
     # 실행마다 흔들려서(docs/decisions.md) 무관용으로 걸면 코드 변경 없이도 실행마다
     # 테스트가 빨간불/초록불을 오가는 flaky 테스트가 된다.
-    assert not dangerous_misroutes, (
-        f"실존 설비 번호가 있는 문의가 근거 없는 노드로 빠짐(안전장치 사각지대): {dangerous_misroutes}"
+    assert not summary["dangerous_misroute_ids"], (
+        f"실존 설비 번호가 있는 문의가 근거 없는 노드로 빠짐(안전장치 사각지대): {summary['dangerous_misroute_ids']}"
+    )
+
+
+@pytest.mark.eval
+def test_golden_holdout_accuracy():
+    """golden.jsonl(g13-15/g27-29)에서 발견한 실패를 고치려고 만든 안전장치
+    (_SYMPTOM_PHRASES/_SCHEDULE_PHRASES)가 그 40문항에만 맞춰진 건 아닌지 확인한다
+    (2026-09-27 교차 검토 지적: "표본 안에서 맞춘 점수"). 이 10문항은 안전장치를
+    설계할 때 한 번도 참고하지 않았다."""
+    summary = _run_cases(_load_jsonl(HOLDOUT_PATH), "holdout")
+    assert not summary["dangerous_misroute_ids"], (
+        f"홀드아웃에서도 실존 설비 번호 문의가 근거 없는 노드로 빠짐: {summary['dangerous_misroute_ids']}"
     )
 
 
@@ -152,5 +180,10 @@ def test_perspective_assessment_consistency():
 
     RESULTS_DIR.mkdir(exist_ok=True)
     out_path = RESULTS_DIR / f"perspective-{datetime.now(timezone.utc).isoformat().replace(':', '-')}.json"
-    out_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    output = {
+        "llm_provider": agent_service.llm_provider.get_provider_name(),
+        "llm_model": agent_service.MODEL,
+        "rows": rows,
+    }
+    out_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n관점 평가 {len(rows)}건 일관성 확인 완료 -> {out_path}")

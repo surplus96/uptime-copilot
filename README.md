@@ -205,28 +205,37 @@ than baked into the file.
 The same golden set, run against a fully local `LLM_PROVIDER=ollama` (Qwen3-8B, Apple
 Silicon, no GPU acceleration beyond Metal) instead of the cloud model:
 
-| Metric | Cloud (gpt-5.6-luna) | Local (Ollama Qwen3-8B) |
+| Metric | Cloud (gpt-5.6-luna, 1 run) | Local (Ollama Qwen3-8B, 5 runs) |
 |---|---|---|
-| Router accuracy | 90.0% | 90.0% |
-| Machine-ID extraction | 100.0% | 100.0% |
-| Re-ask on missing ID | 100.0% | 100.0% |
-| Dangerous misroute (named machine → ungrounded node) | 0 | 0 |
+| Router accuracy (40-question golden set) | 90.0% | 87.5–92.5% (mean 91.0%) |
+| Router accuracy (10-question holdout, never used to tune the safety net) | 100.0% | 90–100% (mean 96.0%) |
+| Machine-ID extraction | 100.0% | 100.0% (all 5 runs) |
+| Re-ask on missing ID | 100.0% | 100.0% (all 5 runs) |
+| Dangerous misroute (named machine → ungrounded node) | 0 | 0 (across all 10 golden+holdout runs) |
 | Mean latency / call | ~1.2s | ~13s (routing+extraction merged into one call; occasional outliers up to ~40s under memory pressure, see below) |
 
+*Methodology note*: an earlier version of this table reported a single "77.5% → 90.0%"
+local run and compared it to a single stale cloud run that hadn't gone through the current
+safety net — an external review caught this as an apples-to-oranges comparison tuned on
+its own failure cases. The numbers above are from a clean rerun: cloud measured once with
+current code, local measured 5 times, both split into the 40 questions used to build the
+safety net and a separate 10-question holdout that was never looked at while building it.
+Every eval result file now records which provider/model produced it
+(`tests/eval/results/*.json`), so this is independently re-checkable.
+
 Extraction and re-ask held up identically locally from the start — those are narrow,
-closed-form tasks. Routing initially trailed the cloud model by 12.5 points (77.5%) and
-every call ran roughly 10x slower as two separate calls (routing, then a follow-up
-extraction call). Both gaps were closed on the code side, not by using a bigger model:
-router+extraction were merged into a single structured-output call (removing a full
-round trip for every diagnosis/schedule request), and a deterministic post-classification
-check now catches the specific phrasings the local model kept misrouting into the
-ungrounded free-chat node — first machine-number word order ("설비 46번" vs "46번 설비"),
-then symptom-only reports with no machine number at all ("설비가 이상해요"). Measured router
-accuracy went from 77.5% to 90.0% (matching the cloud figure above) once both landed; a
-golden-set regression test (`tests/eval/test_golden.py`) now specifically fails if any
-query naming a real machine ID lands in the ungrounded node, separately from the overall
-accuracy number, since that combination is what actually produces a false "everything's
-fine" answer about a real failure (see `docs/decisions.md`, 2026-09-25).
+closed-form tasks. Routing initially trailed the cloud model by double digits and every
+call ran roughly 10x slower as two separate calls (routing, then a follow-up extraction
+call). Both gaps were narrowed on the code side, not by using a bigger model: router+
+extraction were merged into a single structured-output call (removing a full round trip
+for every diagnosis/schedule request), and a deterministic post-classification check now
+catches the specific phrasings the local model kept misrouting into the ungrounded
+free-chat node — machine-number word order ("설비 46번" vs "46번 설비") and symptom-only
+reports with no machine number at all ("설비가 이상해요"). A golden-set regression test
+(`tests/eval/test_golden.py`) specifically fails if any query naming a real machine ID
+lands in the ungrounded node, separately from the overall accuracy number, since that
+combination is what actually produces a false "everything's fine" answer about a real
+failure (see `docs/decisions.md`, 2026-09-25 and 2026-09-27).
 
 A spot check of the safety/production/maintenance perspective assessments (outside the
 golden set, which only covers routing/extraction) had also surfaced a contradiction the
@@ -235,8 +244,9 @@ with `requires_shutdown: true`. This is now structurally impossible rather than 
 logged — `requires_shutdown` is no longer an LLM-set field; it's derived in code from
 `risk_level`/`recommended_window`, so the model has no way to set it inconsistently.
 
-Bottom line: the adapter (`LLM_PROVIDER=ollama`) now matches the cloud model on every
-measured accuracy metric and roughly halved its latency gap versus the cloud model
+Bottom line: the adapter (`LLM_PROVIDER=ollama`) now repeatedly measures in the same
+accuracy range as the cloud model (mean 91.0% vs. 90.0%), and the safety-critical metric
+(dangerous misroutes) reproduced at zero across all 10 runs. Latency gap roughly halved
 through call-merging alone — remaining costs are the still-real ~10x per-call latency
 (mitigated by warm-up + `OLLAMA_KEEP_ALIVE`, not eliminated) and this machine's memory
 headroom (16GB unified memory already runs close to its limit with Docker Desktop and

@@ -2,7 +2,7 @@
 
 > 작성일 2026-09-23 (개정: MRO Copilot 업그레이드 내용 분리) · 대상 저장소: `github.com/surplus96/uptime-copilot` (기준 커밋 `6514038`)
 > 근거: `claude/specguard-research-and-uptime-review.md` PART 2 (코드 리뷰 개선점 ①~⑪)
-> 범위: **리뷰에서 나온 개선 사항만** 다룬다. MRO Copilot으로 확장하기 위한 추가 구성(부품·재고, 오프라인 모드, 감사 로그, 자산 어댑터 등)은 `claude/mro-copilot-upgrade-plan.md`에서 다룬다.
+> 범위: **리뷰에서 나온 개선 사항만** 다룬다. MRO Copilot으로 확장하기 위한 추가 구성(부품·재고, 오프라인 모드, 감사 로그, 자산 어댑터 등)은 `mro-copilot-upgrade-plan.md`에서 다룬다.
 > 순서(확정): **이 문서(U0~U2, ~10/11)** → MRO Copilot 업그레이드(~10/25) → SpecGuard(10/26~)
 > 개발 환경: MacBook Pro Apple Silicon, RAM 16GB, Ollama 설치됨 · 주 15~20시간
 > 진행 방식: 본인이 직접 구현. 각 작업은 **목표 · 변경 위치 · 완료 기준(DoD)** 으로 정의한다 (코드는 포함하지 않음)
@@ -267,7 +267,7 @@
 
 ## 8. 다음 단계
 
-U2 완료 정의를 충족하면 `claude/mro-copilot-upgrade-plan.md`로 넘어간다. 이 문서의 산출물 중 **고장 위험 도구(3-5), 우선순위 규칙(4-2), 제공자 어댑터(11-1), 평가 실행기(2-2)** 가 MRO 업그레이드의 전제 조건이다.
+U2 완료 정의를 충족하면 `mro-copilot-upgrade-plan.md`로 넘어간다. 이 문서의 산출물 중 **고장 위험 도구(3-5), 우선순위 규칙(4-2), 제공자 어댑터(11-1), 평가 실행기(2-2)** 가 MRO 업그레이드의 전제 조건이다.
 
 ---
 
@@ -354,4 +354,4 @@ CI가 실제로 깨져 있었고(테스트 2건, lint 1건), 앱의 핵심 주�
 ### 최종 상태
 
 `main` 브랜치, 전부 push 완료, CI 그린. Docker 이미지 재빌드 완료(`docker compose up -d --build`).
-다음 단계는 `claude/mro-copilot-upgrade-plan.md`(§8 참고) — 아직 작성 전.
+다음 단계는 `mro-copilot-upgrade-plan.md`(§8 참고) — 아직 작성 전.
