@@ -59,7 +59,7 @@ def evaluate_component(comp: str, train: pd.DataFrame, test: pd.DataFrame, featu
         {"model": clf, "feature_cols": feature_cols, "model_categories": list(train["model"].cat.categories)},
         MODEL_DIR / f"model_{comp}.pkl",
     )
-    proba = clf.predict_proba(test[feature_cols])[:, 1]  # type: ignore[call-overload]  # predict_proba 반환 타입 스텁이 ndarray 대신 list로 잡혀서 나는 노이즈성 오류
+    proba = clf.predict_proba(test[feature_cols])[:, 1]
     pred = pd.Series((proba >= 0.5).astype(int), index=test.index)
     base_pred = _zscore_baseline(train, test, comp)
 

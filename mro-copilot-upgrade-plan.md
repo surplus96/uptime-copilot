@@ -401,7 +401,7 @@ MRO-FR-07 전용 테스트는 **LLM 호출만 가짜로 두고(비결정성·비
 
 | 작업 | 산출물 |
 |---|---|
-| 오프라인 가드(목적지 기반, §6-4) + `pytest-socket` 기반 외부 호출 0회 테스트 | MRO-FR-07 |
+| 오프라인 가드(목적지 기반, §6-4) + `pytest-socket` 기반 외부 호출 0회 테스트 | MRO-FR-07 — **완료(2026-09-28)**. `core/offline_guard.py` 신규(`OFFLINE_ALLOWED_HOSTS`, `is_offline()`, `refuse_unsafe_startup_combo()`, `get_langsmith_client()`/`wrap_openai()`/`traceable()` no-op 대체). `main.py`(기동 시 `OFFLINE=1`+`LLM_PROVIDER=openai` 거부 + LangSmith 3곳 연결), `agent/agent_service.py`(`wrap_openai` 연결), `notify.py`(Slack 오프라인 스킵) 수정. `cmms_client.py`는 수정 불필요(호스트가 이미 허용 목록 안) - 확인만. `tests/test_offline_guard.py` 신규 3건(`offline_e2e` 마커, CI 기본 경로 제외 - HF 캐시 없음이 사유), `pytest-socket`의 `allow_hosts` 마커로 실제 소켓 허용/차단 재현: Slack은 소켓 자체를 안 열고, CMMS(host.docker.internal)는 연결 시도까지는 허용되고, 전체 긴급→승인 시나리오가 허용 목록 밖 연결 없이 완주. 변이 테스트(notify.py의 오프라인 체크를 실제로 제거)로 테스트가 진짜 잡아내는지 확인(`SocketConnectBlockedError`로 즉시 실패 재현 후 원복) |
 | 감사 로그 + 조회 API + UI 탭 | MRO-FR-08 |
 | README·케이스 스터디 재작성, 30초 데모 GIF | 공개 |
 

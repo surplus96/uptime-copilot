@@ -13,12 +13,11 @@ from typing import Annotated, Literal
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
-from langsmith.wrappers import wrap_openai
 from pydantic import BaseModel
 
 import cmms_client
 import notify
-from core import llm_provider
+from core import llm_provider, offline_guard
 from core.harness import check_output_forbidden_words
 from data import pdm_operations, pdm_telemetry, sim_query
 from ml.predict import predict_failure_risk
@@ -38,7 +37,7 @@ def initialize_agent(langsmith_client, checkpointer) -> None:
     승인이 전부 사라지므로, main.py가 넘겨주는 디스크 기반 SqliteSaver로 교체함.
     """
     global client, app
-    client = wrap_openai(client, tracing_extra={"client": langsmith_client})
+    client = offline_guard.wrap_openai(client, tracing_extra={"client": langsmith_client})
     app = graph.compile(checkpointer=checkpointer)
 
 class SupervisorState(BaseModel):

@@ -1032,3 +1032,63 @@ comp1~3은 `st.caption` 경로로, comp4는 기존 `st.warning` 경로(30일 분
 갭 자체의 해결(코드·데이터 수정)을 섞어서 보고하면 안 된다는 걸 사용자가 직접
 잡아줬다. 다음부터는 "문서만 고쳤다"와 "실제로 고쳤다"를 보고할 때 항상 명시적으로
 구분해야 함.
+
+## 2026-09-28 — MRO-FR-07: 오프라인 가드 + pytest-socket 외부 호출 0회 테스트
+
+**배경**: M2 착수(계획서 §8). 시작 전 결정 필요 항목이 하나 있었다 - CI 러너에는
+HF 캐시가 없어 오프라인 시나리오 테스트를 CI 기본 경로에 넣으면 임베딩 로딩부터
+실패한다(§5 FR-07 기존 메모). 사용자 결정: **CI에서는 스킵**, 로컬/Docker에서
+`-m offline_e2e`로만 실행 - 기존 `eval` 마커와 같은 패턴, CI를 가볍게 유지한다는
+`backend-checks.yml` 자체의 설계 철학과 일치.
+
+**구현**: 교육 모드(H1)로 진행 - 설명·스니펫 제시 후 사용자가 직접 타이핑, 매
+파일마다 재빌드·재배포·라이브 검증. `core/offline_guard.py`(신규)가 §6-4 설계를
+그대로 코드화: `OFFLINE_ALLOWED_HOSTS`(localhost/127.0.0.1/host.docker.internal),
+`is_offline()`, `refuse_unsafe_startup_combo()`(OFFLINE=1+LLM_PROVIDER=openai 기동
+거부), `get_langsmith_client()`/`wrap_openai()`/`traceable()`(오프라인이면 no-op
+대체 - 호출부 코드는 한 줄도 안 바뀌게 하는 어댑터 패턴). `main.py`(LangSmith
+3곳 연결 + 기동 체크), `agent/agent_service.py`(`wrap_openai` 연결), `notify.py`
+(`send_alert()` 진입부 오프라인 스킵) 수정. `cmms_client.py`는 확인만 - 이미 자체
+`_is_loopback_url()`로 같은 호스트 3개를 하드코딩하고 있어 안전(§6-4의 "유일한
+정의처" 원칙과는 어긋나는 중복이지만 FR-07 범위 밖으로 남겨둠, 나중 정리 항목).
+
+**직접 겪은 함정 1 - Docker 이미지 스테일**: `main.py` 수정 직후 `docker compose
+exec backend python -c "import main"`으로 검증했더니 거부돼야 할 조합이 그냥
+성공했다 - 컨테이너 안 코드가 재빌드 전 버전이었기 때문(이 세션에서 여러 번
+반복된 함정, `backend/`가 bind mount가 아니라 빌드 시점에 COPY됨). `docker compose
+build backend` 없이 `exec`만으로 검증하면 안 된다는 걸 다시 확인.
+
+**직접 겪은 함정 2 - pytest-socket의 `disable_socket()`과 `socket_allow_hosts()`는
+같이 쓰는 게 아니다**: 처음엔 `disable_socket()` + `socket_allow_hosts(허용목록)`을
+같이 호출했는데, `disable_socket()`은 `socket.socket` 생성 자체를(그리고
+`getaddrinfo`도) 예외 없이 전부 막아버리고, `socket_allow_hosts()`는 `connect()`
+호출 시점의 목적지만 허용 목록과 비교하는 별개 매커니즘이다 - 같이 쓰면
+`disable_socket()`이 먼저 막아서 `socket_allow_hosts()`의 허용 로직까지 도달하지도
+못한다. `pytest_socket` 소스(`inspect.getsource`)를 직접 읽어서
+`pytest_runtest_setup` 훅이 실제로 `allow_hosts` 마커일 때 `socket_allow_hosts()`
+**단독** 호출만 하고 `disable_socket()`은 아예 안 건드리는 걸 확인 - 마커 방식
+(`@pytest.mark.allow_hosts([...])`)으로 바꿔서 해결.
+
+**검증**:
+- `test_offline_guard.py` 3건 모두 `offline_e2e` 마커로 통과: Slack은 소켓 자체를
+  안 엶(`test_send_alert_does_not_open_socket_when_offline`), CMMS
+  (`host.docker.internal`)는 연결 시도가 허용 목록을 통과함(포트가 안 열려 있어
+  실패하지만 `SocketConnectBlockedError`가 아님을 확인), 긴급→승인 전체 그래프가
+  허용 목록 밖 연결 없이 완주.
+- **변이 테스트로 실제 방어력 확인**: `notify.py`의 오프라인 체크를 컨테이너
+  안에서만 직접 제거 → `send_alert()`가 실제로 `hooks.slack.com`의 IP로 연결
+  시도 → `SocketConnectBlockedError`로 테스트 즉시 실패 재현 → 원복(로컬 소스는
+  애초에 안 건드림, `diff`로 확인). 테스트가 "항상 통과하는 가짜 증명"이 아님을
+  직접 보임.
+- 기본 CI 경로(`pytest tests/ --ignore=tests/test_rag_dedup.py`): 93 passed, 6
+  deselected(eval 3 + offline_e2e 3) - 회귀 없음.
+- `ruff`/`mypy` 클린. `mypy`가 별개로 `ml/train.py:62`의 오래된
+  `# type: ignore[call-overload]`가 더 이상 필요 없어졌다고(`warn_unused_ignores`)
+  잡아서 같이 정리 - FR-07과 무관하지만 방치하면 다음 CI에서 막힐 수 있어 바로
+  수정.
+
+**교훈**: 서드파티 테스트 도구를 "이름이 비슷하니 같이 쓰면 되겠지"로 조합하면
+안 된다 - `disable_socket`/`socket_allow_hosts`처럼 이름은 같은 모듈에 있어도
+설계상 서로 다른 전략(전부 차단 vs. 목적지 허용 목록)일 수 있고, 이걸 확인하는
+가장 빠른 방법은 문서를 뒤지는 게 아니라 `inspect.getsource()`로 실제 구현과
+플러그인 훅(`pytest_runtest_setup`)을 직접 읽는 것이었다.

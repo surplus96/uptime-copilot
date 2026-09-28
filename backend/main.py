@@ -17,14 +17,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langsmith import Client, traceable
 from langsmith.anonymizer import create_anonymizer
-from langsmith.wrappers import wrap_openai
 from pydantic import BaseModel, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from agent import agent_service
-from core import llm_provider
+from core import llm_provider, offline_guard
 from core.harness import (
     PII_PATTERNS,
     HarnessRejectedError,
@@ -45,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = llm_provider.get_model()
 
+offline_guard.refuse_unsafe_startup_combo()
+
 if os.getenv("LLM_PROVIDER", "openai") == "openai" and not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY가 .env에 설정되어 있지 않습니다 (LLM_PROVIDER=openai일 때 필수).")
 
@@ -53,12 +53,13 @@ anonymizer = create_anonymizer([
     {"pattern": pattern.pattern, "replace": f"<{label}>"}
     for label, pattern in PII_PATTERNS.items()
 ])
-langsmith_client = Client(anonymizer=anonymizer)
+langsmith_client = offline_guard.get_langsmith_client(anonymizer)
 
-client = wrap_openai(
+client = offline_guard.wrap_openai(
     llm_provider.get_client(),
     tracing_extra={"client": langsmith_client},
 )
+
 
 
 # HITL 승인 대기 상태(그래프 체크포인트)를 디스크에 남긴다 - InMemorySaver는 uvicorn --reload나
@@ -212,7 +213,7 @@ def health_check():
 
 
 @app.post("/rag/query", response_model=RAGResponse)
-@traceable(name="rag_query", client=langsmith_client)
+@offline_guard.traceable(name="rag_query", client=langsmith_client)
 def rag_query(req: RAGRequest):
     """매뉴얼 Q&A 보조 기능 - docs/ 폴더에 적재된 문서만 근거로 답한다. 일반 잡담이나
     설비 진단은 이 엔드포인트의 역할이 아니다(설비 진단은 /agent/query가 담당)."""

@@ -25,6 +25,10 @@ ignore_errors = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-markers = ["eval: real-LLM evaluation against tests/eval/golden.jsonl — excluded by default, run with -m eval"]
-addopts = "-m 'not eval'"
+markers = [
+    "eval: real-LLM evaluation against tests/eval/golden.jsonl — excluded by default, run with -m eval",
+    "offline_e2e: pytest-socket으로 실제 소켓을 차단한 오프라인 시나리오 테스트 — CI엔 HF 캐시가 없어 기본 제외, 로컬/Docker에서 -m offline_e2e로 실행",
+]
+addopts = "-m 'not eval and not offline_e2e'"
+
 

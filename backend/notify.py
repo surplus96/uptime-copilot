@@ -12,6 +12,8 @@ import re
 import requests
 from dotenv import load_dotenv
 
+from core import offline_guard
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -28,7 +30,7 @@ def _format_for_slack(text: str) -> str:
 
 
 def send_alert(text: str) -> None:
-    if not SLACK_WEBHOOK_URL:
+    if offline_guard.is_offline() or not SLACK_WEBHOOK_URL:
         return
 
     try:
