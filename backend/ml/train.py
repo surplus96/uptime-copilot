@@ -59,7 +59,11 @@ def evaluate_component(comp: str, train: pd.DataFrame, test: pd.DataFrame, featu
         {"model": clf, "feature_cols": feature_cols, "model_categories": list(train["model"].cat.categories)},
         MODEL_DIR / f"model_{comp}.pkl",
     )
-    proba = clf.predict_proba(test[feature_cols])[:, 1]
+    # lightgbm의 predict_proba() 타입 스텁이 버전에 따라 list로도, ndarray로도 잡혀서
+    # [:, 1] 인덱싱에서 mypy 오류가 났다 안 났다 한다(2026-09-28, CI와 로컬 버전이
+    # 달라서 실제로 겪음) - np.asarray()로 명시적으로 ndarray라고 못박아서 버전에
+    # 상관없이 안정적으로 통과하게 한다(type: ignore 대신 근본 원인을 없애는 수정).
+    proba = np.asarray(clf.predict_proba(test[feature_cols]))[:, 1]
     pred = pd.Series((proba >= 0.5).astype(int), index=test.index)
     base_pred = _zscore_baseline(train, test, comp)
 
