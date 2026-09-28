@@ -50,6 +50,7 @@ class SupervisorState(BaseModel):
     involved_components: list[str] = []
     component_evidence: dict[str, str] = {}
     component_manuals: dict[str, str] = {}   # 부품별 매뉴얼 증상 설명
+    parts_status: dict[str, dict] = {}   # component -> check_parts() 결과
     component_actions: dict[str, str] = {}   # 부품별 표준 조치사항
     perspectives: Annotated[list[str], operator.add] = []
     perspective_assessments: Annotated[list[dict], operator.add] = []
@@ -285,6 +286,7 @@ def scan_machines(machine_ids) -> tuple[list[dict], list[str]]:
     """주어진 설비 목록만 스캔한다. 결과와, '진짜 새로운' 알림 문구 목록을 함께 돌려준다 -
     개별 발송할지 묶어서 보낼지는 호출부가 정한다."""
     from data import event_store
+    from data.parts_operations import check_parts
 
     completed_evidence_map = event_store.get_completed_evidence_map()
     already_detected_map = event_store.get_detected_evidence_map()
@@ -294,6 +296,14 @@ def scan_machines(machine_ids) -> tuple[list[dict], list[str]]:
         result = _diagnose_machine(machine_id, within_days=1)
         if result["severity"] not in ("긴급", "주의"):
             continue
+        procurement_notes = [
+            f"{comp} 부품 조달 필요(재고 {p['on_hand']}/{p['min_stock']}, 리드타임 {p['lead_time_days']}일)"
+            for comp in result["involved_components"]
+            if (p := check_parts(comp)).get("needs_procurement")
+        ]
+        if procurement_notes:
+            result["diagnosis"] += " / " + " / ".join(procurement_notes)
+
         completed_evidence_at = completed_evidence_map.get(machine_id)
         if completed_evidence_at and result["evidence_at"] and result["evidence_at"] <= completed_evidence_at:
             continue
@@ -364,6 +374,13 @@ def manual_lookup_node(state: SupervisorState) -> dict:
         component_actions[comp] = " ".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
     return {"component_manuals": component_manuals, "component_actions": component_actions}
 
+def parts_check_node(state: SupervisorState) -> dict:
+    """관련 부품의 재고·리드타임·단종 여부를 조회한다. manual_lookup 직후, 긴급/주의
+    분기 전에 둔다 - 두 경로(work_order로 바로 가는 주의, 3관점을 거치는 긴급) 모두
+    이 정보가 필요하기 때문이다(mro-copilot-upgrade-plan.md §4)."""
+    from data.parts_operations import check_parts
+    return {"parts_status": {comp: check_parts(comp) for comp in state.involved_components}}
+
 
 def validate_work_order_node(state: SupervisorState) -> dict:
     """work_order가 승인 요청·Slack·CMMS 전송에 쓰이기 전에 반드시 통과해야 하는 검증
@@ -379,13 +396,36 @@ def work_order_node(state: SupervisorState) -> dict:
     조회해둔 표준 절차 데이터를 그대로 사용한다 - LLM이 사실을 재서술하지 않으므로
     사실 왜곡(hallucination)이 구조적으로 발생할 수 없다."""
     def build_section(component: str) -> str:
+        parts = state.parts_status.get(component, {})
+        if not parts or "error" in parts:
+            procurement_line = "정보 없음"
+        elif parts["needs_procurement"]:
+            msgs = []
+            if parts["shortage"]:
+                msgs.append(f"재고 부족(현재 {parts['on_hand']}/최소 {parts['min_stock']}), 리드타임 {parts['lead_time_days']}일 - 긴급 발주 필요")
+            if parts["eol_soon"]:
+                eol_label = "단종 임박" if parts.get("eol_status") == "임박" else "이미 단종됨"
+                alt = parts.get("alternate_info")
+                if alt is None:
+                    alt_msg = f"대체품 {parts['alternate_part_no']} 검토 필요(재고 확인 안 됨)"
+                elif alt["shortage"]:
+                    alt_msg = f"대체품 {alt['part_no']}도 재고 부족(현재 {alt['on_hand']}/최소 {alt['min_stock']}) - 이것도 발주 필요, 리드타임 {alt['lead_time_days']}일"
+                else:
+                    alt_msg = f"대체품 {alt['part_no']} 사용 가능(재고 {alt['on_hand']}/{alt['min_stock']}, 리드타임 {alt['lead_time_days']}일)"
+                msgs.append(f"{eol_label}({parts['eol_date']}), {alt_msg}")
+            procurement_line = " / ".join(msgs)
+        else:
+            procurement_line = f"정상 (재고 {parts['on_hand']}/{parts['min_stock']}, 리드타임 {parts['lead_time_days']}일)"
+
         return (
             f"[부품] {component}\n"
             f"[증상] {state.component_evidence.get(component, '')}\n"
             f"[매뉴얼 근거] {state.component_manuals.get(component, '')}\n"
             f"[조치사항] {state.component_actions.get(component, '')}\n"
-            f"[긴급도] {state.severity}"
+            f"[긴급도] {state.severity}\n"
+            f"[부품 조달] {procurement_line}"
         )
+
 
     header = f"설비 #{state.machine_id}"
     if state.priority:
@@ -395,6 +435,16 @@ def work_order_node(state: SupervisorState) -> dict:
             f"\n[정지 권고] {'예' if state.recommend_shutdown else '아니오'}"
             f"\n[근거 관점] {'; '.join(state.priority_reasons)}"
         )
+
+    # 2026-09-28: 우선순위와 별개인 조달 긴급도 - state.parts_status(parts_check_node가
+    # 긴급/주의 양쪽 경로 모두에 채워둠)에서 직접 읽으므로 priority_rule_node 실행
+    # 여부(=severity)와 무관하게 항상 표시된다.
+    procurement_urgent = [
+        comp for comp in state.involved_components
+        if state.parts_status.get(comp, {}).get("needs_procurement")
+    ]
+    if procurement_urgent:
+        header += f"\n[조달 긴급도] ⚠️ {'·'.join(procurement_urgent)} 부품 조달 필요 (우선순위와 별개 - 아래 부품별 [부품 조달] 참고)"
 
     blocks = [build_section(comp) for comp in state.involved_components]
     return {"work_order": f"{header}\n\n" + "\n\n".join(blocks)}
@@ -482,6 +532,12 @@ def priority_rule_node(state: SupervisorState) -> dict:
     immediate = [p["label"] for p in valid if p["recommended_window"] == "즉시"]
     model_alarm = state.risk_probability is not None and state.risk_probability >= RISK_THRESHOLD
     insufficient = len(valid) < 2
+    # 2026-09-28 교차 검토 지적 + 사용자 결정: 부품 조달 필요는 우선순위(P1~P3)에서
+    # 뺀다 - "부품이 없다고 작업이 더 급해지지 않는다"(우선순위=작업 긴급도, 조달
+    # 필요 여부는 별개 개념). comp4처럼 설계상 항상 단종·부족인 부품이 관련되면
+    # 모든 긴급 건이 이 이유 하나로 P1이 되는 문제가 있었음. 조달 긴급도는
+    # work_order_node가 state.parts_status에서 직접 읽어 별도 [조달 긴급도] 줄로
+    # 표시한다(우선순위와 분리, docs/decisions.md 참고).
 
     reasons = []
     if shutdown:
@@ -496,7 +552,6 @@ def priority_rule_node(state: SupervisorState) -> dict:
         reasons.append(f"{'·'.join(immediate)} 관점 즉시 조치 권장")
     if insufficient:
         reasons.append(f"관점 평가 {3 - len(valid)}건 실패 - 판정 근거 부족")
-
     if shutdown or "안전" in high or model_alarm:
         priority = "P1"
     elif high or immediate or insufficient:
@@ -569,6 +624,7 @@ graph.add_node("diagnosis", diagnosis_node)
 graph.add_node("schedule", schedule_node)
 graph.add_node("general", general_node)
 graph.add_node("manual_lookup", manual_lookup_node)
+graph.add_node("parts_check", parts_check_node)
 graph.add_node("work_order", work_order_node)
 graph.add_node("validate_work_order", validate_work_order_node)
 graph.add_node("approval", approval_node)
@@ -586,9 +642,11 @@ graph.add_conditional_edges("route", route_condition, {
 graph.add_conditional_edges("diagnosis", severity_condition, {
     "manual_lookup": "manual_lookup", "finalize": "finalize",
 })
-graph.add_conditional_edges("manual_lookup", after_manual_condition, {
+graph.add_edge("manual_lookup", "parts_check")
+graph.add_conditional_edges("parts_check", after_manual_condition, {
     "safety": "safety", "production": "production", "maintenance": "maintenance", "work_order": "work_order",
 })
+
 graph.add_edge("safety", "merge_perspectives")
 graph.add_edge("production", "merge_perspectives")
 graph.add_edge("maintenance", "merge_perspectives")

@@ -315,3 +315,87 @@ def test_work_order_omits_priority_block_for_caution():
     )
     result = agent_service.work_order_node(state)
     assert "[우선순위]" not in result["work_order"]
+
+
+def test_parts_check_node_calls_check_parts_per_component(monkeypatch):
+    calls = []
+
+    def fake_check_parts(component):
+        calls.append(component)
+        return {"component": component, "needs_procurement": False}
+
+    monkeypatch.setattr("data.parts_operations.check_parts", fake_check_parts)
+    state = agent_service.SupervisorState(user_message="x", involved_components=["comp1", "comp4"])
+    result = agent_service.parts_check_node(state)
+
+    assert calls == ["comp1", "comp4"]
+    assert set(result["parts_status"].keys()) == {"comp1", "comp4"}
+
+
+def test_priority_rule_ignores_parts_shortage(monkeypatch):
+    """2026-09-28 FR-05 재설계(H1-6, 분리형 결정): 부품 조달 필요가 우선순위에
+    영향을 주면 안 된다 - comp4처럼 항상 단종/부족인 부품이 관련되면 모든 긴급 건이
+    이 이유 하나로 P1이 되던 문제의 회귀 테스트."""
+    state = agent_service.SupervisorState(
+        user_message="x",
+        involved_components=["comp4"],
+        parts_status={"comp4": {"needs_procurement": True, "shortage": True, "eol_soon": True}},
+        perspective_assessments=[_assessment("안전"), _assessment("생산"), _assessment("정비")],
+        risk_probability=None,
+    )
+    result = agent_service.priority_rule_node(state)
+    assert result["priority"] == "P3"  # 부품 문제와 무관하게 관점만으로 판단
+    assert "조달" not in " ".join(result["priority_reasons"])
+
+
+def test_work_order_shows_procurement_header_when_needed():
+    state = agent_service.SupervisorState(
+        user_message="x", machine_id=1, severity="긴급",
+        involved_components=["comp4"],
+        component_evidence={"comp4": "테스트 증상"},
+        parts_status={"comp4": {
+            "needs_procurement": True, "shortage": True, "on_hand": 1, "min_stock": 3,
+            "lead_time_days": 45, "eol_soon": False, "eol_status": None, "eol_date": None,
+            "alternate_part_no": None, "alternate_info": None,
+        }},
+    )
+    result = agent_service.work_order_node(state)
+    assert "[조달 긴급도]" in result["work_order"]
+    assert "comp4" in result["work_order"]
+
+
+def test_work_order_omits_procurement_header_when_not_needed():
+    state = agent_service.SupervisorState(
+        user_message="x", machine_id=1, severity="긴급",
+        involved_components=["comp1"],
+        component_evidence={"comp1": "테스트 증상"},
+        parts_status={"comp1": {
+            "needs_procurement": False, "shortage": False, "on_hand": 90, "min_stock": 20,
+            "lead_time_days": 14, "eol_soon": False, "eol_status": None, "eol_date": None,
+            "alternate_part_no": None, "alternate_info": None,
+        }},
+    )
+    result = agent_service.work_order_node(state)
+    assert "[조달 긴급도]" not in result["work_order"]
+
+
+def test_scan_machines_includes_procurement_note_for_caution_severity(monkeypatch):
+    """2026-09-28 교차 검토가 짚은 '주의 경로 누락' 가능성에 대한 회귀 테스트 -
+    scan_machines의 조달 확인 로직이 severity 필터(긴급/주의 모두 통과) 아래에
+    있어서, 주의로만 판정된 설비도 조달 정보가 붙어야 한다."""
+    def fake_diagnose(machine_id, within_days=1):
+        return {
+            "machine_id": machine_id, "severity": "주의", "diagnosis": "테스트 진단",
+            "involved_components": ["comp4"], "evidence_at": "2026-01-01T00:00:00",
+        }
+
+    monkeypatch.setattr(agent_service, "_diagnose_machine", fake_diagnose)
+    monkeypatch.setattr("data.parts_operations.check_parts", lambda comp: {
+        "needs_procurement": True, "on_hand": 1, "min_stock": 3, "lead_time_days": 45,
+    })
+    monkeypatch.setattr("data.event_store.get_completed_evidence_map", lambda: {})
+    monkeypatch.setattr("data.event_store.get_detected_evidence_map", lambda: {})
+    monkeypatch.setattr("data.event_store.save_event", lambda *a, **k: None)
+
+    detected, alerts = agent_service.scan_machines([1])
+    assert "조달 필요" in detected[0]["diagnosis"]

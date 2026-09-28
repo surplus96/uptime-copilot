@@ -88,6 +88,13 @@ async def lifespan(app: FastAPI):
     rag_service.initialize_rag(llm_provider.get_api_key(), DEFAULT_MODEL, langsmith_client, base_url=llm_provider.get_base_url())
     event_store.init_event_table()
     sim_store.init_sim_tables()
+    # 2026-09-28 교차 검토 지적: 이게 없으면 새 볼륨(CI, 첫 배포)에서 parts_master
+    # 테이블이 아예 없어 긴급/주의 대화가 500 에러, 백그라운드 스캔은 매 tick마다
+    # 조용히 실패한다. 합성 데이터라 크기가 작고 외부 파일도 안 필요해서(pdm_dataloader
+    # 처럼 수동 1회 실행이 아니라) 기동 시 자동 생성해도 비용이 거의 없다.
+    from data.parts_master import generate_parts_master, init_parts_table
+    init_parts_table()
+    generate_parts_master()
     sim_task = asyncio.create_task(sim_loop.run_forever())
     try:
         with SqliteSaver.from_conn_string(str(CHECKPOINT_DB_PATH)) as checkpointer:
@@ -299,12 +306,41 @@ class EventIdsRequest(BaseModel):
 def get_events(limit: int = 10):
     return event_store.list_events(limit=limit)
 
+@app.get("/parts/inventory_risk")
+def parts_inventory_risk():
+    from data.demand_forecast import COMPONENTS, forecast_demand
+    from data.parts_operations import check_parts
+
+    demand_30 = forecast_demand(30)
+    demand_90 = forecast_demand(90)
+    rows = []
+    for comp in COMPONENTS:
+        parts = check_parts(comp)
+        if "error" in parts:
+            continue
+        on_hand = parts["on_hand"]
+        d30, d90 = demand_30[comp], demand_90[comp]
+        rows.append({
+            "component": comp,
+            "part_name": parts["part_name"],
+            "on_hand": on_hand,
+            "lead_time_days": parts["lead_time_days"],
+            "demand_30d": d30,
+            "shortfall_30d": max(0, round(d30 - on_hand, 1)),
+            "demand_90d": d90,
+            "shortfall_90d": max(0, round(d90 - on_hand, 1)),
+            "coverable_30d": parts["lead_time_days"] <= 30,
+            "coverable_90d": parts["lead_time_days"] <= 90,
+            "eol_soon": parts["eol_soon"],
+            "eol_date": parts["eol_date"],
+        })
+    return {"rows": rows}
+
 
 @app.post("/events/complete")
 def complete_events(req: EventIdsRequest):
     count = event_store.complete_events(req.machine_ids)
     return {"completed_count": count}
-
 
 @app.post("/events/delete")
 def delete_events(req: EventIdsRequest):

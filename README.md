@@ -11,6 +11,37 @@ Maintenance dataset.
 
 > 📄 **[Portfolio case study →](docs/PORTFOLIO.md)** — architecture diagrams, core logic, and key engineering decisions.
 
+## MRO Extension (parts, demand forecast, inventory risk)
+
+Built on top of the predictive-maintenance core above: a parts master, a demand forecast,
+and an inventory-risk dashboard, tied into the existing diagnosis pipeline so a real
+equipment failure also surfaces whether the part it needs is actually in stock. Plan and
+decision log: [mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md),
+[docs/decisions.md](docs/decisions.md).
+
+- **Parts master (`backend/data/parts_master.py`)** — 5 synthetic parts (comp1–4 + one
+  end-of-life alternate for comp4), auto-seeded on backend startup. **All part numbers,
+  stock levels, lead times and the end-of-life date are synthetic** — see
+  [docs/design/parts_assumptions.md](docs/design/parts_assumptions.md) for the generation
+  rules and why comp4 is deliberately scarce (it's the demo scenario for the procurement
+  recommendation below).
+- **Demand forecast (`backend/data/demand_forecast.py`)** — expected 30/90-day replacement
+  counts per part, split into a preventive-maintenance term (scheduled, model-independent)
+  and a failure-replacement term. The failure term uses the *actual* alarm state for today
+  (conditional probability from the validation period) and a population base rate for
+  future days whose alarm state isn't known yet — mixing these up the wrong way produced a
+  real, measured bug during development (see `docs/decisions.md`, 2026-09-28). Backtested
+  against the real Nov–Dec 2015 replacement counts using only a 2015-11-01 snapshot (no
+  training/validation data reused): -5.0% to +3.5% error.
+- **Inventory-risk tab** — `GET /parts/inventory_risk`, shown in the Streamlit app's fourth
+  tab. Numbers are rounded for display and explicitly labeled as estimates that don't
+  account for stock already on order.
+- **Priority stays separate from parts availability** — a missing part doesn't make a
+  diagnosis more urgent by itself (urgency still comes only from the safety/production/
+  maintenance perspectives and the risk model, as in the core pipeline). A shortage or
+  imminent end-of-life shows as its own `[조달 긴급도]` line on the work order instead of
+  inflating the priority level.
+
 ## Folder Structure
 
 ```

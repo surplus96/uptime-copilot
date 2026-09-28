@@ -3,6 +3,7 @@ import requests
 import uuid
 import re
 import os
+import math
 
 
 CHAT_AVATARS = {"user": "🧑‍🔧", "assistant": "🛡️"}
@@ -61,7 +62,7 @@ def parse_work_order(text: str) -> list[dict]:
     if not text:
         return []
     pattern = re.compile(
-        r"\[부품\](.*?)\[증상\](.*?)\[매뉴얼 근거\](.*?)\[조치사항\](.*?)\[긴급도\](.*?)(?=\[부품\]|$)",
+        r"\[부품\](.*?)\[증상\](.*?)\[매뉴얼 근거\](.*?)\[조치사항\](.*?)\[긴급도\](.*?)\[부품 조달\](.*?)(?=\[부품\]|$)",
         re.DOTALL,
     )
     blocks = []
@@ -72,12 +73,24 @@ def parse_work_order(text: str) -> list[dict]:
             "매뉴얼 근거": m.group(3).strip(),
             "조치사항": m.group(4).strip(),
             "긴급도": m.group(5).strip(),
+            "부품 조달": m.group(6).strip(),
         })
     return blocks
 
 
 def render_work_order(work_order_text: str):
-    """부품별로 파싱해서 카드로 보여준다. 파싱 실패 시 원본 텍스트를 그대로 보여주는 폴백."""
+    """부품별로 파싱해서 카드로 보여준다. 파싱 실패 시 원본 텍스트를 그대로 보여주는 폴백.
+
+    2026-09-28 교차 검토 지적: parse_work_order()의 정규식이 첫 [부품] 태그부터만
+    캡처해서, 그 앞의 헤더(설비 번호·[우선순위]·[정지 권고]·[근거 관점]·[조달 긴급도])
+    가 통째로 버려지고 있었다 - FR-05(우선순위를 부품 문제와 분리)의 유일한 가시
+    효과가 바로 이 헤더인데 화면에 전혀 안 보이던 실제 버그."""
+    header_end = work_order_text.find("[부품]")
+    header = work_order_text[:header_end].strip() if header_end > 0 else ""
+    if header:
+        st.markdown(header.replace("\n", "  \n"))
+        st.divider()
+
     blocks = parse_work_order(work_order_text)
     if not blocks:
         st.markdown(work_order_text)
@@ -88,9 +101,11 @@ def render_work_order(work_order_text: str):
             st.markdown(f"**증상**: {block['증상']}")
             st.markdown(f"**매뉴얼 근거**: {block['매뉴얼 근거']}")
             st.markdown(f"**조치사항**: {block['조치사항']}")
+            st.markdown(f"**조달 상태**: {block['부품 조달']}")
 
 
-tab1, tab2, tab3 = st.tabs(["설비 에이전트", "매뉴얼 검색", "이상감지 이벤트"])
+
+tab1, tab2, tab3, tab4 = st.tabs(["설비 에이전트", "매뉴얼 검색", "이상감지 이벤트", "재고 위험"])
 
 # ---------- 설비 에이전트 모드 ----------
 with tab1:
@@ -533,3 +548,44 @@ with tab3:
                 if delete_ok:
                     st.session_state.event_feedback = f"{deleted_count}건 삭제했습니다."
                     st.rerun()
+
+
+@st.cache_data(ttl=300)
+def _fetch_inventory_risk():
+    res = requests.get(f"{BACKEND_URL}/parts/inventory_risk", timeout=30)
+    res.raise_for_status()
+    return res.json()["rows"]
+
+
+with tab4:
+    st.subheader("📦 부품 재고 위험")
+    st.caption("예상 수요(30/90일)가 현재 재고를 초과하는 부품을 보여줍니다. 리드타임이 예측 기간보다 길면 지금 발주해도 늦을 수 있습니다.")
+    # 2026-09-28 교차 검토 지적(H3 규칙 6 - 합성 데이터 명시 의무): 부품 마스터가
+    # 전부 합성값이고(docs/design/parts_assumptions.md), 수요는 과거 교체율 기반
+    # 추정치라 이미 발주해둔 물량은 반영하지 못한다는 걸 화면에서 밝혀야 한다.
+    st.caption("⚠️ 부품 재고·리드타임은 합성(가상) 데이터입니다. 수요는 과거 교체 이력 기반 추정치이며, 이미 발주해 입고 대기 중인 물량은 반영하지 않습니다.")
+    try:
+        rows = _fetch_inventory_risk()
+    except requests.exceptions.RequestException as e:
+        st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
+        rows = []
+
+    for r in rows:
+        with st.container(border=True):
+            title = f"{r['component']} - {r['part_name']}"
+            if r["eol_soon"]:
+                title += " ⚠️ 단종 임박"
+            st.markdown(f"**{title}**")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("현재 재고", r["on_hand"])
+            c2.metric("30일 예상수요", f"약 {round(r['demand_30d'])}개")
+            c3.metric("90일 예상수요", f"약 {round(r['demand_90d'])}개")
+            if r["shortfall_30d"] > 0:
+                warn = f"⚠️ 30일 내 약 {math.ceil(r['shortfall_30d'])}개 부족 예상"
+                if not r["coverable_30d"]:
+                    warn += f" (리드타임 {r['lead_time_days']}일 > 30일 — 지금 발주해도 기간 내 입고 불가)"
+                st.warning(warn)
+            elif r["shortfall_90d"] > 0:
+                st.info(f"90일 내 약 {math.ceil(r['shortfall_90d'])}개 부족 예상 (리드타임 {r['lead_time_days']}일)")
+            else:
+                st.caption("재고 위험 없음")
