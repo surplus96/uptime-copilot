@@ -580,12 +580,25 @@ with tab4:
             c1.metric("현재 재고", r["on_hand"])
             c2.metric("30일 예상수요", f"약 {round(r['demand_30d'])}개")
             c3.metric("90일 예상수요", f"약 {round(r['demand_90d'])}개")
+            # 2026-09-28 문서 정합성 3차 점검 지적 + 사용자 결정: 90일 기준 부족분은
+            # 리드타임 안에 조달 가능하면(coverable) "정상 재주문 신호"이지 comp4류의
+            # 실제 위험(30일 안에도 조달이 안 맞는 경우)과 같은 급이 아니다 - 지금까지는
+            # 둘 다 비슷한 톤으로 떠서 화면만 보면 구분이 안 됐다. coverable 여부로
+            # 위험(st.warning)과 정상 재주문 시점(st.caption)을 시각적으로 분리한다.
             if r["shortfall_30d"] > 0:
                 warn = f"⚠️ 30일 내 약 {math.ceil(r['shortfall_30d'])}개 부족 예상"
                 if not r["coverable_30d"]:
                     warn += f" (리드타임 {r['lead_time_days']}일 > 30일 — 지금 발주해도 기간 내 입고 불가)"
                 st.warning(warn)
+            elif r["shortfall_90d"] > 0 and not r["coverable_90d"]:
+                st.warning(
+                    f"⚠️ 90일 내 약 {math.ceil(r['shortfall_90d'])}개 부족 예상 "
+                    f"(리드타임 {r['lead_time_days']}일 > 90일 — 지금 발주해도 기간 내 입고 불가)"
+                )
             elif r["shortfall_90d"] > 0:
-                st.info(f"90일 내 약 {math.ceil(r['shortfall_90d'])}개 부족 예상 (리드타임 {r['lead_time_days']}일)")
+                st.caption(
+                    f"🔵 정상 재주문 신호 — 90일 내 약 {math.ceil(r['shortfall_90d'])}개 소요 예상, "
+                    f"리드타임 {r['lead_time_days']}일이면 지금 발주 안 해도 기간 내 조달 가능 (위험 아님)"
+                )
             else:
                 st.caption("재고 위험 없음")

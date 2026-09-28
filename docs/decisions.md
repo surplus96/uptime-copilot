@@ -998,3 +998,37 @@ Streamlit 재고 위험 탭(`frontend/streamlit_app.py:588-589`)에 "90일 내 �
 나왔다. 통계·로직을 두 번 이상 고친 항목은 "최종 공식이 문서 몇 곳에 적혀 있는지"를
 따로 세어보는 습관이 필요함 - 이번엔 §6-2 하나만 고치면 될 줄 알았는데 실제로는
 설계 노트(`parts_demand_exploration.md`)에도 같은 문제가 있었다.
+
+## 2026-09-28 — comp1~3 90일 재고 갭 실제 해결 (사용자 확인)
+
+**배경**: 위 3차 점검에서 "§9가 90일 갭을 해결됐다고 잘못 적었다"고 보고했더니,
+사용자가 "그 내용도 해결된 거냐"고 직접 확인 요청 - **문서를 정확하게 고친 것과
+실제 문제를 해결한 것은 다르다**는 정당한 지적. 3차 점검 시점에는 §9 문구만
+"30일 기준"으로 정정했을 뿐, comp1~3의 90일 재고 부족 자체(라이브 API로 실측
+확인한 81~115개 부족, Streamlit에 실제로 표시됨)는 전혀 손대지 않은 상태였다.
+
+**결정(AskUserQuestion)**: comp1~3의 `on_hand`를 90일 수요 이상으로 올리는 안과,
+화면·문서에서 "정상 재주문 신호"로 구분 표기하는 안 중 **후자를 선택**. comp4(30일
+기준부터 `coverable_30d=false` - 지금 발주해도 못 맞춤)와 comp1~3(90일 기준
+`coverable_90d=true` - 지금 발주하면 기간 내 입고 가능)은 원래 위험도 자체가 다르므로,
+합성 데이터 수치를 더 조정하기보다 이미 존재하는 `coverable_90d` 플래그로 실제
+차이를 화면에 드러내는 쪽이 데이터 조작보다 정직하다는 판단.
+
+**조치**: `frontend/streamlit_app.py`의 재고 위험 탭(구 `elif r["shortfall_90d"] > 0:
+st.info(...)` 한 줄)을 `coverable_90d` 기준으로 분기하도록 확장 -
+`coverable_90d=false`(진짜 위험, comp4류)만 `st.warning`, `coverable_90d=true`(comp1~3
+현재 상태)는 `st.caption`으로 톤을 낮추고 "🔵 정상 재주문 신호 - ... (위험 아님)"이라고
+명시. `mro-copilot-upgrade-plan.md` §9도 "미해결"에서 실제 조치 내용으로 갱신.
+
+**검증**: Docker 프론트엔드 재빌드·재배포(`docker compose build frontend && docker
+compose up -d frontend`), 헬스체크 정상(`/_stcore/health` → `ok`). 백엔드
+`/parts/inventory_risk` 응답(comp1~3: `shortfall_90d>0, coverable_90d=true`, comp4:
+`shortfall_30d>0, coverable_30d=false`)과 새 분기 로직을 코드 레벨로 직접 대조해
+comp1~3은 `st.caption` 경로로, comp4는 기존 `st.warning` 경로(30일 분기가 먼저 걸림)로
+정확히 갈라짐을 확인.
+
+**교훈**: "문서가 정확해졌다"를 "문제가 해결됐다"로 착각하기 쉽다 - 특히 이번처럼
+문서 정합성 감사 도중에 실제 제품 갭을 발견한 경우, 감사의 산출물(정확한 문서)과
+갭 자체의 해결(코드·데이터 수정)을 섞어서 보고하면 안 된다는 걸 사용자가 직접
+잡아줬다. 다음부터는 "문서만 고쳤다"와 "실제로 고쳤다"를 보고할 때 항상 명시적으로
+구분해야 함.
