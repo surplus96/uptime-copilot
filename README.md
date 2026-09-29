@@ -5,13 +5,16 @@
 
 [![Backend checks](https://github.com/surplus96/uptime-copilot/actions/workflows/backend-checks.yml/badge.svg)](https://github.com/surplus96/uptime-copilot/actions/workflows/backend-checks.yml)
 
+**Uptime Copilot — Predictive Maintenance & MRO Copilot**
+
 An OpenAI-based RAG + multi-agent backend, paired with a Streamlit frontend. Built around a
 manufacturing equipment maintenance domain example, backed by the Azure Predictive
-Maintenance dataset.
+Maintenance dataset. Extended with an MRO (parts/inventory/procurement) layer and closed-network
+security operations (offline mode, audit log) — see the MRO Extension section below.
 
 > 📄 **[Portfolio case study →](docs/PORTFOLIO.md)** — architecture diagrams, core logic, and key engineering decisions.
 
-## MRO Extension (parts, demand forecast, inventory risk)
+## MRO Extension (parts, demand forecast, inventory risk, offline mode, audit log)
 
 Built on top of the predictive-maintenance core above: a parts master, a demand forecast,
 and an inventory-risk dashboard, tied into the existing diagnosis pipeline so a real
@@ -41,6 +44,22 @@ decision log: [mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md),
   maintenance perspectives and the risk model, as in the core pipeline). A shortage or
   imminent end-of-life shows as its own `[조달 긴급도]` line on the work order instead of
   inflating the priority level.
+- **Offline mode (`backend/core/offline_guard.py`)** — a destination-based allowlist
+  (`localhost` / `127.0.0.1` / `host.docker.internal`), not a per-module switch: anything
+  inside it (Ollama, a self-hosted CMMS) keeps working with `OFFLINE=1`; anything outside it
+  (LangSmith tracing, Slack) becomes a no-op instead of failing loudly. Setting
+  `OFFLINE=1` together with `LLM_PROVIDER=openai` refuses to start rather than silently
+  reaching a cloud endpoint from inside a closed network. Proven with `pytest-socket`
+  (`backend/tests/test_offline_guard.py`, run with `-m offline_e2e` — excluded from the
+  default CI path since CI has no cached embedding model to survive it): real sockets are
+  blocked except to the allowlist, and a full diagnose→approve→CMMS-push scenario is driven
+  through the actual `notify.py`/`cmms_client.py` code paths, not mocks, so a forgotten guard
+  would show up as a real blocked connection, not a false pass.
+- **Audit log (`backend/data/audit_log.py`)** — every LLM call, tool call, approval/rejection,
+  external push (Slack, CMMS), and offline-blocked call is recorded with a timestamp, thread
+  ID, event type, target, result, and provider, queryable via `GET /audit_log` and the
+  Streamlit app's fifth tab. Correlating by thread ID reconstructs one full scenario end to
+  end — routing → parts check → the three perspective assessments → approval → CMMS push.
 
 ## Folder Structure
 
@@ -290,6 +309,7 @@ accuracy/latency trade for going fully local.
 | Variable | Required | Effect if unset |
 |---|---|---|
 | `LLM_PROVIDER` | No | Code default is `openai`; set to `ollama` to run entirely against a local Ollama server instead (`backend/core/llm_provider.py`) — no API key or internet needed, at a real accuracy/latency cost (see Evaluation Baseline below). **`docker-compose.yml` overrides this to `ollama`** for the containerized path regardless of what's in `.env` — see "Running with Docker Compose" above. |
+| `OFFLINE` | No | Set to `1` to enforce the destination-based offline guard (`backend/core/offline_guard.py`, see MRO Extension above) — LangSmith/Slack become no-ops, Ollama/CMMS at `host.docker.internal` keep working. `OFFLINE=1` + `LLM_PROVIDER=openai` refuses to start. |
 | `OPENAI_API_KEY` | **Yes, unless `LLM_PROVIDER=ollama`** | Backend refuses to start. Not needed for the Docker path by default, since compose sets `LLM_PROVIDER=ollama`. |
 | `OPENAI_MODEL` | No | Defaults to `gpt-5.6-luna`. Only used when `LLM_PROVIDER=openai` |
 | `OLLAMA_BASE_URL` | No | Defaults to `http://localhost:11434/v1`. Only used when `LLM_PROVIDER=ollama` |
@@ -333,6 +353,8 @@ accuracy/latency trade for going fully local.
 | GET | `/simulator/status` | Running state, simulated clock, degrading-machine list, `has_stale_events`, and `last_error`/`consecutive_failures` if a background tick has been failing |
 | POST | `/simulator/inject` | Force a specific machine into a strong degradation, for demos (`{"machine_id": 12}`, optional `"signal"`: one of `volt`/`rotate`/`pressure`/`vibration`, random if omitted) |
 | POST | `/simulator/reset` | Wipe simulator state/data **and** the detected/completed event tables — call this before a fresh run; nothing is cleared automatically. See `docs/design/SIMULATOR_PLAN.md` |
+| GET | `/parts/inventory_risk` | 30/90-day demand vs. on-hand stock per part, with a coverability flag per horizon (see MRO Extension above) |
+| GET | `/audit_log` | Query the audit log (optional `limit`, `event_type` filter) — LLM calls, tool calls, approvals/rejections, external pushes, offline-blocked calls |
 
 Example `/agent/query` request:
 ```json

@@ -5,12 +5,16 @@
 
 [![Backend checks](https://github.com/surplus96/uptime-copilot/actions/workflows/backend-checks.yml/badge.svg)](https://github.com/surplus96/uptime-copilot/actions/workflows/backend-checks.yml)
 
+**Uptime Copilot — Predictive Maintenance & MRO Copilot**
+
 OpenAI 기반 RAG + 멀티에이전트 백엔드와 Streamlit 프론트엔드로 구성된 프로젝트입니다.
 제조 설비 정비 도메인을 배경으로 하며, Azure Predictive Maintenance 데이터셋을 사용합니다.
+MRO(부품·재고·조달) 계층과 폐쇄망 보안 운영(오프라인 모드, 감사 로그)까지 확장했습니다 —
+아래 MRO 확장 섹션 참고.
 
 > 📄 **[포트폴리오 케이스 스터디 →](docs/PORTFOLIO_KOR.md)** — 아키텍처 다이어그램, 핵심 로직, 주요 엔지니어링 결정.
 
-## MRO 확장 (부품·수요예측·재고위험)
+## MRO 확장 (부품·수요예측·재고위험·오프라인 모드·감사 로그)
 
 위 예지보전 코어 위에 부품 마스터, 수요 예측, 재고 위험 대시보드를 얹고, 기존 진단
 파이프라인과 연결해서 실제 설비 고장이 발생했을 때 필요한 부품이 실제로 있는지까지
@@ -36,6 +40,21 @@ OpenAI 기반 RAG + 멀티에이전트 백엔드와 Streamlit 프론트엔드로
   않습니다(긴급도는 기존과 동일하게 안전/생산/정비 관점과 위험도 모델에서만 나옵니다).
   재고 부족이나 단종 임박은 우선순위를 올리는 대신 작업지시서에 별도
   `[조달 긴급도]` 줄로 표시됩니다.
+- **오프라인 모드(`backend/core/offline_guard.py`)** — 모듈별 스위치가 아니라
+  목적지 기반 허용 목록(`localhost`/`127.0.0.1`/`host.docker.internal`)입니다 - 목록
+  안(Ollama, 자체 호스팅 CMMS)은 `OFFLINE=1`에서도 그대로 동작하고, 목록 밖(LangSmith
+  트레이싱, Slack)은 실패하는 대신 조용히 no-op이 됩니다. `OFFLINE=1`과
+  `LLM_PROVIDER=openai`를 같이 설정하면 폐쇄망에서 조용히 클라우드로 나가는 대신
+  기동 자체를 거부합니다. `pytest-socket`으로 실제로 증명합니다
+  (`backend/tests/test_offline_guard.py`, `-m offline_e2e`로 실행 - CI에는 임베딩
+  모델 캐시가 없어 기본 경로에서는 제외): 실제 소켓을 막아둔 상태에서 허용 목록
+  밖으로는 연결이 안 되고, `notify.py`/`cmms_client.py`를 몽키패치 없이 그대로 태워서
+  진단→승인→CMMS push 전체 시나리오가 통과하는지 확인합니다 - 가드를 깜빡해도 실제로
+  잡힙니다(가짜 통과가 아님).
+- **감사 로그(`backend/data/audit_log.py`)** — LLM 호출·도구 호출·승인/반려·외부
+  전송(Slack·CMMS)·오프라인 차단이 시각·스레드ID·이벤트유형·대상·결과·제공자와 함께
+  기록되고, `GET /audit_log`와 Streamlit 5번째 탭에서 조회됩니다. 스레드ID로 필터링하면
+  라우팅→부품조회→3관점 평가→승인→CMMS push까지 한 시나리오 전체가 순서대로 재구성됩니다.
 
 ## 폴더 구조
 
@@ -272,6 +291,7 @@ pytest tests/eval/test_golden.py -m eval -v -s
 | 변수 | 필수 | 미설정 시 동작 |
 |---|---|---|
 | `LLM_PROVIDER` | 선택 | 코드 기본값은 `openai`. `ollama`로 설정하면 완전히 로컬 Ollama 서버로만 동작(`backend/core/llm_provider.py`) — API 키·인터넷 불필요, 대신 실측 가능한 정확도/지연 손실 있음(아래 평가 기준선 참고). **`docker-compose.yml`은 이 값을 `ollama`로 강제** — `.env`에 뭐라고 써도 도커 경로에선 이게 이깁니다. 위 "Docker Compose로 실행" 참고. |
+| `OFFLINE` | 선택 | `1`로 설정하면 목적지 기반 오프라인 가드(`backend/core/offline_guard.py`, 위 MRO 확장 참고)가 강제됨 — LangSmith/Slack은 no-op, `host.docker.internal`의 Ollama/CMMS는 그대로 동작. `OFFLINE=1`+`LLM_PROVIDER=openai` 조합은 기동 자체를 거부. |
 | `OPENAI_API_KEY` | **`LLM_PROVIDER=ollama`가 아니면 필수** | 백엔드가 시작되지 않음. 도커 경로는 compose가 기본으로 `LLM_PROVIDER=ollama`를 설정하므로 필요 없음. |
 | `OPENAI_MODEL` | 선택 | 기본값 `gpt-5.6-luna`. `LLM_PROVIDER=openai`일 때만 사용 |
 | `OLLAMA_BASE_URL` | 선택 | 기본값 `http://localhost:11434/v1`. `LLM_PROVIDER=ollama`일 때만 사용 |
@@ -315,6 +335,8 @@ pytest tests/eval/test_golden.py -m eval -v -s
 | GET | `/simulator/status` | 실행 여부, 시뮬레이션 시각, 열화 진행 중인 설비 목록, `has_stale_events`, 백그라운드 틱이 실패 중이면 `last_error`/`consecutive_failures`도 포함 |
 | POST | `/simulator/inject` | 특정 설비를 강제로 강하게 열화시킴, 데모용 (`{"machine_id": 12}`, 선택적으로 `"signal"`: `volt`/`rotate`/`pressure`/`vibration` 중 하나, 생략하면 무작위) |
 | POST | `/simulator/reset` | 시뮬레이터 상태/데이터 **및** 감지/완료 이벤트 테이블 전체 초기화 — 새로 시작하기 전에 호출. 자동으로는 지워지지 않음. `docs/design/SIMULATOR_PLAN.md` 참고 |
+| GET | `/parts/inventory_risk` | 부품별 30/90일 수요 대비 현재고, 예측 기간별 조달 가능 여부 플래그 포함 (위 MRO 확장 참고) |
+| GET | `/audit_log` | 감사 로그 조회(`limit`, `event_type` 필터 선택) — LLM 호출·도구 호출·승인/반려·외부 전송·오프라인 차단 |
 
 `/agent/query` 요청 예시:
 ```json

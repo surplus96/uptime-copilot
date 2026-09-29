@@ -6,13 +6,15 @@
 > A RAG + multi-agent copilot for manufacturing predictive maintenance. It diagnoses
 > equipment anomalies from real sensor, error, and maintenance-history data, and routes
 > urgent cases through Human-in-the-Loop approval into Slack alerts and CMMS work orders —
-> an end-to-end pipeline I designed and built myself.
+> an end-to-end pipeline I designed and built myself. Extended with an MRO layer (parts,
+> demand forecast, procurement) and closed-network security operations (offline mode,
+> audit log) — §11.
 
 `FastAPI` · `LangGraph` · `Streamlit` · `RAG (Chroma)` · `SQLite` · `Model Context Protocol` · `Docker Compose` · `pytest`
 
-| | | | |
-|---|---|---|---|
-| **100** monitored machines | **100%** failure event recall on held-out data (synthetic benchmark — see caveats) | **97–100%** detection precision (vs **6–18%** for the existing Z-score threshold) | **76** regression tests (CI-enforced) |
+| | | | | |
+|---|---|---|---|---|
+| **100** monitored machines | **100%** failure event recall on held-out data (synthetic benchmark — see caveats) | **97–100%** detection precision (vs **6–18%** for the existing Z-score threshold) | **99** regression tests (CI-enforced, 107 total) | **0** disallowed network calls under `OFFLINE=1` (proven, not assumed — §11) |
 
 ---
 
@@ -318,7 +320,7 @@ racing an inject against a tick.
 
 | Item | Details |
 |---|---|
-| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. 76 run in CI (`pytest tests/ --ignore=tests/test_rag_dedup.py`); 78 total including 2 that need the live embedding model; plus a 40-case real-LLM eval suite excluded from both (costs API tokens — run on demand). |
+| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. 99 run automatically in CI (`pytest tests/ --ignore=tests/test_rag_dedup.py`); 107 total. The gap is two opt-in suites excluded by default via pytest markers: a 40-case real-LLM golden-set eval (costs API tokens) and a 3-case `pytest-socket` offline-network proof (§11) that CI can't run since it has no cached embedding model to survive it — plus 2 tests needing the live embedding model, skipped only in CI's fast path via `--ignore`. |
 | Static analysis + CI | ruff and mypy run in GitHub Actions on every push/PR, scoped to the modules under active development — adopted specifically because the "vanished function" bug above is exactly what a type checker catches instantly and a test suite might not. |
 | Review-agent process | During development, used nine single-lane review subagents (security / code quality / interface / pipeline & model operations / docs / debugging / build & packaging / performance / test validity) instead of one general reviewer — reviewing code in the same context that wrote it lets defects straight through. That tooling was development-only and isn't part of the shipped repo. |
 | Cross-review checkpoints | For decisions where getting it wrong is expensive — the failure-risk model's suspiciously perfect first-pass metrics (§05), the priority-rule design that decides shutdown recommendations — I sent the exact code/data to an independent model for review before shipping, rather than self-certify. Both are logged in full in `docs/decisions.md`, including what the reviews actually found. |
@@ -329,23 +331,128 @@ racing an inject against a tick.
 The app runs against OpenAI by default, but `LLM_PROVIDER=ollama` switches every LLM call —
 routing, extraction, perspective assessments, the RAG judge — to a fully local model via
 Ollama's OpenAI-compatible endpoint, no code changes needed. I measured what that switch
-actually costs rather than assume it's free: on the same 40-case golden set, a local
-Qwen3-8B holds machine-ID extraction and re-ask-when-missing at 100% (identical to cloud),
-but router accuracy drops 90.0% → 77.5% and per-call latency goes from ~1.2s to 10–14s. A
-spot check outside the golden set also caught the local model producing an internally
-contradictory structured output (`risk_level: 중간` alongside `requires_shutdown: true`)
-that didn't appear on the cloud model in the same testing — real enough to note, not
-severe enough to block the feature. Worth the trade for an air-gapped deployment; not a
-drop-in free upgrade.
+actually costs rather than assume it's free, and caught my own first measurement being
+methodologically unfair before publishing it: an earlier pass compared a single local run
+against a single stale cloud run that hadn't gone through the current safety net — an
+external review flagged it as apples-to-oranges, tuned on its own failure cases. The
+numbers below are from a clean rerun: cloud measured once with current code, local measured
+5 times, both split into the 40 questions used to build the safety net and a separate
+10-question holdout never looked at while building it.
+
+| Metric | Cloud (1 run) | Local Qwen3-8B (5 runs) |
+|---|---|---|
+| Router accuracy (40-question golden set) | 90.0% | 87.5–92.5% (mean 91.0%) |
+| Router accuracy (10-question holdout) | 100.0% | 90–100% (mean 96.0%) |
+| Machine-ID extraction / re-ask on missing ID | 100.0% / 100.0% | 100.0% / 100.0% (all 5 runs) |
+| Dangerous misroute (named machine → ungrounded node) | 0 | 0 (across all 10 golden+holdout runs) |
+| Mean latency / call | ~1.2s | ~13s |
+
+Extraction and re-ask held up identically from the start — narrow, closed-form tasks.
+Routing initially trailed the cloud model by double digits and ran ~10x slower as two
+separate calls; both gaps were narrowed on the code side, not by using a bigger model —
+merging routing+extraction into one structured-output call, and a deterministic
+post-classification check for the specific phrasings the local model kept misrouting into
+the ungrounded free-chat node. A spot check outside the golden set also caught the local
+model producing an internally contradictory structured output (`risk_level: 중간` alongside
+`requires_shutdown: true`) that didn't appear on the cloud model — fixed structurally by
+deriving `requires_shutdown` in code instead of letting the model set it. Bottom line: local
+now matches cloud on accuracy (91.0% vs 90.0%) with the safety-critical metric at zero
+misroutes across all runs; the remaining real cost is latency, mitigated by call-merging and
+a warm-up ping but not eliminated. Worth it for a closed environment; not a drop-in free
+upgrade.
 
 ## 10 · Stack
 
 `FastAPI` `LangGraph` `LangChain` `OpenAI API` `Ollama` `LightGBM` `scikit-learn`
 `Streamlit` `SQLite` `Chroma`
 `HuggingFace sentence-transformers` `rank_bm25` `Model Context Protocol SDK`
-`LangSmith` `Docker / Docker Compose` `pytest / pytest-asyncio` `asyncio`
+`LangSmith` `Docker / Docker Compose` `pytest / pytest-asyncio` `pytest-socket` `asyncio`
 `ruff` `mypy` `GitHub Actions`
+
+## 11 · MRO Extension — Parts, Inventory, and Security Operations
+
+The predictive-maintenance core above answers "is this machine failing?" A real MRO
+(Maintenance, Repair, Operations) workflow also needs "do we have the part, and can we say
+so without pretending this is real inventory data?" — plus the two things a closed-network
+deployment actually needs before it can run there at all: proof that nothing leaks out, and
+a record of everything that happened. All numbers below are synthetic-data demos, disclosed
+as such in the UI and in `docs/design/parts_assumptions.md` — see §0-1 of
+[mro-copilot-upgrade-plan.md](../mro-copilot-upgrade-plan.md) for why this is scoped as a
+separate extension rather than folded into the core numbers above.
+
+| Component | What it does |
+|---|---|
+| Parts master + demand forecast | 5 synthetic parts, 30/90-day replacement forecast split into a preventive term and a failure term (see below), backtested against real Nov–Dec 2015 replacement counts: -5.0% to +3.5% error |
+| Inventory-risk dashboard | `GET /parts/inventory_risk`, flags shortfalls and distinguishes a genuine risk (lead time exceeds the horizon) from a normal reorder signal (it doesn't) |
+| Procurement urgency, kept separate from priority | A missing part doesn't inflate how urgent a diagnosis is — it's its own line on the work order, decided by the same deterministic function the background scanner uses |
+| Offline mode | Destination-based allowlist (not a per-module switch); proven with `pytest-socket` against the real `notify.py`/`cmms_client.py` code paths, not mocks |
+| Audit log | Every LLM call, tool call, approval/rejection, external push, and offline-blocked call, correlated by thread ID |
+
+<details>
+<summary><strong>WAR STORY · A statistics bug that only showed up as the wrong kind of wrong, twice</strong></summary>
+
+The first version of the demand formula applied a single alarm-conditioned failure rate
+across the entire 30/90-day forecast window. It looked reasonable and it was wrong in a way
+that's easy to miss: an external review found the model's precision is high enough that the
+"no alarm today" failure rate is effectively zero in the validation data — apply that flat
+rate across the whole window and you're claiming a machine with no alarm today stays safe
+for the next 90 days, which isn't a claim the model actually supports (it only knows about
+the next 24h). Fixing it by swapping to the correct conditional rate seemed obvious — and
+produced a new, opposite bug: 22–32% underprediction, caught immediately by the backtest I'd
+already built. The rate wasn't wrong, its *scope* was: today (known alarm state) needs the
+conditional rate, every day after (unknown future alarm state) needs the population rate,
+and conflating the two either direction breaks it. Splitting day-1 from day-2-onward fixed
+both errors at once. Logged in full, including the failed first attempt, in
+`docs/decisions.md`.
+</details>
+
+<details>
+<summary><strong>BUG · A synthetic scarcity demo that only worked by coincidence</strong></summary>
+
+One part was deliberately seeded with low stock to demo a procurement-shortage scenario.
+Widening a different, unrelated part's random-number range shifted the shared RNG's draw
+sequence and silently flipped the demo part back to "not actually short" — the shortage had
+never been guaranteed by design, just a lucky roll under one specific seed. Fixed by
+narrowing that part's own range so the condition holds regardless of what else draws from
+the same generator first.
+</details>
+
+<details>
+<summary><strong>UX · Fixing a document doesn't fix the product — a distinction the user had to point out to me</strong></summary>
+
+An audit of the plan document turned up a real product gap (two parts showing a 90-day
+shortfall in a tone visually identical to a genuinely urgent one, when their lead time meant
+they weren't actually at risk) and I corrected the *documentation* to accurately describe it
+as unresolved — then reported it back as if that were the fix. It wasn't; the on-screen
+inventory tab still read the same way to an actual user. Caught by a direct question — "is
+that also resolved?" — that separated "the record is now accurate" from "the thing it
+describes is now different." Fixed by branching the UI on the coverability flag the backend
+already computed, so a genuine risk still warns and a normal reorder point reads as one.
+</details>
+
+<details>
+<summary><strong>INFRA · Two pytest-socket functions with overlapping names, opposite designs</strong></summary>
+
+`disable_socket()` and `socket_allow_hosts()` look composable — call both, get "block
+everything except this allowlist." They aren't: `disable_socket()` replaces `socket.socket`
+itself and unconditionally blocks `getaddrinfo`, before `socket_allow_hosts()`'s
+connect-level allowlist check ever runs. Reading the plugin's own source
+(`inspect.getsource`, not the docs) showed the actual supported combination is the
+`allow_hosts` marker, which calls `socket_allow_hosts()` alone. Switched to that and the
+allowlist test started passing for the right reason instead of failing for a different one.
+</details>
+
+<details>
+<summary><strong>GAP · The most safety-relevant log lines were the ones with no thread ID</strong></summary>
+
+After wiring six audit-log call sites, a live end-to-end run — filtered to one thread ID —
+was missing the three safety/production/maintenance risk assessments entirely. The shared
+assessment function had never taken a `thread_id` parameter, because at the time I wrote
+that connection point it didn't seem load-bearing enough to plumb through. Querying one real
+scenario end to end, rather than trusting that six connected call sites meant six usable log
+lines, is what actually surfaced it.
+</details>
 
 ---
 
-<sub>Uptime Copilot — Predictive Maintenance Copilot · Case study</sub>
+<sub>Uptime Copilot — Predictive Maintenance & MRO Copilot · Case study</sub>
