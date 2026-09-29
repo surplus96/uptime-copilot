@@ -30,7 +30,7 @@ from core.harness import (
     judge_faithfulness,
     validate_input,
 )
-from data import event_store, sim_loop, sim_store
+from data import audit_log, event_store, sim_loop, sim_store
 from rag import rag_service
 
 load_dotenv()
@@ -93,7 +93,9 @@ async def lifespan(app: FastAPI):
     # 테이블이 아예 없어 긴급/주의 대화가 500 에러, 백그라운드 스캔은 매 tick마다
     # 조용히 실패한다. 합성 데이터라 크기가 작고 외부 파일도 안 필요해서(pdm_dataloader
     # 처럼 수동 1회 실행이 아니라) 기동 시 자동 생성해도 비용이 거의 없다.
+
     from data.parts_master import generate_parts_master, init_parts_table
+    audit_log.init_audit_table()
     init_parts_table()
     generate_parts_master()
     sim_task = asyncio.create_task(sim_loop.run_forever())
@@ -217,14 +219,14 @@ def health_check():
 def rag_query(req: RAGRequest):
     """매뉴얼 Q&A 보조 기능 - docs/ 폴더에 적재된 문서만 근거로 답한다. 일반 잡담이나
     설비 진단은 이 엔드포인트의 역할이 아니다(설비 진단은 /agent/query가 담당)."""
+
     validate_input(req.question)
 
     try:
         context, answer = rag_service.answer_with_context(req.question)
     except Exception as e:
         raise LLMAPIError(str(e))
-
-
+    
     check_output_forbidden_words(answer)
 
     faithfulness_result = judge_faithfulness(client, context, answer)
@@ -232,9 +234,10 @@ def rag_query(req: RAGRequest):
         raise HarnessRejectedError(
             f"RAG 답변이 검색 문맥에 근거하지 않음(hallucination 의심): {faithfulness_result.get('reason')}"
         )
-
+    audit_log.log_event("llm_call", target="rag_query", summary=req.question[:50], provider=llm_provider.get_provider_name())
     verified = faithfulness_result.get("score") is not None
     verified_reason = None if verified else faithfulness_result.get("reason")
+    
     return RAGResponse(
         question=req.question, answer=answer, context=context,
         verified=verified, verified_reason=verified_reason,
@@ -337,6 +340,9 @@ def parts_inventory_risk():
         })
     return {"rows": rows}
 
+@app.get("/audit_log")
+def get_audit_log(limit: int = 100, event_type: str | None = None):
+    return {"events": audit_log.list_events(limit=limit, event_type=event_type)}
 
 @app.post("/events/complete")
 def complete_events(req: EventIdsRequest):

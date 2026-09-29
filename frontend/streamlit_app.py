@@ -105,7 +105,7 @@ def render_work_order(work_order_text: str):
 
 
 
-tab1, tab2, tab3, tab4 = st.tabs(["설비 에이전트", "매뉴얼 검색", "이상감지 이벤트", "재고 위험"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["설비 에이전트", "매뉴얼 검색", "이상감지 이벤트", "재고 위험", "감사 로그"])
 
 # ---------- 설비 에이전트 모드 ----------
 with tab1:
@@ -602,3 +602,22 @@ with tab4:
                 )
             else:
                 st.caption("재고 위험 없음")
+
+@st.cache_data(ttl=10)
+def _fetch_audit_log(event_type=None):
+    params = {"limit": 100}
+    if event_type:
+        params["event_type"] = event_type
+    res = requests.get(f"{BACKEND_URL}/audit_log", params=params, timeout=30)
+    res.raise_for_status()
+    return res.json()["events"]
+
+
+with tab5:
+    st.subheader("🧾 감사 로그")
+    event_type_filter = st.selectbox(
+        "이벤트 유형", ["전체", "llm_call", "tool_call", "approval", "rejection", "external_push", "blocked_by_offline"]
+    )
+    rows = _fetch_audit_log(None if event_type_filter == "전체" else event_type_filter)
+    st.dataframe(rows, use_container_width=True)
+

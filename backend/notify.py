@@ -13,6 +13,7 @@ import requests
 from dotenv import load_dotenv
 
 from core import offline_guard
+from data import audit_log
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -30,7 +31,10 @@ def _format_for_slack(text: str) -> str:
 
 
 def send_alert(text: str) -> None:
-    if offline_guard.is_offline() or not SLACK_WEBHOOK_URL:
+    if offline_guard.is_offline():
+        audit_log.log_event("blocked_by_offline", target="Slack", summary="오프라인 - 웹훅 스킵", result="차단")
+        return
+    if not SLACK_WEBHOOK_URL:
         return
 
     try:

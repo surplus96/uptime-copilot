@@ -19,7 +19,7 @@ import cmms_client
 import notify
 from core import llm_provider, offline_guard
 from core.harness import check_output_forbidden_words
-from data import pdm_operations, pdm_telemetry, sim_query
+from data import audit_log, pdm_operations, pdm_telemetry, sim_query
 from ml.predict import predict_failure_risk
 from rag.pump_manual import ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES, SIGNAL_TO_COMPONENT
 
@@ -42,6 +42,7 @@ def initialize_agent(langsmith_client, checkpointer) -> None:
 
 class SupervisorState(BaseModel):
     user_message: str
+    thread_id: str | None = None
     category: str | None = None
     machine_id: int | None = None
     severity: str | None = None
@@ -131,6 +132,9 @@ def route_node(state: SupervisorState) -> dict:
         ],
         response_format=RouteDecision,
     )
+
+    audit_log.log_event("llm_call", thread_id=state.thread_id, target=None,
+                     summary="라우팅+설비ID 추출", provider=llm_provider.get_provider_name())
 
     decision = completion.choices[0].message.parsed
     category = decision.category
@@ -378,8 +382,9 @@ def parts_check_node(state: SupervisorState) -> dict:
     분기 전에 둔다 - 두 경로(work_order로 바로 가는 주의, 3관점을 거치는 긴급) 모두
     이 정보가 필요하기 때문이다(mro-copilot-upgrade-plan.md §4)."""
     from data.parts_operations import check_parts
+    for comp in state.involved_components:
+        audit_log.log_event("tool_call", thread_id=state.thread_id, target=comp, summary="부품 가용성 조회")
     return {"parts_status": {comp: check_parts(comp) for comp in state.involved_components}}
-
 
 def validate_work_order_node(state: SupervisorState) -> dict:
     """work_order가 승인 요청·Slack·CMMS 전송에 쓰이기 전에 반드시 통과해야 하는 검증
@@ -456,7 +461,7 @@ _DEFAULT_ASSESSMENT = {
 }
 
 
-def _assess_perspective(label: str, system_prompt: str, diagnosis: str) -> dict:
+def _assess_perspective(label: str, system_prompt: str, diagnosis: str, thread_id: str | None = None) -> dict:
     """세 관점 노드(안전/생산/정비)가 공유하는 평가 로직. 구조화 출력이 거부되거나
     예외가 나면 '위험도 중간·24시간 이내 조치'라는 보수적 기본값으로 대체한다 - 관점이
     아예 빠지는 것보다 사람이 알아챌 수 있는 형태로 안전하게 죽인다."""
@@ -477,9 +482,13 @@ def _assess_perspective(label: str, system_prompt: str, diagnosis: str) -> dict:
             raise ValueError(f"관점 평가 모델이 응답을 거부함: {message.refusal}")
         assessment = message.parsed.model_dump()
         assessment["is_fallback"] = False
+        audit_log.log_event("llm_call", thread_id=thread_id, target=label, summary=f"{label} 관점 평가",
+                             provider=llm_provider.get_provider_name())
     except Exception as e:
         logger.warning(f"[{label}] 관점 평가 실패, 안전한 기본값으로 대체: {e}")
         assessment = dict(_DEFAULT_ASSESSMENT)
+        audit_log.log_event("llm_call", thread_id=thread_id, target=label, summary=f"{label} 관점 평가",
+                             result="실패", provider=llm_provider.get_provider_name())
 
     assessment["requires_shutdown"] = _derive_requires_shutdown(
         assessment["risk_level"], assessment["recommended_window"]
@@ -492,19 +501,22 @@ def _assess_perspective(label: str, system_prompt: str, diagnosis: str) -> dict:
 
 def safety_perspective_node(state: SupervisorState) -> dict:
     return _assess_perspective(
-        "안전", "당신은 현장 안전 담당자입니다. 아래 사고 상황의 안전 위험도를 평가하세요.", state.diagnosis
+        "안전", "당신은 현장 안전 담당자입니다. 아래 사고 상황의 안전 위험도를 평가하세요.", state.diagnosis,
+        thread_id=state.thread_id,
     )
 
 
 def production_perspective_node(state: SupervisorState) -> dict:
     return _assess_perspective(
-        "생산", "당신은 생산 관리자입니다. 아래 사고 상황이 생산에 미치는 영향을 평가하세요.", state.diagnosis
+        "생산", "당신은 생산 관리자입니다. 아래 사고 상황이 생산에 미치는 영향을 평가하세요.", state.diagnosis,
+        thread_id=state.thread_id,
     )
 
 
 def maintenance_perspective_node(state: SupervisorState) -> dict:
     return _assess_perspective(
-        "정비", "당신은 정비 기술자입니다. 아래 사고 상황의 수리 난이도를 평가하세요.", state.diagnosis
+        "정비", "당신은 정비 기술자입니다. 아래 사고 상황의 수리 난이도를 평가하세요.", state.diagnosis,
+        thread_id=state.thread_id,
     )
 
 
@@ -582,15 +594,20 @@ def approval_node(state: SupervisorState) -> dict:
 
 def finalize_node(state: SupervisorState) -> dict:
     if state.severity == "긴급":
+        target = f"설비#{state.machine_id}"
         if state.approved:
             result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 승인 처리되었습니다. 현장 책임자에게는 별도로 알려야 합니다."
+            audit_log.log_event("approval", thread_id=state.thread_id, target=target, summary="긴급 작업지시서 승인")
             notify.send_alert(f"[긴급 승인] 설비 #{state.machine_id} 작업지시서 승인됨\n{state.work_order}")
             try:
                 cmms_client.push_work_order(state.machine_id, state.work_order)
+                audit_log.log_event("external_push", thread_id=state.thread_id, target=target, summary="CMMS 작업지시서 push", result="성공")
             except Exception as e:
                 logger.error(f"[CMMS push 실패] {e}")
+                audit_log.log_event("external_push", thread_id=state.thread_id, target=target, summary="CMMS 작업지시서 push", result="실패")
         else:
             result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 반려 처리되었습니다. 별도 조치는 이루어지지 않았습니다."
+            audit_log.log_event("rejection", thread_id=state.thread_id, target=target, summary="긴급 작업지시서 반려")
     elif state.severity == "주의":
         result = f"[사전 경보 - 예방 조치 권장]\n{state.work_order}"
     else:
@@ -679,7 +696,7 @@ def _validate_output(state_dict: dict) -> None:
 
 def start_agent(user_message: str, thread_id: str) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
-    result = app.invoke(SupervisorState(user_message=user_message), config=config)
+    result = app.invoke(SupervisorState(user_message=user_message, thread_id=thread_id), config=config)
     if "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
         _validate_output(payload)

@@ -1092,3 +1092,63 @@ build backend` 없이 `exec`만으로 검증하면 안 된다는 걸 다시 확�
 설계상 서로 다른 전략(전부 차단 vs. 목적지 허용 목록)일 수 있고, 이걸 확인하는
 가장 빠른 방법은 문서를 뒤지는 게 아니라 `inspect.getsource()`로 실제 구현과
 플러그인 훅(`pytest_runtest_setup`)을 직접 읽는 것이었다.
+
+## 2026-09-28 — MRO-FR-08: 감사 로그 + 조회 API + UI 탭
+
+**배경**: M2 두 번째 작업(계획서 §8). §6-3 필드(시각·스레드ID·이벤트유형·대상·
+요약·결과·제공자)를 그대로 스키마화하고, LLM·도구 호출/승인·반려/외부 전송/
+오프라인 차단을 기록한다. FR-07에서 "감사 로그 없어서 지금은 조용히 스킵만"
+이라고 미뤄뒀던 `notify.send_alert()`의 `blocked_by_offline` 기록이 이번에 닫힘.
+
+**구현**: 교육 모드(H1)로 진행. `data/audit_log.py`(신규, `event_store.py`와 같은
+패턴 - `DB_PATH` 모듈 상수 + `init_audit_table()`/`log_event()`/`list_events()`).
+`SupervisorState`에 `thread_id` 필드 추가(`start_agent()`가 채움, `resume_agent()`는
+체크포인트에서 이어받으므로 수정 불필요) - 이게 없으면 그래프 노드들이 스레드ID를
+몰라서 이벤트를 서로 연결할 수 없었다. 연결 지점 6곳: `route_node`(llm_call),
+`_assess_perspective`(llm_call - **처음엔 `thread_id` 파라미터 없이 작성**했다가
+아래에서 발견한 갭으로 뒤늦게 추가), `parts_check_node`(tool_call), `finalize_node`
+(approval/rejection/external_push), `notify.send_alert()`(blocked_by_offline).
+`main.py`에 `GET /audit_log`(limit/event_type 필터), `frontend/streamlit_app.py`에
+5번째 탭.
+
+**직접 겪은 함정 - "완료"라고 확인하기 전 라이브 검증에서 실제 갭을 발견**: 4곳
+연결 후 실제 긴급→승인 시나리오를 돌려 스레드ID로 필터링했더니, `approval`/
+`external_push`/`tool_call`/`llm_call`(라우팅)은 보이는데 **가장 안전 관련성이
+높은 3관점(안전/생산/정비) `llm_call`이 안 보였다** - `_assess_perspective()`가
+`state`를 안 받는 함수라 애초에 `thread_id`를 못 받게 설계했었기 때문. "이 정도는
+생략해도 된다"고 스니펫 제안 시점에 스스로 정당화했던 부분인데, 실제로 스레드
+단위 조회를 해보니 "특정 승인 건에 무슨 일이 있었는지"를 볼 때 정작 제일 중요한
+정보가 빠지는 결과였다. `_assess_perspective(label, system_prompt, diagnosis,
+thread_id=None)`로 파라미터 추가, 3개 노드(`safety_perspective_node` 등)가
+`state.thread_id`를 전달하도록 수정해서 해결.
+
+**직접 겪은 실수 - `result` 기본값 문제**: `blocked_by_offline` 스니펫에서
+`result=`를 안 넣어 기본값 `"성공"`이 그대로 들어갔다 - §6-3은 결과값으로
+"성공/실패/**차단**"을 정의했는데, "차단" 이벤트에 "성공"이 찍히는 건 의미가
+헷갈린다. 라이브 검증 중 직접 발견해서 `result="차단"`으로 수정.
+
+**직접 겪은 실수 - 변이 테스트 원복 중 `/tmp` 쓰기 거부**: `test_audit_log.py`의
+`ORDER BY id DESC` → `ASC` 변이 테스트에서, 원복용 백업을 `cp data/audit_log.py
+/tmp/...`로 만들려다 샌드박스가 `/tmp` 직접 쓰기를 거부해서 실패 - **변이가 소스에
+그대로 남은 채로 명령이 끝났다.** 다음 명령으로 곧바로 Read해서 실제 상태를
+확인하고 Edit으로 원복 - "명령이 실패했으니 원복도 안 됐을 것"을 가정하지 않고,
+파일을 다시 읽어서 실제 상태를 확인한 뒤 조치했다.
+
+**검증**:
+- 라이브: 실제 긴급 시나리오(설비#1) 1건 실행 → 스레드ID로 필터링 → `llm_call`(라우팅)
+  → `tool_call`(comp1/comp2) → `llm_call`(안전/생산/정비 관점 3건) → `approval` →
+  `external_push`(CMMS, 로컬에 진짜 Atlas-MCP가 없어 실패 - 예상된 결과) 순서로
+  전부 조회됨. `blocked_by_offline`(Slack, `result="차단"`)도 오프라인 상태에서
+  별도 확인.
+- `GET /audit_log`(필터 포함) + Streamlit 탭 라이브 확인, 프론트엔드 헬스체크 정상.
+- `tests/test_audit_log.py` 신규 6건(임시 DB 격리 - 공유 DB 의존 시 CI에서 재현
+  안 되는 함정을 피함), `ORDER BY` 변이 테스트로 방어력 확인.
+- 기본 CI 경로: 79(M1 이전 기준점) → 99개(신규 20건: FR-07의 `offline_e2e` 3건은
+  기본 경로에서 제외되므로 여기 포함 안 됨 - 별도 카운트), 6 deselected(eval 3 +
+  offline_e2e 3), 회귀 없음. `ruff`/`mypy` 클린.
+
+**교훈**: 로깅 지점을 설계할 때 "이 함수는 지금 그 정보를 안 갖고 있으니 생략"은
+쉬운 선택이지만, 실제로 스레드 단위 조회를 해보기 전까지는 그게 진짜 괜찮은
+생략인지 알 수 없다 - 이번엔 하필 가장 중요한 정보(안전 판단)가 빠지는 경우였다.
+"연결은 했다"와 "실제로 스레드 하나를 끝까지 조회해봤다"는 다른 검증 수준이라는
+게 이번에도 확인됐다(FR-05/90일 갭 사건과 같은 패턴).
