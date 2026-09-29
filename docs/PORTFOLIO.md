@@ -14,7 +14,7 @@
 
 | | | | | |
 |---|---|---|---|---|
-| **100** monitored machines | **100%** failure event recall on held-out data (synthetic benchmark — see caveats) | **97–100%** detection precision (vs **6–18%** for the existing Z-score threshold) | **99** regression tests (CI-enforced, 107 total) | **0** disallowed network calls under `OFFLINE=1` (proven, not assumed — §11) |
+| **100** monitored machines | **100%** failure event recall on held-out data (synthetic benchmark — see caveats) | **97–100%** detection precision (vs **6–18%** for the existing Z-score threshold) | **139** regression tests (CI-enforced, 144 total) | **0** disallowed network calls under `OFFLINE=1` (enforced at runtime + proven in CI on every push — §11) |
 
 ---
 
@@ -46,7 +46,7 @@ flowchart LR
     subgraph BE["FastAPI Backend"]
         HN["Harness<br/>input / output validation"]
         SV["LangGraph Supervisor"]
-        RS["RAG Service<br/>hybrid + multi-query"]
+        RS["RAG Service<br/>hybrid BM25+dense"]
         SC["Event Scanner<br/>/scan"]
     end
     subgraph DL["Data Layer"]
@@ -98,26 +98,32 @@ flowchart TD
     route -- "general" --> general["general"] --> ENDg(("END"))
     diagnosis -- "normal" --> general2["general"] --> ENDg2(("END"))
     diagnosis -- "caution / urgent" --> manual["manual_lookup"]
-    manual -- "caution" --> wo["work_order"]
-    manual -- "urgent" --> safety["safety"]
-    manual -- "urgent" --> production["production"]
-    manual -- "urgent" --> maintenance["maintenance"]
+    manual --> parts["parts_check<br/>(MRO extension)"]
+    parts -- "caution" --> wo["work_order"]
+    parts -- "urgent" --> safety["safety"]
+    parts -- "urgent" --> production["production"]
+    parts -- "urgent" --> maintenance["maintenance"]
     safety --> merge["merge_perspectives"]
     production --> merge
     maintenance --> merge
-    merge --> wo
-    wo -- "urgent" --> approval[["approval\n(HITL interrupt)"]]
-    wo -- "caution" --> finalize["finalize"]
+    merge --> priority["priority_rule"]
+    priority --> wo
+    wo --> validate["validate_work_order"]
+    validate -- "urgent" --> approval[["approval\n(HITL interrupt)"]]
+    validate -- "caution" --> finalize["finalize"]
     approval --> finalize
     finalize --> ENDf(("END"))
 ```
-*Figure 2 — Nodes and edges map 1:1 to the real graph definition in `backend/agent/agent_service.py`*
+*Figure 2 — Nodes and edges map 1:1 to the real graph definition in `backend/agent/agent_service.py`
+(2026-09-29: added `parts_check`/`priority_rule`/`validate_work_order`, which a CP-M2 cross-review
+found missing from an earlier version of this diagram — the MRO extension's `parts_check` sits
+right after `manual_lookup`, before the urgent/caution branch, since both paths need it)*
 
 ### RAG · Harness
 
 | Component | Details |
 |---|---|
-| RAG retrieval | Hybrid BM25 (sparse) + dense-embedding search, with Multi-Query rewriting to expand each question from several angles. Embeddings: `intfloat/multilingual-e5-small`; vector store: Chroma. |
+| RAG retrieval | Hybrid BM25 (sparse) + dense-embedding search. Embeddings: `intfloat/multilingual-e5-small`; vector store: Chroma. (Multi-Query rewriting and a Self-RAG retrieval-necessity check were both removed 2026-09-23 — this corpus is small enough that neither added measurable value; see `docs/decisions.md`.) |
 | Faithfulness scoring | After generation, an LLM judge automatically scores how faithful the answer is to the retrieved context (guards against RAG's "plausible but unsupported answer" failure mode). |
 | Harness | A deterministic validation layer on every model input/output — regex-based PII checks (computational) combined with LLM-judge quality/faithfulness checks (inferential). |
 
@@ -320,9 +326,9 @@ racing an inject against a tick.
 
 | Item | Details |
 |---|---|
-| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. 99 run automatically in CI (`pytest tests/ --ignore=tests/test_rag_dedup.py`); 107 total. The gap is two opt-in suites excluded by default via pytest markers: a 40-case real-LLM golden-set eval (costs API tokens) and a 3-case `pytest-socket` offline-network proof (§11) that CI can't run since it has no cached embedding model to survive it — plus 2 tests needing the live embedding model, skipped only in CI's fast path via `--ignore`. |
+| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. 139 run automatically in CI (`pytest tests/ --ignore=tests/test_rag_dedup.py`) on every push, including the `pytest-socket` offline-network suite (§11) — an earlier version of this line excluded that suite from CI, citing a missing HF cache as the reason; a cross-review caught that the suite never actually touches the embedding path, so the real constraint was something else (a Docker-only hostname), verified not to break the suite on a bare CI runner before re-enabling it. 144 total, including a 40-case real-LLM golden-set eval kept opt-in (costs API tokens) and 2 tests needing the live embedding model, skipped only in CI's fast path via `--ignore`. |
 | Static analysis + CI | ruff and mypy run in GitHub Actions on every push/PR, scoped to the modules under active development — adopted specifically because the "vanished function" bug above is exactly what a type checker catches instantly and a test suite might not. |
-| Review-agent process | During development, used nine single-lane review subagents (security / code quality / interface / pipeline & model operations / docs / debugging / build & packaging / performance / test validity) instead of one general reviewer — reviewing code in the same context that wrote it lets defects straight through. That tooling was development-only and isn't part of the shipped repo. |
+| Review-agent process | During development, used nine single-lane review subagents (security / code quality / interface / pipeline & model operations / docs / debugging / build & packaging / performance / test validity) instead of one general reviewer — reviewing code in the same context that wrote it lets defects straight through. The agent definitions themselves are checked into `.claude/agents/` (2026-09-29 correction — an earlier version of this line claimed they weren't part of the shipped repo, which a cross-review caught as false by checking `git ls-files`). |
 | Cross-review checkpoints | For decisions where getting it wrong is expensive — the failure-risk model's suspiciously perfect first-pass metrics (§05), the priority-rule design that decides shutdown recommendations — I sent the exact code/data to an independent model for review before shipping, rather than self-certify. Both are logged in full in `docs/decisions.md`, including what the reviews actually found. |
 | Observability | LangSmith tracing, with traces anonymized using the same PII regexes before being sent. |
 
@@ -375,8 +381,12 @@ The predictive-maintenance core above answers "is this machine failing?" A real 
 (Maintenance, Repair, Operations) workflow also needs "do we have the part, and can we say
 so without pretending this is real inventory data?" — plus the two things a closed-network
 deployment actually needs before it can run there at all: proof that nothing leaks out, and
-a record of everything that happened. All numbers below are synthetic-data demos, disclosed
-as such in the UI and in `docs/design/parts_assumptions.md` — see §0-1 of
+a record of everything that happened. The parts master itself (part numbers, stock levels,
+lead times, the end-of-life date) is entirely synthetic, disclosed as such in the UI and in
+`docs/design/parts_assumptions.md` (2026-09-29 correction — an earlier version of this line
+said "all numbers below" are synthetic, which a cross-review caught as wrong: the demand
+forecast's replacement rates and its -5.0%/+3.5% backtest are computed from the real Nov–Dec
+2015 Azure PdM data, same as §05 above). See §0-1 of
 [mro-copilot-upgrade-plan.md](../mro-copilot-upgrade-plan.md) for why this is scoped as a
 separate extension rather than folded into the core numbers above.
 
@@ -385,8 +395,8 @@ separate extension rather than folded into the core numbers above.
 | Parts master + demand forecast | 5 synthetic parts, 30/90-day replacement forecast split into a preventive term and a failure term (see below), backtested against real Nov–Dec 2015 replacement counts: -5.0% to +3.5% error |
 | Inventory-risk dashboard | `GET /parts/inventory_risk`, flags shortfalls and distinguishes a genuine risk (lead time exceeds the horizon) from a normal reorder signal (it doesn't) |
 | Procurement urgency, kept separate from priority | A missing part doesn't inflate how urgent a diagnosis is — it's its own line on the work order, decided by the same deterministic function the background scanner uses |
-| Offline mode | Destination-based allowlist (not a per-module switch); proven with `pytest-socket` against the real `notify.py`/`cmms_client.py` code paths, not mocks |
-| Audit log | Every LLM call, tool call, approval/rejection, external push, and offline-blocked call, correlated by thread ID |
+| Offline mode | Destination-based allowlist enforced at runtime (not just in tests) — the app refuses to start on an unsafe provider/endpoint combination, and forces `HF_HUB_OFFLINE`/disables LangChain auto-tracing before anything downstream can read the old values. Proven with `pytest-socket` against the real `notify.py`/`cmms_client.py` code paths (not mocks), running in CI on every push, not just locally |
+| Audit log | Every LLM call, tool call, approval/rejection, external push, and offline-blocked call, correlated by thread ID, with a status accurately reflecting what actually happened (sent/skipped/blocked/failed) rather than "no exception raised" |
 
 <details>
 <summary><strong>WAR STORY · A statistics bug that only showed up as the wrong kind of wrong, twice</strong></summary>
@@ -451,6 +461,30 @@ assessment function had never taken a `thread_id` parameter, because at the time
 that connection point it didn't seem load-bearing enough to plumb through. Querying one real
 scenario end to end, rather than trusting that six connected call sites meant six usable log
 lines, is what actually surfaced it.
+</details>
+
+<details>
+<summary><strong>WAR STORY · "Proven with tests" and "enforced" turned out to be two different claims</strong></summary>
+
+Before writing up this section, I sent the whole M2 milestone out for cross-review rather
+than self-certifying it (five review agents in parallel, one per concern area, plus an
+independent pass reconciling their findings against the actual code). It found that the
+offline guard's own DoD — "zero disallowed network calls, proven not assumed" — was true of
+what the tests checked, but the runtime code had no equivalent enforcement: `LLM_PROVIDER=
+Ollama` (one capital letter off) silently fell through every case-sensitive comparison and
+resolved to the real OpenAI API instead of Ollama; `cmms_client.py` never referenced the
+allowlist at all, so a misconfigured `CMMS_MCP_URL` would go out unblocked; and
+`HF_HUB_OFFLINE` was never actually set anywhere. Separately, the audit log's "every call is
+recorded" claim was true of the call sites that existed, but `cmms_client.push_work_order()`
+returned the same `None` whether it sent successfully, was never configured, or was blocked
+— and the code logging the result treated "no exception" as "success" in all three cases. I
+reproduced all of it before fixing anything (each bug independently, against the actual
+running container), then fixed the runtime enforcement, the audit accuracy, and the specific
+doc claims this section is now making — including finding two more real errors *in this case
+study itself* while writing the correction (Multi-Query rewriting, removed from the code on
+2026-09-23, was still advertised in eight places across four docs; and this section had
+claimed "all numbers below are synthetic" when the demand forecast's backtest uses real
+2015 data, same as §05). Full findings, verification, and fix log in `docs/decisions.md`.
 </details>
 
 ---

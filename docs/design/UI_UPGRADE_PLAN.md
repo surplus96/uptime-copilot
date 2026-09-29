@@ -53,8 +53,12 @@ genuinely still-open items remain listed.
   for "never scanned" vs. "scanned and clean", severity badge legend, and confirmation
   messages (with counts) on 완료 처리 / 삭제.
 - Theme: `.streamlit/config.toml` sets `primaryColor`, `backgroundColor`,
-  `secondaryBackgroundColor`, `textColor`, and `font` (Hanwha Orange, Pantone 1585 C —
-  re-verify against an official brand guide if this ships externally).
+  `secondaryBackgroundColor`, `textColor`, and `font` (a warm orange accent, `#F96D17` —
+  2026-09-29 CP-M2 교차 검토 지적: 예전 표기가 실제 기업 브랜드 컬러명("Hanwha
+  Orange, Pantone 1585 C")을 그대로 인용해서, 이 프로젝트가 "공개 자료에서 착안한
+  독립 프로젝트"라는 원칙과 어긋날 위험이 있었다 - 실제 `config.toml`은 헥스값만
+  쓰고 그 이름은 이 문서에만 있었으므로, 색상 자체는 그대로 두고 문서의 서술만
+  중립적으로 정정했다).
 - Discarding a pending HITL approval now requires an explicit confirmation checkbox
   before "새 진단 시작" is enabled.
 - Approval/rejection outcome (승인됨/반려됨) is now surfaced directly above the work-order

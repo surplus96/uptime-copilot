@@ -14,6 +14,11 @@ MRO(부품·재고·조달) 계층과 폐쇄망 보안 운영(오프라인 모�
 
 > 📄 **[포트폴리오 케이스 스터디 →](docs/PORTFOLIO_KOR.md)** — 아키텍처 다이어그램, 핵심 로직, 주요 엔지니어링 결정.
 
+> **한화의 TOMMS/HUMS 공개 자료에서 착안한 독립 프로젝트**입니다
+> ([mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md) §0-1에서 비교 목적으로만 언급) —
+> 한화와 제휴·후원 관계가 없으며 한화를 위해 만들어진 것도 아닙니다. 이 저장소의 모든
+> 부품번호·재고·기타 MRO 도메인 데이터는 합성값입니다(아래 MRO 확장 섹션 참고).
+
 ## MRO 확장 (부품·수요예측·재고위험·오프라인 모드·감사 로그)
 
 위 예지보전 코어 위에 부품 마스터, 수요 예측, 재고 위험 대시보드를 얹고, 기존 진단
@@ -64,7 +69,7 @@ uptime-copilot/
 ├── backend/                FastAPI 백엔드
 │   ├── main.py               진입점 (uvicorn main:app)
 │   ├── core/                  Harness(입출력 검증) + 시스템 프롬프트
-│   ├── rag/                    RAG 파이프라인(하이브리드 검색 + Multi-Query) + docs/
+│   ├── rag/                    RAG 파이프라인(하이브리드 BM25+Dense 검색) + docs/
 │   │                             (`pump_manual.py`는 에이전트가 직접 읽는 정적 조회용 dict —
 │   │                             RAG로 검색하지 않음. "아키텍처 원칙" 참고)
 │   ├── agent/                  LangGraph 멀티에이전트 그래프(라우팅 + HITL + 이벤트 스캐너)
@@ -349,7 +354,9 @@ pytest tests/eval/test_golden.py -m eval -v -s
 
 - **Harness**: 각 모델 호출 전후로 입출력을 검증하는 결정론적 계층(`core/harness.py`) —
   정규식 기반 PII 체크(계산적)와 LLM-as-judge 체크(추론적)를 함께 사용.
-- **RAG**: Multi-Query 재작성 + 하이브리드(BM25 + Dense) 검색, 자동 Faithfulness 채점.
+- **RAG**: 하이브리드(BM25 + Dense) 검색, 자동 Faithfulness 채점. Multi-Query
+  재작성과 Self-RAG 검색 필요성 판단은 2026-09-23에 제거됨 - 이 코퍼스 규모에서는
+  둘 다 측정 가능한 실익이 없었음(`docs/decisions.md` 참고).
 - **Agent**: LangGraph `StateGraph` 기반. 질문을 진단 / 정비 일정 / 일반 문의 분기로 라우팅.
   진단은 3단계 긴급도 모델을 사용: 일반(normal) / 주의(caution — Z-score 텔레메트리 이상,
   확정 고장 아님) / 긴급(urgent — 실제 로그된 고장 기록). 긴급 건만 3개 관점 병렬 평가

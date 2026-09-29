@@ -14,6 +14,11 @@ security operations (offline mode, audit log) — see the MRO Extension section 
 
 > 📄 **[Portfolio case study →](docs/PORTFOLIO.md)** — architecture diagrams, core logic, and key engineering decisions.
 
+> **Independent project inspired by Hanwha's public materials on TOMMS/HUMS** (predictive-maintenance
+> program names referenced for comparison in [mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md) §0-1) —
+> not affiliated with, endorsed by, or built for Hanwha. All part numbers, stock levels, and other
+> MRO-domain data in this repo are synthetic (see the MRO Extension section below).
+
 ## MRO Extension (parts, demand forecast, inventory risk, offline mode, audit log)
 
 Built on top of the predictive-maintenance core above: a parts master, a demand forecast,
@@ -69,7 +74,7 @@ uptime-copilot/
 ├── backend/                FastAPI backend
 │   ├── main.py               Entry point (uvicorn main:app)
 │   ├── core/                  Harness (input/output validation) + system prompt
-│   ├── rag/                    RAG pipeline (hybrid search + Multi-Query) + docs/
+│   ├── rag/                    RAG pipeline (hybrid BM25+dense search) + docs/
 │   │                             (`pump_manual.py` is a static lookup dict the agent reads
 │   │                             directly — not retrieved via RAG; see Architecture Principles)
 │   ├── agent/                  LangGraph multi-agent graph (routing + HITL + event scanner)
@@ -369,8 +374,9 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 - **Harness**: A deterministic layer that validates model input/output before and after
   each call (`core/harness.py`) — combining regex-based PII checks (computational) with
   LLM-as-judge checks (inferential).
-- **RAG**: Multi-Query rewriting + hybrid (BM25 + Dense) retrieval, with automatic
-  Faithfulness scoring.
+- **RAG**: Hybrid (BM25 + Dense) retrieval, with automatic Faithfulness scoring. Multi-Query
+  rewriting and a Self-RAG retrieval-necessity check were both removed 2026-09-23 — this
+  corpus is small enough that they added no measurable value (see `docs/decisions.md`).
 - **Agent**: Built on LangGraph's `StateGraph`. Routes each question into
   diagnosis / maintenance-schedule / general-inquiry branches. Diagnoses use a
   three-tier severity model: 일반(normal) / 주의(caution — a Z-score telemetry
