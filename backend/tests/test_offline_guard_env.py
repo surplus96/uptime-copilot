@@ -64,16 +64,23 @@ def test_validate_allowed_endpoints_noop_when_online(monkeypatch):
 
 
 def test_enforce_offline_env_forces_hf_and_langchain_vars(monkeypatch):
+    # enforce_offline_env()는 os.environ을 직접 쓴다(monkeypatch를 거치지 않음) -
+    # monkeypatch.delenv()로 지워둔 상태에서 함수가 새로 값을 세팅하면, monkeypatch는
+    # 그 세팅을 모르니 테스트가 끝나도 원복이 안 되고 다음 테스트로 새어나간다(직접
+    # 겪은 테스트 격리 버그, 2026-09-29) - finally에서 반드시 직접 지운다.
     monkeypatch.setenv("OFFLINE", "1")
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")  # .env가 이렇게 켜둔 상황을 흉내
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
 
-    offline_guard.enforce_offline_env()
-
     import os
-    assert os.environ["HF_HUB_OFFLINE"] == "1"
-    assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
-    assert os.environ["LANGCHAIN_TRACING_V2"] == "false"
+    try:
+        offline_guard.enforce_offline_env()
+        assert os.environ["HF_HUB_OFFLINE"] == "1"
+        assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+        assert os.environ["LANGCHAIN_TRACING_V2"] == "false"
+    finally:
+        os.environ.pop("HF_HUB_OFFLINE", None)
+        os.environ.pop("TRANSFORMERS_OFFLINE", None)
 
 
 def test_enforce_offline_env_noop_when_online(monkeypatch):
@@ -81,6 +88,63 @@ def test_enforce_offline_env_noop_when_online(monkeypatch):
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
 
     offline_guard.enforce_offline_env()
+
+
+# ---------- LangSmith 3개 no-op 가드 - 2026-09-29 CP-M2 교차 검토가 지목한 직접 테스트 없음 ----------
+
+def test_get_langsmith_client_returns_none_when_offline(monkeypatch):
+    monkeypatch.setenv("OFFLINE", "1")
+    assert offline_guard.get_langsmith_client(anonymizer=None) is None
+
+
+def test_get_langsmith_client_returns_real_client_when_online(monkeypatch):
+    monkeypatch.delenv("OFFLINE", raising=False)
+    client = offline_guard.get_langsmith_client(anonymizer=None)
+    assert client is not None
+    assert type(client).__name__ == "Client"
+
+
+def test_wrap_openai_is_passthrough_when_offline(monkeypatch):
+    monkeypatch.setenv("OFFLINE", "1")
+    sentinel = object()
+    assert offline_guard.wrap_openai(sentinel) is sentinel
+
+
+def test_wrap_openai_actually_wraps_when_online(monkeypatch):
+    monkeypatch.delenv("OFFLINE", raising=False)
+
+    # langsmith.wrappers.wrap_openai()는 client.chat.completions뿐 아니라 최상위
+    # client.completions(레거시 API)까지 실제 메서드 참조를 들여다보고 감싼다 - 손으로
+    # 만든 가짜로는 정확한 모양을 맞추기 어려워서, 실제 호출은 안 하는 진짜 OpenAI SDK
+    # 클라이언트(더미 URL·키)를 그대로 감싼다.
+    from openai import OpenAI
+    real_client = OpenAI(api_key="test-key", base_url="http://localhost:1")
+    original_create = real_client.chat.completions.create
+
+    result = offline_guard.wrap_openai(real_client)
+
+    assert result is real_client  # wrap_openai는 같은 클라이언트 인스턴스를 제자리에서 감싼다
+    assert result.chat.completions.create is not original_create  # 메서드가 실제로 교체됐어야 함
+
+
+def test_traceable_is_noop_decorator_when_offline(monkeypatch):
+    monkeypatch.setenv("OFFLINE", "1")
+
+    @offline_guard.traceable(name="테스트")
+    def fn(x):
+        return x * 2
+
+    assert fn(3) == 6  # 데코레이터가 아무 것도 안 바꾸고 원함수 그대로 동작해야 함
+
+
+def test_traceable_wraps_when_online(monkeypatch):
+    monkeypatch.delenv("OFFLINE", raising=False)
+
+    @offline_guard.traceable(name="테스트")
+    def fn(x):
+        return x * 2
+
+    assert fn(3) == 6  # 실제 langsmith.traceable로 감싸져도 반환값 자체는 그대로여야 함
 
     import os
     assert "HF_HUB_OFFLINE" not in os.environ

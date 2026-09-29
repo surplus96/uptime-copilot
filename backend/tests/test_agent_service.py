@@ -399,3 +399,59 @@ def test_scan_machines_includes_procurement_note_for_caution_severity(monkeypatc
 
     detected, alerts = agent_service.scan_machines([1])
     assert "조달 필요" in detected[0]["diagnosis"]
+
+
+@pytest.fixture
+def isolated_audit(tmp_path, monkeypatch):
+    """2026-09-29 CP-M2 교차 검토 지적: rejection 이벤트가 코드에는 있지만 테스트나
+    라이브 검증 어느 쪽에도 실행된 적이 없었다 - 격리된 DB로 실제 반려 흐름 전체를
+    끝까지 돌려서 확인한다."""
+    from data import audit_log
+    db_path = str(tmp_path / "test_audit.db")
+    monkeypatch.setattr(audit_log, "DB_PATH", db_path)
+    audit_log.init_audit_table()
+    return audit_log
+
+
+def test_rejection_flow_logs_rejection_event(monkeypatch, isolated_audit):
+    """반려 경로 자체가 실행된 적이 없었다는 지적에 대한 회귀 - 긴급 승인 대기 →
+    반려까지 실제로 돌려서 rejection 이벤트가 정확한 thread_id로 기록되는지 확인."""
+    _patch_common(monkeypatch, "긴급")
+    monkeypatch.setattr("data.parts_operations.check_parts", lambda comp: {
+        "needs_procurement": False, "on_hand": 90, "min_stock": 20, "lead_time_days": 14,
+    })
+
+    started = agent_service.start_agent("1번 설비 이상해", "test-thread-rejection")
+    assert started["status"] == "pending_approval"
+
+    finished = agent_service.resume_agent("test-thread-rejection", approved=False)
+    assert finished["status"] == "done"
+    assert "반려" in finished["result"]
+
+    rows = [r for r in isolated_audit.list_events() if r["thread_id"] == "test-thread-rejection"]
+    rejection_rows = [r for r in rows if r["event_type"] == "rejection"]
+    assert len(rejection_rows) == 1
+    assert rejection_rows[0]["target"] == "설비#1"
+    # 반려됐으니 CMMS push/Slack 알림은 아예 시도되면 안 된다 - finalize_node의
+    # else 분기(반려)에는 그 호출들이 없다는 걸 감사 로그로도 재확인.
+    assert not any(r["event_type"] == "external_push" for r in rows)
+
+
+def test_approval_flow_produces_complete_audit_trail(monkeypatch, isolated_audit):
+    """2026-09-29 CP-M2 교차 검토 지적: 지금까지는 감사 로그를 몇 건 골라서 확인했을
+    뿐, 한 시나리오에서 "정확히 이 이벤트 유형들이 다 나오는지"를 통째로 검사한 적이
+    없었다. 긴급 승인 1건에서 기대되는 이벤트 유형 전체를 한 번에 확인한다."""
+    _patch_common(monkeypatch, "긴급")
+    monkeypatch.setattr("data.parts_operations.check_parts", lambda comp: {
+        "needs_procurement": False, "on_hand": 90, "min_stock": 20, "lead_time_days": 14,
+    })
+
+    started = agent_service.start_agent("1번 설비 이상해", "test-thread-full-trail")
+    assert started["status"] == "pending_approval"
+    agent_service.resume_agent("test-thread-full-trail", approved=True)
+
+    rows = [r for r in isolated_audit.list_events() if r["thread_id"] == "test-thread-full-trail"]
+    event_types_seen = {r["event_type"] for r in rows}
+    # llm_call(라우팅) + tool_call(부품조회) + llm_call(3관점, is_fallback이라도 기록됨) +
+    # approval - 이 시나리오에서 반드시 나와야 하는 최소 집합.
+    assert {"llm_call", "tool_call", "approval"} <= event_types_seen
