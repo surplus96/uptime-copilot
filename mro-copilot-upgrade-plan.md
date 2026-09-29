@@ -413,9 +413,22 @@ MRO-FR-07 전용 테스트는 **LLM 호출만 가짜로 두고(비결정성·비
 | 감사 로그 + 조회 API + UI 탭 | MRO-FR-08 — **완료(2026-09-28)**. `data/audit_log.py` 신규(§6-3 필드 그대로: ts/thread_id/event_type/target/summary/result/provider). `SupervisorState.thread_id` 추가(`start_agent()`가 채움)로 그래프 전 구간이 같은 스레드ID로 상관된다. 연결 지점 6곳: `route_node`(llm_call), `_assess_perspective`(llm_call, thread_id 파라미터 추가해 3관점 노드에서 전달), `parts_check_node`(tool_call), `finalize_node`(approval/rejection/external_push), `notify.send_alert()`(blocked_by_offline, FR-07에서 미룬 자리). `GET /audit_log`(limit/event_type 필터) + Streamlit 5번째 탭. 라이브 검증: 실제 긴급→승인 시나리오 1건을 스레드ID로 필터링해 라우팅→부품조회→3관점→승인→CMMS push 전체 흐름이 순서대로 조회됨을 확인. `tests/test_audit_log.py` 신규 6건(임시 DB 격리), `ORDER BY` 변이 테스트로 방어력 확인 |
 | README·케이스 스터디 재작성, 30초 데모 GIF | 공개 — **문서 재작성 완료(2026-09-28)**, GIF는 미완료. `README.md`/`README_KOR.md`에 태그라인 반영 + MRO 확장 섹션에 오프라인 모드·감사 로그 추가, API/환경변수 표에 빠져있던 `/parts/inventory_risk`·`/audit_log`·`OFFLINE` 추가. `docs/PORTFOLIO.md`/`PORTFOLIO_KOR.md`에 §11(MRO 확장) 신규 - 실전 사례 5건(수요예측 통계 버그, 공유 RNG 우연, 문서-vs-제품 구분, pytest-socket 함정, 감사로그 thread_id 갭). 헤드라인·§08의 오래된 "76개" 테스트 수치를 실제(CI 99개/전체 107개, `pytest --collect-only`로 직접 확인)로, §09의 폐기된 "77.5%" 단일 실행 비교를 README와 같은 교정된 5회 실측치로 정정. **30초 데모 GIF는 화면 녹화가 필요해 이번 작업 범위(코드/문서 편집) 밖 - 사용자가 직접 촬영 필요**(§10 참고: 열화→위험도 상승→작업지시서→승인→CMMS→감사 로그 흐름) |
 
-**DoD**: 1-2의 완료 정의 6개 **전부 충족**(2026-09-28) → **SpecGuard 착수 가능 (10/26)** — 단, §10 포트폴리오 재구성의 데모 GIF는 6개 DoD 항목에는 포함되지 않지만 이 표의 "공개" 산출물 자체를 완전히 닫으려면 별도로 필요
+**DoD**: 2026-09-28에 "1-2의 완료 정의 6개 전부 충족"이라고 여기 적었으나, **CP-M2
+교차 검토(2026-09-29)가 ④⑤⑥ 미충족을 실제로 재현**했다 - 오프라인 가드는 테스트로만
+증명됐지 런타임에 강제되지 않았고(`LLM_PROVIDER=Ollama` 오타 하나로 실제 OpenAI API
+호출 재현), 감사 로그는 CMMS 미설정 상태에서도 "성공"으로 거짓 기록했으며, 문서에는
+자기 자신과 모순되는 주장 8건이 있었다. 5단계 리미디에이션(런타임 강제 → 감사 로그
+정확성 → 테스트 → 문서 8건 → 화면 5건, 각 단계 CI 그린 확인)을 전부 거친 뒤
+**2026-09-29 재확인**: ④⑤⑥ 전부 실제로 충족됨(라이브 검증 포함) → **SpecGuard 착수
+가능 (10/26)**. 단, §10 포트폴리오 재구성의 데모 GIF는 6개 DoD 항목에는 포함되지
+않지만 이 표의 "공개" 산출물 자체를 완전히 닫으려면 별도로 필요. 상세 검토 결과·
+리미디에이션 기록은 `docs/decisions.md` "CP-M2" 항목 참고.
 
-🔶 **CP-M2**: 공개 직전 교차 검토. 지적 사항이 해결되어야 SpecGuard로 넘어간다.
+🔶 **CP-M2**: 공개 직전 교차 검토 - **완료(2026-09-29), 지적 사항 전부 조치**.
+남은 낮은 우선순위 항목(소켓 목적지 부분집합 검사, DB 락 시뮬레이션 테스트)은
+의도적으로 미룸(`docs/decisions.md` 참고) - 공개를 막을 정도는 아니라고 판단.
+**보안 조치 필요**: 교차 검토가 이전 세션 로그에서 Slack 웹훅 URL 노출을 발견함 -
+사용자가 직접 재발급해야 함(이 저장소 작업으로는 해결 불가).
 
 ### 선택 확장 (SpecGuard 이후)
 
