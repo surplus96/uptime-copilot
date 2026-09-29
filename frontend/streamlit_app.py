@@ -127,6 +127,8 @@ with tab1:
         st.session_state.agent_messages = []
     if "pending_approval" not in st.session_state:
         st.session_state.pending_approval = None
+    if "timeout_recovery" not in st.session_state:
+        st.session_state.timeout_recovery = None
 
     # 이 사이드바 컨트롤은 st.sidebar가 전역이라 다른 탭을 보고 있을 때도 그대로 뜬다 -
     # 어느 탭 소속인지 라벨로 명시한다 (interface-reviewer 지적, 2026-09-18).
@@ -140,6 +142,7 @@ with tab1:
         st.session_state.agent_thread_id = str(uuid.uuid4())
         st.session_state.agent_messages = []
         st.session_state.pending_approval = None
+        st.session_state.timeout_recovery = None
         st.rerun()
 
     if not st.session_state.agent_messages and not st.session_state.pending_approval:
@@ -259,6 +262,49 @@ with tab1:
                 _resume(True)
             if col2.button("반려", use_container_width=True):
                 _resume(False)
+    elif st.session_state.timeout_recovery:
+        # session_state 기반이라 prompt와 무관하게 리런에서도 계속 렌더링된다 -
+        # 위 except 블록의 주석 참고.
+        with st.chat_message("assistant", avatar=CHAT_AVATARS["assistant"]), st.container(border=True):
+            recovery = st.session_state.timeout_recovery
+            st.warning(
+                f"응답을 받지 못했습니다: {recovery['error_msg']}\n\n"
+                "서버에서는 계속 처리 중이었을 수 있습니다. 아래 버튼으로 이 설비 요청이 "
+                "실제로 처리됐는지 확인하세요."
+            )
+            col1, col2 = st.columns(2)
+            if col1.button("이 요청 상태 확인", use_container_width=True):
+                try:
+                    check = requests.get(
+                        f"{BACKEND_URL}/agent/status/{recovery['thread_id']}", timeout=10
+                    ).json()
+                except requests.exceptions.RequestException as e:
+                    st.error(f"상태 확인 요청 자체가 실패했습니다: {_extract_error_message(e)}")
+                    check = {"status": "not_found"}
+                if check.get("status") == "pending_approval":
+                    st.session_state.pending_approval = {
+                        "message": check["message"],
+                        "work_order": check.get("work_order"),
+                        "perspectives": check.get("perspectives", []),
+                    }
+                    st.session_state.timeout_recovery = None
+                    st.rerun()
+                elif check.get("status") == "done":
+                    # 2026-09-29 수정: 긴급이 아닌 요청(일반/주의)은 애초에 승인
+                    # 대기를 안 거치므로, 이미 끝났는데도 "not_found"로만 보이던
+                    # 문제 - check_pending()이 이제 완료 결과도 복구해준다.
+                    st.session_state.agent_messages.append({
+                        "role": "assistant",
+                        "content": check["result"],
+                        "work_order": check.get("work_order"),
+                    })
+                    st.session_state.timeout_recovery = None
+                    st.rerun()
+                else:
+                    st.info("아직 처리 중입니다. 잠시 후 다시 눌러보세요.")
+            if col2.button("포기하고 새로 시작", use_container_width=True):
+                st.session_state.timeout_recovery = None
+                st.rerun()
     else:
         prompt = st.chat_input("설비 번호와 증상을 입력하세요 (예: 12번 설비에서 오류 났는데 뭐가 문제야?)")
         if not prompt and "pending_example" in st.session_state:
@@ -286,27 +332,18 @@ with tab1:
                     res.raise_for_status()
                     data = res.json()
                 except requests.exceptions.RequestException as e:
-                    st.warning(
-                        f"응답을 받지 못했습니다: {_extract_error_message(e)}\n\n"
-                        "서버에서는 계속 처리 중이었을 수 있습니다. 아래 버튼으로 이 설비 요청이 "
-                        "실제로 처리됐는지 확인하세요."
-                    )
-                    if st.button("이 요청 상태 확인"):
-                        try:
-                            check = requests.get(f"{BACKEND_URL}/agent/status/{thread_id}", timeout=10).json()
-                        except requests.exceptions.RequestException:
-                            check = {"status": "not_found"}
-                        if check.get("status") == "pending_approval":
-                            st.session_state.pending_approval = {
-                                "message": check["message"],
-                                "work_order": check.get("work_order"),
-                                "perspectives": check.get("perspectives", []),
-                            }
-                            st.rerun()
-                        else:
-                            st.info("아직 대기 중인 작업지시서가 없습니다. 잠시 후 다시 확인해보세요.")
+                    # 2026-09-29 실사용 중 발견한 버그: 이 자리에서 바로 경고+버튼을
+                    # 그렸었는데, 이 블록 전체가 st.chat_input()의 반환값(prompt)에
+                    # 의존하고 있어서 - prompt는 메시지를 보낸 바로 그 리런에만 값이
+                    # 있고 그다음 리런(버튼 클릭 포함)부터는 다시 비어있다. 그래서
+                    # 버튼을 누르면 화면이 다시 그려지면서 이 블록 자체가 사라져
+                    # 클릭이 처리될 기회조차 없었다. session_state로 옮겨서 리런에도
+                    # 살아남게 한다 - 실제 렌더링은 아래 elif 블록에서.
+                    st.session_state.timeout_recovery = {
+                        "thread_id": thread_id,
+                        "error_msg": _extract_error_message(e),
+                    }
                     request_ok = False
-
 
             if request_ok:
                 if data["status"] == "pending_approval":
@@ -320,7 +357,8 @@ with tab1:
                     st.session_state.agent_messages.append(
                         {"role": "assistant", "content": data["result"], "work_order": data.get("work_order")}
                     )
-                st.rerun()
+            st.rerun()  # 성공/실패 어느 쪽이든 리런해서 pending_approval/timeout_recovery
+                        # 분기가 각자의 지속 상태로 정상 렌더링되게 한다
 
 
 # ---------- 매뉴얼 검색 모드 ----------

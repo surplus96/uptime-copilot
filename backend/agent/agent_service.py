@@ -736,12 +736,20 @@ def resume_agent(thread_id: str, approved: bool) -> dict:
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}
 
 def check_pending(thread_id: str) -> dict | None:
-    """타임아웃 등으로 잃어버린 pending_approval을 thread_id로 복구 조회한다.
-    app.invoke를 다시 하지 않고 체크포인트 상태만 읽는다 - 재실행/중복 side-effect 없음."""
+    """타임아웃 등으로 잃어버린 응답을 thread_id로 복구 조회한다. app.invoke를 다시
+    하지 않고 체크포인트 상태만 읽는다 - 재실행/중복 side-effect 없음.
+
+    2026-09-29 실사용 중 발견: state.next가 비어있으면(interrupt 대기 중이 아니면)
+    무조건 None을 반환했다 - 긴급이 아닌 요청(일반/주의)은 애초에 interrupt를 안
+    거치므로, 타임아웃 직후 실제로는 이미 성공적으로 끝났는데도 "not_found"로만
+    보였다. 그래프가 끝까지 실행됐으면 최종 result도 같이 복구한다."""
     config = {"configurable": {"thread_id": thread_id}}
     state = app.get_state(config)
     if not state.next:  # interrupt 대기 중이 아니면 next가 비어있음
-        return None
+        result = state.values.get("result") if state.values else None
+        if result is None:
+            return None  # 이 thread_id로 실행된 적이 아예 없음
+        return {"status": "done", "result": result, "work_order": state.values.get("work_order")}
     for task in state.tasks:
         for pending in task.interrupts:
             payload = pending.value

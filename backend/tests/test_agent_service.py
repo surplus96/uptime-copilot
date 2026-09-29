@@ -455,3 +455,35 @@ def test_approval_flow_produces_complete_audit_trail(monkeypatch, isolated_audit
     # llm_call(라우팅) + tool_call(부품조회) + llm_call(3관점, is_fallback이라도 기록됨) +
     # approval - 이 시나리오에서 반드시 나와야 하는 최소 집합.
     assert {"llm_call", "tool_call", "approval"} <= event_types_seen
+
+
+def test_check_pending_recovers_pending_approval(monkeypatch):
+    """2026-09-29 실사용 중 발견: 프론트엔드가 응답 타임아웃 후 이 함수로 복구를
+    시도하는데, 정작 이 함수 자체는 테스트가 하나도 없었다."""
+    _patch_common(monkeypatch, "긴급")
+    started = agent_service.start_agent("1번 설비 이상해", "test-thread-check-pending-1")
+    assert started["status"] == "pending_approval"
+
+    recovered = agent_service.check_pending("test-thread-check-pending-1")
+    assert recovered is not None
+    assert recovered["status"] == "pending_approval"
+    assert recovered["work_order"] == started["work_order"]
+
+
+def test_check_pending_recovers_completed_non_urgent_request(monkeypatch):
+    """2026-09-29 실제로 겪은 버그: 긴급이 아닌 요청(일반/주의)은 interrupt를 안
+    거치고 바로 끝나므로, 응답이 타임아웃돼도 사실은 이미 성공적으로 완료된
+    상태다. 예전 check_pending()은 state.next가 비어있으면 무조건 None을 반환해서
+    이 경우를 "not_found"로 잘못 보고했다."""
+    _patch_common(monkeypatch, "일반")
+    finished = agent_service.start_agent("1번 설비 이상해", "test-thread-check-pending-2")
+    assert finished["status"] == "done"
+
+    recovered = agent_service.check_pending("test-thread-check-pending-2")
+    assert recovered is not None
+    assert recovered["status"] == "done"
+    assert recovered["result"] == finished["result"]
+
+
+def test_check_pending_returns_none_for_unknown_thread():
+    assert agent_service.check_pending("thread-that-never-ran") is None
