@@ -59,3 +59,52 @@ def test_log_event_swallows_missing_table_error(audit_db, monkeypatch, tmp_path)
     없는 상태(예: init 실행 전 레이스)에서도 예외를 던지지 않아야 한다."""
     monkeypatch.setattr(audit_log, "DB_PATH", str(tmp_path / "no_table.db"))
     audit_db.log_event("llm_call", summary="테이블 없음")  # 예외 없이 조용히 무시돼야 함
+
+
+def test_log_event_swallows_missing_table_error_and_warns(audit_db, monkeypatch, tmp_path, caplog):
+    """2026-09-29 CP-M2 교차 검토 지적: 예전엔 OperationalError만 잡고 완전히 조용히
+    버렸다 - DB에 못 적어도 최소한 경고 로그는 남아야 나중에 "몇 건이 누락됐는지"를
+    추적할 수 있다."""
+    import logging
+    monkeypatch.setattr(audit_log, "DB_PATH", str(tmp_path / "no_table.db"))
+    with caplog.at_level(logging.WARNING):
+        audit_db.log_event("llm_call", summary="테이블 없음")
+    assert "감사 로그 기록 실패" in caplog.text
+
+
+def test_list_events_filters_by_thread_id(audit_db):
+    audit_db.log_event("llm_call", thread_id="t1", summary="a")
+    audit_db.log_event("llm_call", thread_id="t2", summary="b")
+    rows = audit_db.list_events(thread_id="t1")
+    assert len(rows) == 1
+    assert rows[0]["summary"] == "a"
+
+
+def test_list_events_filters_by_time_range(audit_db):
+    audit_db.log_event("llm_call", summary="이른 시각")
+    early_ts = audit_db.list_events()[0]["ts"]
+    audit_db.log_event("llm_call", summary="늦은 시각")
+
+    rows = audit_db.list_events(since=early_ts)
+    assert len(rows) == 2  # since는 이상(>=) 포함
+    rows = audit_db.list_events(until="1999-01-01T00:00:00")
+    assert len(rows) == 0
+
+
+def test_list_events_caps_limit_to_max(audit_db, monkeypatch):
+    monkeypatch.setattr(audit_log, "MAX_LIMIT", 3)
+    for i in range(5):
+        audit_db.log_event("llm_call", summary=str(i))
+    assert len(audit_db.list_events(limit=1000)) == 3
+
+
+def test_init_audit_table_creates_indexes(audit_db):
+    """2026-09-29 CP-M2 교차 검토 지적: thread_id/event_type/ts로 자주 필터링하는데
+    인덱스가 없었다 - 실제로 생성되는지 확인."""
+    import sqlite3
+    conn = sqlite3.connect(audit_log.DB_PATH)
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    conn.close()
+    assert "idx_audit_log_thread_id" in names
+    assert "idx_audit_log_event_type" in names
+    assert "idx_audit_log_ts" in names

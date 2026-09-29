@@ -30,9 +30,14 @@ def _format_for_slack(text: str) -> str:
     return text
 
 
-def send_alert(text: str) -> None:
+def send_alert(text: str, *, thread_id: str | None = None) -> None:
+    """2026-09-29 CP-M2 교차 검토 지적: 오프라인 차단만 감사에 남고 실제 전송의
+    성공/실패는 전혀 기록되지 않았다 - 이제 모든 결과 분기를 기록한다. thread_id는
+    선택값(호출부 대부분은 특정 승인 건과 무관한 배치 스캔이라 없음 - finalize_node만
+    실제 값을 넘긴다)."""
     if offline_guard.is_offline():
-        audit_log.log_event("blocked_by_offline", target="Slack", summary="오프라인 - 웹훅 스킵", result="차단")
+        audit_log.log_event("blocked_by_offline", thread_id=thread_id, target="Slack",
+                             summary="오프라인 - 웹훅 스킵", result="차단")
         return
     if not SLACK_WEBHOOK_URL:
         return
@@ -40,8 +45,12 @@ def send_alert(text: str) -> None:
     try:
         response = requests.post(SLACK_WEBHOOK_URL, json={"text": _format_for_slack(text)}, timeout=5)
         response.raise_for_status()
+        audit_log.log_event("external_push", thread_id=thread_id, target="Slack",
+                             summary="Slack 알림 전송", result="성공")
     except requests.exceptions.RequestException as e:
         # webhook URL 자체가 비밀키다 - requests의 예외 메시지는 요청 URL을 그대로
         # 포함하므로, str(e)를 절대 로그에 남기지 않는다(security-reviewer 지적, 2026-09-18).
         status = getattr(getattr(e, "response", None), "status_code", None)
         logger.error(f"[알림 실패] Slack webhook 호출 실패: {type(e).__name__}" + (f" (status={status})" if status else ""))
+        audit_log.log_event("external_push", thread_id=thread_id, target="Slack",
+                             summary="Slack 알림 전송", result="실패")

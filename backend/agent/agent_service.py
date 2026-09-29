@@ -112,29 +112,37 @@ def _mentions_schedule_request(message: str) -> bool:
 
 
 def route_node(state: SupervisorState) -> dict:
-    completion = llm_provider.parse_with_retry(
-        client,
-        model=MODEL,
-        reasoning_effort="none",
-        messages=[
-            {"role": "system", "content": (
-                "사용자 문의를 아래 세 카테고리 중 하나로 분류하고, 언급된 설비 번호가 있으면 "
-                "함께 추출하세요(없으면 machine_id는 null).\n"
-                "- 오류_진단: 특정 설비 번호의 오류/증상에 대한 원인·조치 문의\n"
-                "- 정비_일정: 다음 점검일 문의\n"
-                "- 일반_문의: 그 외 일반적인 질문"
-            )},
-            {"role": "user", "content": "3번 설비에서 오류 났는데 뭐가 문제야?"},
-            {"role": "assistant", "content": '{"category": "오류_진단", "machine_id": 3, "reason": "특정 설비 번호를 언급하며 원인을 묻고 있음"}'},
-            {"role": "user", "content": "15번 설비 다음 점검은 언제야?"},
-            {"role": "assistant", "content": '{"category": "정비_일정", "machine_id": 15, "reason": "특정 설비의 다음 점검일을 묻고 있음"}'},
-            {"role": "user", "content": state.user_message},
-        ],
-        response_format=RouteDecision,
-    )
+    # 2026-09-29 CP-M2 교차 검토 지적: 로그 호출이 성공 뒤에만 있어서 parse_with_retry가
+    # 두 번 다 실패하면(둘 다 실패해야 예외가 올라옴 - llm_provider.parse_with_retry
+    # 참고) 이 라우팅 시도 자체가 감사 로그에 전혀 안 남았다.
+    try:
+        completion = llm_provider.parse_with_retry(
+            client,
+            model=MODEL,
+            reasoning_effort="none",
+            messages=[
+                {"role": "system", "content": (
+                    "사용자 문의를 아래 세 카테고리 중 하나로 분류하고, 언급된 설비 번호가 있으면 "
+                    "함께 추출하세요(없으면 machine_id는 null).\n"
+                    "- 오류_진단: 특정 설비 번호의 오류/증상에 대한 원인·조치 문의\n"
+                    "- 정비_일정: 다음 점검일 문의\n"
+                    "- 일반_문의: 그 외 일반적인 질문"
+                )},
+                {"role": "user", "content": "3번 설비에서 오류 났는데 뭐가 문제야?"},
+                {"role": "assistant", "content": '{"category": "오류_진단", "machine_id": 3, "reason": "특정 설비 번호를 언급하며 원인을 묻고 있음"}'},
+                {"role": "user", "content": "15번 설비 다음 점검은 언제야?"},
+                {"role": "assistant", "content": '{"category": "정비_일정", "machine_id": 15, "reason": "특정 설비의 다음 점검일을 묻고 있음"}'},
+                {"role": "user", "content": state.user_message},
+            ],
+            response_format=RouteDecision,
+        )
+    except Exception:
+        audit_log.log_event("llm_call", thread_id=state.thread_id, target=None,
+                             summary="라우팅+설비ID 추출", result="실패", provider=llm_provider.get_provider_name())
+        raise
 
     audit_log.log_event("llm_call", thread_id=state.thread_id, target=None,
-                     summary="라우팅+설비ID 추출", provider=llm_provider.get_provider_name())
+                         summary="라우팅+설비ID 추출", provider=llm_provider.get_provider_name())
 
     decision = completion.choices[0].message.parsed
     category = decision.category
@@ -349,6 +357,8 @@ def schedule_node(state: SupervisorState) -> dict:
             {"role": "user", "content": state.user_message},
         ],
     )
+    audit_log.log_event("llm_call", thread_id=state.thread_id, target="schedule",
+                         summary="정비 일정 답변 생성", provider=llm_provider.get_provider_name())
     return {"machine_id": state.machine_id, "result": completion2.choices[0].message.content}
 
 
@@ -362,6 +372,8 @@ def general_node(state: SupervisorState) -> dict:
             {"role": "user", "content": state.user_message},
         ],
     )
+    audit_log.log_event("llm_call", thread_id=state.thread_id, target="general",
+                         summary="일반 문의 답변 생성", provider=llm_provider.get_provider_name())
     return {"result": completion.choices[0].message.content}
 
 def manual_lookup_node(state: SupervisorState) -> dict:
@@ -598,7 +610,8 @@ def finalize_node(state: SupervisorState) -> dict:
         if state.approved:
             result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 승인 처리되었습니다. 현장 책임자에게는 별도로 알려야 합니다."
             audit_log.log_event("approval", thread_id=state.thread_id, target=target, summary="긴급 작업지시서 승인")
-            notify.send_alert(f"[긴급 승인] 설비 #{state.machine_id} 작업지시서 승인됨\n{state.work_order}")
+            notify.send_alert(f"[긴급 승인] 설비 #{state.machine_id} 작업지시서 승인됨\n{state.work_order}",
+                               thread_id=state.thread_id)
             # 2026-09-29 CP-M2 교차 검토 지적: push_work_order()가 예외 없이 반환되는 걸
             # 무조건 "성공"으로 기록했다 - CMMS가 미설정이거나 오프라인 허용 목록 밖이라
             # 스스로 스킵한 경우까지 거짓으로 성공 처리됐다. 이제 반환된 상태 문자열을

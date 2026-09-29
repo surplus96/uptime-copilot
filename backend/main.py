@@ -89,8 +89,12 @@ async def _warm_up_ollama() -> None:
             messages=[{"role": "user", "content": "ping"}],
         )
         logging.getLogger(__name__).info("Ollama 워밍업 완료")
+        audit_log.log_event("llm_call", target="warm_up", summary="Ollama 워밍업 핑",
+                             provider=llm_provider.get_provider_name())
     except Exception as e:
         logging.getLogger(__name__).warning(f"Ollama 워밍업 실패(무시하고 계속 진행): {e}")
+        audit_log.log_event("llm_call", target="warm_up", summary="Ollama 워밍업 핑",
+                             result="실패", provider=llm_provider.get_provider_name())
 
 
 @asynccontextmanager
@@ -231,19 +235,27 @@ def rag_query(req: RAGRequest):
 
     validate_input(req.question)
 
+    # 2026-09-29 CP-M2 교차 검토 지적: 감사 로그 호출이 성공 경로 맨 끝에만 있어서,
+    # RAG 자체 실패나 faithfulness 거부처럼 오히려 더 알아야 할 케이스가 하나도
+    # 기록되지 않았다 - finalize_node처럼 결과 분기마다 남기도록 고친다.
     try:
         context, answer = rag_service.answer_with_context(req.question)
     except Exception as e:
+        audit_log.log_event("llm_call", target="rag_query", summary=req.question[:50],
+                             result="실패", provider=llm_provider.get_provider_name())
         raise LLMAPIError(str(e))
-    
+
     check_output_forbidden_words(answer)
 
     faithfulness_result = judge_faithfulness(client, context, answer)
     if not faithfulness_result.get("pass", True):
+        audit_log.log_event("llm_call", target="rag_query", summary=req.question[:50],
+                             result="거부됨", provider=llm_provider.get_provider_name())
         raise HarnessRejectedError(
             f"RAG 답변이 검색 문맥에 근거하지 않음(hallucination 의심): {faithfulness_result.get('reason')}"
         )
-    audit_log.log_event("llm_call", target="rag_query", summary=req.question[:50], provider=llm_provider.get_provider_name())
+    audit_log.log_event("llm_call", target="rag_query", summary=req.question[:50],
+                         result="성공", provider=llm_provider.get_provider_name())
     verified = faithfulness_result.get("score") is not None
     verified_reason = None if verified else faithfulness_result.get("reason")
     
@@ -350,8 +362,13 @@ def parts_inventory_risk():
     return {"rows": rows}
 
 @app.get("/audit_log")
-def get_audit_log(limit: int = 100, event_type: str | None = None):
-    return {"events": audit_log.list_events(limit=limit, event_type=event_type)}
+def get_audit_log(
+    limit: int = 100, event_type: str | None = None, thread_id: str | None = None,
+    since: str | None = None, until: str | None = None,
+):
+    return {"events": audit_log.list_events(
+        limit=limit, event_type=event_type, thread_id=thread_id, since=since, until=until,
+    )}
 
 @app.post("/events/complete")
 def complete_events(req: EventIdsRequest):

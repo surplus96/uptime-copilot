@@ -5,6 +5,7 @@ Slack Webhook URL(그 자체가 비밀키) 전체가 콘솔에 노출됐다.
 버그 2 (직접 테스트로 발견): raise_for_status()가 없어서, Slack이 4xx/5xx로
 "정상 응답"하면 실패를 조용히 놓쳤다(예외가 안 나서 로그조차 안 남음).
 """
+import pytest
 import requests
 
 
@@ -77,3 +78,60 @@ def test_send_alert_noop_when_unconfigured(monkeypatch):
     notify.send_alert("테스트 메시지")
 
     assert called is False
+
+
+@pytest.fixture
+def isolated_audit(tmp_path, monkeypatch):
+    """2026-09-29 CP-M2 교차 검토 지적 회귀: 예전엔 Slack 실제 전송의 성공/실패가
+    감사 로그에 전혀 안 남았다(오프라인 차단만 기록됨) - 이제 실제로 기록되는지
+    공유 DB가 아니라 격리된 DB로 확인한다."""
+    from data import audit_log
+    db_path = str(tmp_path / "test_audit.db")
+    monkeypatch.setattr(audit_log, "DB_PATH", db_path)
+    audit_log.init_audit_table()
+    return audit_log
+
+
+def test_send_alert_logs_success_to_audit(monkeypatch, isolated_audit):
+    import notify
+
+    monkeypatch.setattr(notify, "SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/SECRET/PATH/HERE")
+    monkeypatch.setattr(requests, "post", lambda *a, **kw: _FakeResponse(200))
+
+    notify.send_alert("테스트 메시지", thread_id="t1")
+
+    row = isolated_audit.list_events()[0]
+    assert row["event_type"] == "external_push"
+    assert row["result"] == "성공"
+    assert row["thread_id"] == "t1"
+
+
+def test_send_alert_logs_failure_to_audit(monkeypatch, isolated_audit):
+    import notify
+
+    monkeypatch.setattr(notify, "SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/SECRET/PATH/HERE")
+    monkeypatch.setattr(requests, "post", lambda *a, **kw: _FakeResponse(404))
+
+    notify.send_alert("테스트 메시지", thread_id="t1")
+
+    row = isolated_audit.list_events()[0]
+    assert row["event_type"] == "external_push"
+    assert row["result"] == "실패"
+
+
+def test_send_alert_logs_blocked_by_offline_with_thread_id(monkeypatch, isolated_audit):
+    """예전엔 blocked_by_offline 기록에 thread_id가 항상 NULL이라 어느 승인에서
+    나온 차단인지 알 수 없었다 - 이제 호출부가 넘긴 thread_id가 그대로 남는다."""
+    import notify
+    from core import offline_guard
+
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setattr(notify, "SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/SECRET/PATH/HERE")
+    assert offline_guard.is_offline() is True
+
+    notify.send_alert("테스트 메시지", thread_id="t1")
+
+    row = isolated_audit.list_events()[0]
+    assert row["event_type"] == "blocked_by_offline"
+    assert row["result"] == "차단"
+    assert row["thread_id"] == "t1"
