@@ -487,3 +487,37 @@ def test_check_pending_recovers_completed_non_urgent_request(monkeypatch):
 
 def test_check_pending_returns_none_for_unknown_thread():
     assert agent_service.check_pending("thread-that-never-ran") is None
+
+
+def test_check_pending_still_validates_output_on_done_recovery(monkeypatch):
+    """2026-09-29 interface-reviewer 지적(치명): check_pending()의 done 분기가
+    _validate_output()을 안 거쳐서, start_agent()/resume_agent()라면 400으로
+    막혔을 PII 포함 응답이 타임아웃 복구 경로로는 검증 없이 그대로 나갈 수
+    있었다. 일반 문의(general_node, category="일반_문의") 응답에 전화번호 형식
+    문자열을 실어서 재현 - _patch_common은 category를 "오류_진단"으로 고정하므로
+    여기서는 route 응답 자체를 일반_문의로 바꾼 전용 가짜 클라이언트를 쓴다."""
+    from core.harness import HarnessRejectedError
+
+    class _GeneralInquiryFakeCompletions:
+        def parse(self, *, response_format, **kwargs):
+            assert response_format is agent_service.RouteDecision
+            return _FakeCompletion(_FakeMessage(
+                parsed=agent_service.RouteDecision(category="일반_문의", machine_id=None, reason="테스트")
+            ))
+
+        def create(self, **kwargs):
+            return _FakeCompletion(_FakeMessage(content="연락처는 010-1234-5678 입니다"))
+
+    monkeypatch.setattr(agent_service, "client", type(
+        "C", (), {"chat": type("Chat", (), {"completions": _GeneralInquiryFakeCompletions()})()}
+    )())
+    agent_service.app = agent_service.graph.compile(checkpointer=InMemorySaver())
+
+    # start_agent()는 이미 _validate_output()을 거치므로 여기서도 거부돼야 정상.
+    with pytest.raises(HarnessRejectedError):
+        agent_service.start_agent("설비 상태 알려줘", "test-thread-pii-recovery")
+
+    # 그래프 자체는 END까지 갔으므로(예외는 반환 직전 검증에서 난 것) 체크포인트에는
+    # PII 포함 result가 남아있다 - check_pending()의 done 분기도 같은 검증을 해야 한다.
+    with pytest.raises(HarnessRejectedError):
+        agent_service.check_pending("test-thread-pii-recovery")

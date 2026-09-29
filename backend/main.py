@@ -22,9 +22,9 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -54,7 +54,12 @@ DEFAULT_MODEL = llm_provider.get_model()
 
 offline_guard.refuse_unsafe_startup_combo()
 
-if os.getenv("LLM_PROVIDER", "openai") == "openai" and not os.getenv("OPENAI_API_KEY"):
+# 2026-09-29 code-quality-reviewer 지적(M4): 여기만 llm_provider._provider()의
+# 정규화를 안 거치고 원시 값을 직접 비교하고 있었다 - LLM_PROVIDER=OpenAI(대문자)면
+# 이 조건이 False가 되어 키 없이도 기동 검사를 통과하고, 첫 실제 요청에서야 401로
+# 실패했다. get_provider_name()으로 통일한다(이미 위에서 llm_provider.get_model()을
+# 호출했으므로, 값이 알 수 없는 것이었다면 그 시점에 이미 실패했을 것이다).
+if llm_provider.get_provider_name() == "openai" and not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY가 .env에 설정되어 있지 않습니다 (LLM_PROVIDER=openai일 때 필수).")
 
 # LangSmith로 나가는 트레이스에서 PII를 마스킹 (harness의 PII_PATTERNS 재사용 - 같은 기준으로 응답/트레이스 양쪽 방어)
@@ -365,7 +370,8 @@ def parts_inventory_risk():
 
 @app.get("/audit_log")
 def get_audit_log(
-    limit: int = 100, event_type: str | None = None, thread_id: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=audit_log.MAX_LIMIT)] = 100,
+    event_type: str | None = None, thread_id: str | None = None,
     since: str | None = None, until: str | None = None,
 ):
     return {"events": audit_log.list_events(

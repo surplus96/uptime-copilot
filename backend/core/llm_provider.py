@@ -20,13 +20,23 @@ def get_base_url() -> str | None:
         return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     return None  # None이면 OpenAI SDK가 자기 기본 엔드포인트를 씀
 
+_KNOWN_PROVIDERS = {"openai", "ollama"}
+
+
 def _provider() -> str:
-    # 2026-09-29 CP-M2 교차 검토 지적: 정규화 없이 그대로 비교하면 LLM_PROVIDER=Ollama
-    # (대문자 O)처럼 오타가 나도 "ollama"와 안 맞아서 조용히 openai 분기로 빠진다 -
-    # OFFLINE=1 환경에서는 이게 실제 클라우드 API를 호출하는 심각한 안전 문제로
-    # 이어진다(offline_guard.refuse_unsafe_startup_combo()가 "openai"와 정확히
-    # 일치할 때만 거부하므로, 오타 값은 거부도 안 되고 실제로는 openai로 동작함).
-    return os.getenv("LLM_PROVIDER", "openai").strip().lower()
+    # 2026-09-29 CP-M2 교차 검토 지적: 대소문자만 정규화했더니 "Ollama"는 고쳐졌지만
+    # "olama"/"ollma" 같은 다른 오타는 여전히 "openai도 ollama도 아닌 값"이 되어
+    # 아무 데서도 안 걸리고 조용히 openai 분기로 빠졌다(code-quality-reviewer가
+    # 실제 실행으로 재현: OFFLINE=1 LLM_PROVIDER=olama에서도 기동 거부가 안 되고
+    # 실제 OpenAI API로 나감). 화이트리스트 방식으로 바꿔서, 아는 값이 아니면
+    # 아예 기동 초기(이 함수의 첫 호출 시점)에 실패하게 한다 - "모르는 값이면
+    # 안전한 쪽으로 추측"이 아니라 "모르는 값이면 즉시 크게 실패"를 택한다.
+    value = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+    if value not in _KNOWN_PROVIDERS:
+        raise RuntimeError(
+            f"LLM_PROVIDER={value!r}는 알 수 없는 값입니다 - {sorted(_KNOWN_PROVIDERS)} 중 하나여야 합니다."
+        )
+    return value
 
 
 def get_provider_name() -> str:

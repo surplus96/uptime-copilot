@@ -9,6 +9,28 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_external_calls(monkeypatch):
+    """2026-09-29 code-quality-reviewer 지적(H2, 실행으로 확인): notify.py/
+    cmms_client.py가 import 시점에 load_dotenv()로 개발자의 실제 .env 값을 모듈
+    상수로 고정해버려서, 이 값들을 직접 세팅하지 않는 테스트도 개발자의 진짜
+    Slack 웹훅·CMMS 자격증명을 그대로 물려받는다 - 실제로 테스트를 로컬에서
+    돌리면 진짜 Slack 채널에 메시지가 올라가고 진짜 Atlas에 작업지시서가
+    생성된다(finalize_node가 실패를 삼켜서 테스트 자체는 계속 초록불로 보임).
+    모든 테스트에 기본으로 이 값들을 비워서, 실제로 외부 호출을 테스트하려는
+    케이스만 자기 안에서 명시적으로 monkeypatch.setattr로 다시 채우게 한다."""
+    import notify
+    monkeypatch.setattr(notify, "SLACK_WEBHOOK_URL", None, raising=False)
+    try:
+        import cmms_client
+        monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", None, raising=False)
+        monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", None, raising=False)
+    except ImportError:
+        pass
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+
+
 @pytest.fixture
 def event_store_module(tmp_path, monkeypatch):
     """실제 pdm_telemetry.db를 절대 건드리지 않도록, DB_PATH를 테스트마다 새로 만드는

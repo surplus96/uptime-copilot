@@ -39,7 +39,12 @@ def enforce_offline_env() -> None:
     # .env가 LANGCHAIN_TRACING_V2=true를 남겨둔 상태라도, 오프라인에서는 LangChain의
     # 전역 자동 트레이싱이 우리 wrap_openai/traceable no-op을 거치지 않고 자기
     # 방식대로 API를 호출할 수 있다 - 값 자체를 여기서 강제로 끈다.
-    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    # 2026-09-29 code-quality-reviewer 지적(M3, 실행으로 확인): langsmith SDK의
+    # get_env_var()는 LANGSMITH_* 접두사를 LANGCHAIN_*보다 먼저 본다 - LANGCHAIN_
+    # 값만 껐을 때 LANGSMITH_TRACING_V2가 세팅돼 있으면 tracing_is_enabled()가
+    # 계속 True였다(직접 재현). 둘 다 끈다.
+    for var in ("LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING", "LANGSMITH_TRACING_V2", "LANGSMITH_TRACING"):
+        os.environ[var] = "false"
 
 
 def validate_allowed_endpoints() -> None:

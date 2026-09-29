@@ -75,8 +75,12 @@ def list_events(
 ) -> list[dict]:
     """since/until은 log_event()가 쓰는 것과 같은 ISO 8601 문자열 형식(정렬 가능한
     텍스트라 문자열 비교로도 시간 순서가 맞는다). limit은 조회 API가 통제 없이
-    전체를 긁어가지 못하게 MAX_LIMIT으로 상한을 둔다."""
-    limit = min(limit, MAX_LIMIT)
+    전체를 긁어가지 못하게 MAX_LIMIT으로 상한을 둔다.
+
+    2026-09-29 code-quality-reviewer 지적(M2, 실행으로 확인): min(limit, MAX_LIMIT)은
+    음수를 못 거른다 - SQLite의 LIMIT -1은 "무제한"이라, limit=-1을 넘기면 오히려
+    상한이 없어져서 테이블 전체가 나왔다. 하한도 같이 못박는다."""
+    limit = max(1, min(limit, MAX_LIMIT))
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     clauses = []

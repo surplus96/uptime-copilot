@@ -749,7 +749,13 @@ def check_pending(thread_id: str) -> dict | None:
         result = state.values.get("result") if state.values else None
         if result is None:
             return None  # 이 thread_id로 실행된 적이 아예 없음
-        return {"status": "done", "result": result, "work_order": state.values.get("work_order")}
+        # 2026-09-29 interface-reviewer 지적(치명): start_agent()/resume_agent()는
+        # 반환 직전에 _validate_output()으로 PII/금지어를 검사해 걸리면 400으로
+        # 막는데, 이 done 분기는 그 검사를 빼먹고 있었다 - 타임아웃으로 이 복구
+        # 경로를 타면 원래는 차단됐어야 할 응답이 검증 없이 그대로 나갈 수 있었다.
+        payload = {"status": "done", "result": result, "work_order": state.values.get("work_order")}
+        _validate_output(payload)
+        return payload
     for task in state.tasks:
         for pending in task.interrupts:
             payload = pending.value

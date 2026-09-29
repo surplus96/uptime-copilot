@@ -17,22 +17,31 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 # 다시 호출하면 리런 잦은 Streamlit 특성상 불필요한 지연이 생긴다. 모든 답변이 프로바이더
 # 무관하게 동일한 신뢰도로 보이는 문제(interface-reviewer 지적)를 막기 위해 전역으로 노출한다.
 if "backend_info" not in st.session_state:
+    st.session_state.backend_info = None
+if st.session_state.backend_info is None:
     try:
         st.session_state.backend_info = requests.get(f"{BACKEND_URL}/health", timeout=5).json()
     except requests.exceptions.RequestException:
-        st.session_state.backend_info = {}
+        # 2026-09-29 interface-reviewer 지적(B4): 실패를 {}로 캐싱해버리면 다시는
+        # 재조회하지 않아서, 오프라인 모드 백엔드인데도 세션 내내 IS_OFFLINE=False로
+        # 굳어 "Slack 알림이 발송됩니다" 같은 문구가 계속 잘못 뜰 수 있었다. 실패는
+        # 캐싱하지 않고 None으로 남겨서 다음 리런에 다시 시도한다.
+        st.session_state.backend_info = None
 
-_provider = st.session_state.backend_info.get("llm_provider")
+backend_info = st.session_state.backend_info or {}
+_provider = backend_info.get("llm_provider")
 if _provider:
-    _caption = f"🔌 응답 모델: {_provider} / {st.session_state.backend_info.get('llm_model', '?')}"
+    _caption = f"🔌 응답 모델: {_provider} / {backend_info.get('llm_model', '?')}"
     if _provider == "ollama":
         _caption += " — 로컬 모델. 분류·추출 정확도가 클라우드 모델보다 낮을 수 있습니다."
     st.sidebar.caption(_caption)
+elif st.session_state.backend_info is None:
+    st.sidebar.caption("⚠️ 백엔드 상태를 확인하지 못했습니다 — 오프라인 모드 여부와 응답 모델을 알 수 없습니다.")
 
 # 2026-09-29 CP-M2 교차 검토 지적: 화면 어디에도 오프라인 모드 표시가 없어서, 승인
 # 화면의 "Slack 알림이 발송됩니다" 같은 문구가 실제로는 거짓인 상태를 사용자가 알
 # 방법이 없었다. /health가 이제 offline 상태를 내려주니 사이드바에 항상 보이게 한다.
-IS_OFFLINE = bool(st.session_state.backend_info.get("offline"))
+IS_OFFLINE = bool(backend_info.get("offline"))
 if IS_OFFLINE:
     st.sidebar.warning("🔒 오프라인 모드 — Slack 알림·LangSmith 트레이싱이 비활성화됩니다.")
 
@@ -129,6 +138,8 @@ with tab1:
         st.session_state.pending_approval = None
     if "timeout_recovery" not in st.session_state:
         st.session_state.timeout_recovery = None
+    if "resume_error" not in st.session_state:
+        st.session_state.resume_error = None
 
     # 이 사이드바 컨트롤은 st.sidebar가 전역이라 다른 탭을 보고 있을 때도 그대로 뜬다 -
     # 어느 탭 소속인지 라벨로 명시한다 (interface-reviewer 지적, 2026-09-18).
@@ -143,6 +154,7 @@ with tab1:
         st.session_state.agent_messages = []
         st.session_state.pending_approval = None
         st.session_state.timeout_recovery = None
+        st.session_state.resume_error = None
         st.rerun()
 
     if not st.session_state.agent_messages and not st.session_state.pending_approval:
@@ -169,9 +181,21 @@ with tab1:
             if message["role"] == "assistant" and message.get("work_order"):
                 content = message["content"]
                 if content.startswith("[긴급 승인됨]"):
-                    st.success("✅ 승인됨 — Slack 알림과 CMMS 작업지시서 등록을 서버에서 자동 처리했습니다.")
-                    st.caption("전송 성공 여부는 이 화면에 표시되지 않습니다(외부 시스템 장애가 승인 자체를 "
-                               "막지 않도록 한 설계) — 확인이 필요하면 Slack 채널이나 CMMS에서 직접 보세요.")
+                    # 2026-09-29 interface-reviewer 지적(A3): 오프라인·미설정 상태에서도
+                    # "Slack 알림과 CMMS 등록을 자동 처리했습니다"라고 단정했다 - 실제로는
+                    # 오프라인이면 Slack은 스킵되고(blocked_by_offline), 웹훅이 없으면
+                    # 아무 기록도 없이 조용히 반환되며, CMMS도 skipped_unconfigured/
+                    # blocked_insecure_url/blocked_offline일 수 있다. "시도했다"까지만
+                    # 확정하고, 실제 결과는 감사 로그로 안내한다.
+                    st.success("✅ 승인됨 — 서버가 Slack 알림과 CMMS 작업지시서 등록을 시도했습니다(설정된 경우).")
+                    thread_id = message.get("thread_id")
+                    if thread_id:
+                        st.caption(
+                            f"실제 전송 결과(성공/실패/오프라인 차단/미설정 스킵)는 '감사 로그' 탭에서 "
+                            f"스레드 ID로 확인하세요: `{thread_id}`"
+                        )
+                    else:
+                        st.caption("실제 전송 결과는 '감사 로그' 탭에서 확인하세요.")
                 elif content.startswith("[긴급 반려됨]"):
                     st.warning("🚫 반려됨 — 별도 조치는 이루어지지 않았습니다.")
                 render_work_order(message["work_order"])
@@ -189,17 +213,27 @@ with tab1:
             # 2026-09-29 CP-M2 교차 검토 지적: 오프라인 모드에서도 이 문구가 그대로
             # "Slack 알림이 발송됩니다"라고 떠서 실제로는 차단되는 동작을 거짓으로
             # 안내했다 - 오프라인이면 그 사실을 그대로 알린다.
+            #
+            # 2026-09-29 interface-reviewer 지적(A4): 이후에도 두 문구 모두 "확정적으로"
+            # 말했지만, Slack 웹훅이나 CMMS 주소가 애초에 설정 안 됐으면 둘 다 거짓이다
+            # (/health가 그 설정 여부까지는 안 내려주므로 여기서 확정할 수 없음) - "시도한다"
+            # 정도로 주장을 낮추고, 오프라인 쪽 CMMS 문구도 "루프백 주소로 설정된 경우에만"
+            # 이라는 조건을 명시한다.
             if IS_OFFLINE:
-                st.caption("🔒 오프라인 모드 — 승인해도 Slack 알림은 발송되지 않습니다(자동 스킵). "
-                           "CMMS는 폐쇄망 내부 시스템이라 그대로 등록됩니다. 반려하면 아무 것도 전송되지 않습니다.")
+                st.caption("🔒 오프라인 모드 — 승인해도 Slack 알림은 발송되지 않습니다. CMMS는 "
+                           "내부(루프백) 주소로 설정된 경우에만 등록을 시도합니다. 반려하면 아무 것도 전송되지 않습니다.")
             else:
-                st.caption("승인하면 Slack 긴급 채널로 알림이 발송되고 CMMS에 긴급(HIGH) 작업지시서가 "
-                           "등록됩니다. 반려하면 아무 것도 전송되지 않습니다.")
+                st.caption("승인하면 서버가 Slack 긴급 채널 알림과 CMMS 긴급(HIGH) 작업지시서 등록을 "
+                           "시도합니다(설정된 경우). 반려하면 아무 것도 전송되지 않습니다.")
             wo = st.session_state.pending_approval.get("work_order")
             if wo:
                 render_work_order(wo)
             else:
                 st.markdown(st.session_state.pending_approval["message"])
+            # 2026-09-29 interface-reviewer 지적(E1): 감사 로그 탭에 스레드ID 필터를
+            # 추가했는데, 정작 그 ID를 화면 어디서도 안 보여줘서 실제로 쓸 방법이
+            # 없었다 - 복사해서 필터에 붙여넣을 수 있게 여기서도 노출한다.
+            st.caption(f"스레드 ID: `{st.session_state.agent_thread_id}`")
 
             PERSPECTIVE_ORDER = ["안전", "생산", "정비"]
             ICONS = {"안전": "🛡️", "생산": "🏭", "정비": "🛠️"}
@@ -246,17 +280,29 @@ with tab1:
                     # 나간)했는데 사용자에게는 "실패"로 보이고 재시도할 방법도 사라진다
                     # (code-quality-reviewer + interface-reviewer 공통 지적, 2026-09-18).
                     # 확실해질 때까지 승인 대기 상태를 그대로 유지한다.
-                    st.error(
+                    #
+                    # 2026-09-29 interface-reviewer 지적(B1, 가장 심각): 이 st.error()는
+                    # 이 함수 호출 시점에만 한 번 그려지는데, 사이드바 이벤트 스캐너
+                    # fragment가 10초마다 앱 전체를 리런시키면(기본 scope="app") 그
+                    # 리런에서는 이 코드가 다시 실행되지 않으니 에러가 조용히 사라진다 -
+                    # 마치 아무 일도 없었던 것처럼 승인 카드만 남는다. session_state로
+                    # 옮겨서 pending_approval이 남아있는 한 계속 보이게 한다.
+                    st.session_state.resume_error = (
                         f"승인 결과를 확인하지 못했습니다: {_extract_error_message(e)}\n\n"
                         "요청이 서버에 전달되어 이미 처리됐을 수도 있습니다. 다시 누르기 전에 "
                         "Slack 채널이나 CMMS에서 작업지시서가 이미 등록됐는지 확인하세요."
                     )
                     return
-                st.session_state.agent_messages.append(
-                    {"role": "assistant", "content": data["result"], "work_order": data.get("work_order")}
-                )
+                st.session_state.resume_error = None
+                st.session_state.agent_messages.append({
+                    "role": "assistant", "content": data["result"], "work_order": data.get("work_order"),
+                    "thread_id": st.session_state.agent_thread_id,
+                })
                 st.session_state.pending_approval = None
                 st.rerun()
+
+            if st.session_state.get("resume_error"):
+                st.error(st.session_state.resume_error)
 
             if col1.button("승인", use_container_width=True):
                 _resume(True)
@@ -274,14 +320,32 @@ with tab1:
             )
             col1, col2 = st.columns(2)
             if col1.button("이 요청 상태 확인", use_container_width=True):
+                # 2026-09-29 interface-reviewer 지적(A5): 상태 확인 요청 자체가
+                # 실패해도 곧바로 "아직 처리 중입니다"로 떨어져서, 에러와 "처리 중"
+                # 안내가 동시에(모순되게) 뜨고 있었다. 요청이 실패하면 거기서 끝내고
+                # "처리 중"이라고 단정하지 않는다. st.stop()은 다른 탭까지 멈추므로
+                # (code-quality-reviewer 지적, 2026-09-18) 안 쓰고 플래그로 분기한다.
+                check_ok = True
+                check: dict = {}
                 try:
-                    check = requests.get(
-                        f"{BACKEND_URL}/agent/status/{recovery['thread_id']}", timeout=10
-                    ).json()
+                    res = requests.get(f"{BACKEND_URL}/agent/status/{recovery['thread_id']}", timeout=10)
+                    res.raise_for_status()
+                    check = res.json()
+                except requests.exceptions.HTTPError as e:
+                    # check_pending()이 이제 _validate_output()을 거치므로(2026-09-29
+                    # 수정), 복구하려던 원래 응답이 PII 등으로 거부됐을 수도 있다 -
+                    # 이 경우는 "아직 처리 중"이 아니라 확정적으로 표시할 수 없는
+                    # 결과다.
+                    st.error(f"이 요청의 결과를 표시할 수 없습니다 — {_extract_error_message(e)}")
+                    st.session_state.timeout_recovery = None
+                    check_ok = False
                 except requests.exceptions.RequestException as e:
                     st.error(f"상태 확인 요청 자체가 실패했습니다: {_extract_error_message(e)}")
-                    check = {"status": "not_found"}
-                if check.get("status") == "pending_approval":
+                    check_ok = False
+
+                if not check_ok:
+                    pass
+                elif check.get("status") == "pending_approval":
                     st.session_state.pending_approval = {
                         "message": check["message"],
                         "work_order": check.get("work_order"),
@@ -301,7 +365,11 @@ with tab1:
                     st.session_state.timeout_recovery = None
                     st.rerun()
                 else:
-                    st.info("아직 처리 중입니다. 잠시 후 다시 눌러보세요.")
+                    st.info(
+                        "아직 결과가 없습니다. 서버가 계속 처리 중이거나, 요청이 도중에 실패해 "
+                        "결과가 남지 않았을 수 있습니다. 1~2분 뒤에도 같다면 '포기하고 새로 "
+                        "시작'으로 다시 질문하세요."
+                    )
             if col2.button("포기하고 새로 시작", use_container_width=True):
                 st.session_state.timeout_recovery = None
                 st.rerun()
@@ -331,7 +399,7 @@ with tab1:
                     )
                     res.raise_for_status()
                     data = res.json()
-                except requests.exceptions.RequestException as e:
+                except requests.exceptions.Timeout as e:
                     # 2026-09-29 실사용 중 발견한 버그: 이 자리에서 바로 경고+버튼을
                     # 그렸었는데, 이 블록 전체가 st.chat_input()의 반환값(prompt)에
                     # 의존하고 있어서 - prompt는 메시지를 보낸 바로 그 리런에만 값이
@@ -339,6 +407,38 @@ with tab1:
                     # 버튼을 누르면 화면이 다시 그려지면서 이 블록 자체가 사라져
                     # 클릭이 처리될 기회조차 없었다. session_state로 옮겨서 리런에도
                     # 살아남게 한다 - 실제 렌더링은 아래 elif 블록에서.
+                    #
+                    # 2026-09-29 interface-reviewer 지적(A2): 예전엔 RequestException
+                    # 하나로 타임아웃/연결실패/서버거부(4xx)/서버오류(5xx)를 전부
+                    # 뭉뚱그려서 "서버에서는 계속 처리 중이었을 수 있습니다"라고 했다 -
+                    # 연결 실패나 확정적 거부는 "처리 중"일 수가 없는데도 같은 복구
+                    # 패널을 띄웠다. 타임아웃만 진짜로 재시도할 가치가 있으므로 분리한다.
+                    st.session_state.timeout_recovery = {
+                        "thread_id": thread_id,
+                        "error_msg": f"60초 안에 응답을 받지 못했습니다: {_extract_error_message(e)}",
+                    }
+                    request_ok = False
+                except requests.exceptions.ConnectionError:
+                    # 서버에 요청 자체가 닿지 않았다 - "처리 중일 수 있다"는 말이 거짓이므로
+                    # 복구 패널이 아니라 확정적인 실패로 채팅 기록에 남긴다(채팅 기록은
+                    # session_state 기반이라 리런에도 살아남는다 - prompt 의존 문제 없음).
+                    st.session_state.agent_messages.append({
+                        "role": "assistant",
+                        "content": "⚠️ 백엔드 서버에 연결하지 못했습니다. 요청은 전송되지 않았습니다. "
+                                   "서버 실행 여부를 확인한 뒤 다시 질문하세요.",
+                    })
+                    request_ok = False
+                except requests.exceptions.HTTPError as e:
+                    # 서버가 응답은 했지만 확정적으로 거부한 경우(400 harness_rejected,
+                    # 422 입력 검증 실패, 5xx 등) - 재시도해도 같은 결과이므로 복구
+                    # 패널이 아니라 확정적인 실패로 표시한다.
+                    st.session_state.agent_messages.append({
+                        "role": "assistant",
+                        "content": f"⚠️ 요청이 처리되지 않았습니다 — {_extract_error_message(e)}",
+                    })
+                    request_ok = False
+                except requests.exceptions.RequestException as e:
+                    # 위 세 가지로 분류 안 되는 나머지 - 안전한 쪽(복구 패널)으로 보낸다.
                     st.session_state.timeout_recovery = {
                         "thread_id": thread_id,
                         "error_msg": _extract_error_message(e),
@@ -380,6 +480,19 @@ with tab2:
                 # 의존해 렌더링하면 그 즉시 다음 재실행에 결과가 사라졌었다
                 # (code-quality-reviewer 지적, 2026-09-18).
                 st.session_state.rag_result = res.json()
+            except requests.exceptions.HTTPError as e:
+                # 2026-09-29 interface-reviewer 지적(A6): faithfulness 판정 거부(400
+                # harness_rejected, "hallucination 의심")를 "백엔드 요청 실패"라고
+                # 표시했다 - 서버가 고장 난 게 아니라 근거 없는 답변을 의도대로 막은
+                # 것이다. 응답 코드가 있으면(서버가 확정적으로 판단한 것) 다르게 안내한다.
+                body = getattr(e.response, "json", lambda: {})() if e.response is not None else {}
+                if body.get("error") == "harness_rejected":
+                    st.warning(
+                        "답변이 매뉴얼 근거와 맞지 않아 표시하지 않았습니다. 질문을 더 "
+                        "구체적으로(부품명·오류코드 포함) 바꿔 다시 검색하세요."
+                    )
+                else:
+                    st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
             except requests.exceptions.RequestException as e:
                 st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
 
@@ -701,7 +814,14 @@ with tab5:
         event_type_filter = label_to_value.get(event_type_label)
     with col2:
         # 방금 승인한 건을 스레드ID로 바로 찾을 방법이 없었다는 지적 - 텍스트 입력으로 필터.
-        thread_id_filter = st.text_input("스레드 ID로 필터 (선택)", placeholder="예: verify-thread-1")
+        # 2026-09-29 interface-reviewer 지적(E1): placeholder가 테스트 fixture 형식
+        # ("verify-thread-1")이라 실제 UUID와 안 맞아 헷갈렸고, 붙여넣기로 공백이
+        # 섞이면 정확히 일치해야 하는 필터가 조용히 0건을 반환했다. 이제 승인 화면에
+        # 스레드ID가 실제로 표시되므로(위 pending_approval 카드), 그걸 복사해온다는
+        # 걸 명시하고 공백은 트림한다.
+        thread_id_filter = st.text_input(
+            "스레드 ID로 필터 (선택)", placeholder="승인 화면에 표시된 스레드 ID를 붙여넣으세요"
+        ).strip()
 
     try:
         rows = _fetch_audit_log(event_type_filter, thread_id_filter or None)
