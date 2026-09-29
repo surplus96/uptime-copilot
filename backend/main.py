@@ -224,6 +224,7 @@ def health_check():
         "status": "ok",
         "llm_provider": llm_provider.get_provider_name(),
         "llm_model": llm_provider.get_model(),
+        "offline": offline_guard.is_offline(),
     }
 
 
@@ -357,6 +358,7 @@ def parts_inventory_risk():
             "coverable_30d": parts["lead_time_days"] <= 30,
             "coverable_90d": parts["lead_time_days"] <= 90,
             "eol_soon": parts["eol_soon"],
+            "eol_status": parts["eol_status"],
             "eol_date": parts["eol_date"],
         })
     return {"rows": rows}

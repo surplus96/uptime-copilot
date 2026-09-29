@@ -29,6 +29,13 @@ if _provider:
         _caption += " — 로컬 모델. 분류·추출 정확도가 클라우드 모델보다 낮을 수 있습니다."
     st.sidebar.caption(_caption)
 
+# 2026-09-29 CP-M2 교차 검토 지적: 화면 어디에도 오프라인 모드 표시가 없어서, 승인
+# 화면의 "Slack 알림이 발송됩니다" 같은 문구가 실제로는 거짓인 상태를 사용자가 알
+# 방법이 없었다. /health가 이제 offline 상태를 내려주니 사이드바에 항상 보이게 한다.
+IS_OFFLINE = bool(st.session_state.backend_info.get("offline"))
+if IS_OFFLINE:
+    st.sidebar.warning("🔒 오프라인 모드 — Slack 알림·LangSmith 트레이싱이 비활성화됩니다.")
+
 
 ERROR_LABELS = {
     "llm_api_error": "AI 응답 실패",
@@ -102,6 +109,11 @@ def render_work_order(work_order_text: str):
             st.markdown(f"**매뉴얼 근거**: {block['매뉴얼 근거']}")
             st.markdown(f"**조치사항**: {block['조치사항']}")
             st.markdown(f"**조달 상태**: {block['부품 조달']}")
+    if blocks:
+        # 2026-09-29 CP-M2 교차 검토 지적: 재고 위험 탭에만 합성 데이터 고지가 있고,
+        # 실제 승인이 이뤄지는 작업지시서/승인 화면에는 없었다 - 부품 조달 상태가
+        # 여기 그대로 노출되는데 이 값도 합성 데이터다(§ 재고 위험 탭과 동일 출처).
+        st.caption("⚠️ 위 조달 상태는 합성(가상) 부품 데이터 기준입니다 — 재고 위험 탭과 같은 고지.")
 
 
 
@@ -171,8 +183,15 @@ with tab1:
         # (interface-reviewer 지적, 2026-09-18).
         with st.chat_message("assistant", avatar=CHAT_AVATARS["assistant"]), st.container(border=True):
             st.warning("⚠️ 승인이 필요합니다 — 아래 작업지시서를 검토하세요")
-            st.caption("승인하면 Slack 긴급 채널로 알림이 발송되고 CMMS에 긴급(HIGH) 작업지시서가 "
-                       "등록됩니다. 반려하면 아무 것도 전송되지 않습니다.")
+            # 2026-09-29 CP-M2 교차 검토 지적: 오프라인 모드에서도 이 문구가 그대로
+            # "Slack 알림이 발송됩니다"라고 떠서 실제로는 차단되는 동작을 거짓으로
+            # 안내했다 - 오프라인이면 그 사실을 그대로 알린다.
+            if IS_OFFLINE:
+                st.caption("🔒 오프라인 모드 — 승인해도 Slack 알림은 발송되지 않습니다(자동 스킵). "
+                           "CMMS는 폐쇄망 내부 시스템이라 그대로 등록됩니다. 반려하면 아무 것도 전송되지 않습니다.")
+            else:
+                st.caption("승인하면 Slack 긴급 채널로 알림이 발송되고 CMMS에 긴급(HIGH) 작업지시서가 "
+                           "등록됩니다. 반려하면 아무 것도 전송되지 않습니다.")
             wo = st.session_state.pending_approval.get("work_order")
             if wo:
                 render_work_order(wo)
@@ -573,7 +592,13 @@ with tab4:
     for r in rows:
         with st.container(border=True):
             title = f"{r['component']} - {r['part_name']}"
-            if r["eol_soon"]:
+            # 2026-09-29 CP-M2 교차 검토 지적: eol_soon만 보고 항상 "단종 임박"이라고
+            # 표시했다 - 실제로는 eol_status가 "경과"(이미 단종일이 지남)인 경우도
+            # 똑같이 "임박"으로 나와서, 이미 단종된 부품을 아직 여유 있다는 듯 오독하게
+            # 만들었다. eol_status를 그대로 반영한다.
+            if r["eol_status"] == "경과":
+                title += " ⚠️ 단종됨(단종일 경과)"
+            elif r["eol_status"] == "임박":
                 title += " ⚠️ 단종 임박"
             st.markdown(f"**{title}**")
             c1, c2, c3 = st.columns(3)
@@ -604,20 +629,52 @@ with tab4:
                 st.caption("재고 위험 없음")
 
 @st.cache_data(ttl=10)
-def _fetch_audit_log(event_type=None):
-    params = {"limit": 100}
+def _fetch_audit_log(event_type=None, thread_id=None):
+    params = {"limit": 200}
     if event_type:
         params["event_type"] = event_type
+    if thread_id:
+        params["thread_id"] = thread_id
     res = requests.get(f"{BACKEND_URL}/audit_log", params=params, timeout=30)
     res.raise_for_status()
     return res.json()["events"]
 
 
+# 2026-09-29 CP-M2 교차 검토 지적: 드롭다운이 event_type 원값(영문)을 그대로 보여줬다 -
+# 한글 라벨로 표시하고 API에는 원값을 그대로 넘긴다.
+EVENT_TYPE_LABELS = {
+    "llm_call": "LLM 호출",
+    "tool_call": "도구 호출",
+    "approval": "승인",
+    "rejection": "반려",
+    "external_push": "외부 전송(Slack/CMMS)",
+    "blocked_by_offline": "오프라인 차단",
+}
+
 with tab5:
     st.subheader("🧾 감사 로그")
-    event_type_filter = st.selectbox(
-        "이벤트 유형", ["전체", "llm_call", "tool_call", "approval", "rejection", "external_push", "blocked_by_offline"]
-    )
-    rows = _fetch_audit_log(None if event_type_filter == "전체" else event_type_filter)
-    st.dataframe(rows, use_container_width=True)
+    # 시각 필드(ts)가 어느 시계 기준인지 표시가 없었다는 지적 - 백엔드가
+    # datetime.now().isoformat()으로 기록하므로 타임존 정보 없는 서버 로컬 시간이다.
+    st.caption("시각은 백엔드 서버의 로컬 시간(타임존 정보 없음) 기준입니다.")
+    col1, col2 = st.columns(2)
+    with col1:
+        event_type_label = st.selectbox("이벤트 유형", ["전체"] + list(EVENT_TYPE_LABELS.values()))
+        label_to_value = {v: k for k, v in EVENT_TYPE_LABELS.items()}
+        event_type_filter = label_to_value.get(event_type_label)
+    with col2:
+        # 방금 승인한 건을 스레드ID로 바로 찾을 방법이 없었다는 지적 - 텍스트 입력으로 필터.
+        thread_id_filter = st.text_input("스레드 ID로 필터 (선택)", placeholder="예: verify-thread-1")
+
+    try:
+        rows = _fetch_audit_log(event_type_filter, thread_id_filter or None)
+    except requests.exceptions.RequestException as e:
+        st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
+        rows = None
+
+    if rows is not None:
+        if not rows:
+            st.caption("조건에 맞는 감사 로그가 없습니다.")
+        else:
+            display_rows = [{**r, "event_type": EVENT_TYPE_LABELS.get(r["event_type"], r["event_type"])} for r in rows]
+            st.dataframe(display_rows, use_container_width=True)
 
