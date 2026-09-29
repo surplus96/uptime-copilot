@@ -78,9 +78,11 @@ def test_format_for_cmms_survives_whitespace_collapse():
 
 
 def test_push_work_order_noop_when_unconfigured(monkeypatch):
+    """2026-09-29 CP-M2 교차 검토 지적 회귀: 예전엔 예외 없이 반환되는 걸 호출부가
+    무조건 "성공"으로 감사 로그에 기록했다 - 이제 정확한 상태 문자열을 돌려준다."""
     monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", None)
     monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", None)
-    cmms_client.push_work_order(84, "작업지시서 텍스트")  # 예외 없이 조용히 반환
+    assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "skipped_unconfigured"
 
 
 def test_push_work_order_blocks_non_loopback_http(monkeypatch, caplog):
@@ -89,10 +91,8 @@ def test_push_work_order_blocks_non_loopback_http(monkeypatch, caplog):
     monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://example.com/mcp")
     monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "sometoken")
 
-    cmms_client.push_work_order(84, "작업지시서 텍스트")
-
+    assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "blocked_insecure_url"
     assert "차단" in caplog.text
-
 
 
 def test_push_work_order_allows_loopback_http(monkeypatch):
@@ -100,3 +100,27 @@ def test_push_work_order_allows_loopback_http(monkeypatch):
     monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://localhost:3100/mcp")
     monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "sometoken")
     assert cmms_client._is_loopback_url(cmms_client.CMMS_MCP_URL) is True
+
+
+def test_push_work_order_blocks_remote_host_when_offline(monkeypatch, caplog):
+    """2026-09-29 CP-M2 교차 검토 지적: OFFLINE=1인데 CMMS_MCP_URL이 허용 목록 밖
+    (예: 외부 https:// 주소)이면 연결을 시도하지도 않고 차단해야 한다 - 예전엔
+    이 검사가 전혀 없어서 오프라인 모드에서도 그대로 나갔다."""
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "https://cmms.example.com/mcp")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "sometoken")
+
+    assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "blocked_offline"
+    assert "차단" in caplog.text
+
+
+def test_push_work_order_allows_allowlisted_host_when_offline(monkeypatch):
+    """오프라인이어도 CMMS 호스트가 허용 목록 안(host.docker.internal 등)이면
+    차단되면 안 된다 - §6-4: CMMS는 이 배포에서 "외부"가 아니다."""
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://host.docker.internal:3100/mcp")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "sometoken")
+    monkeypatch.setattr(cmms_client, "streamablehttp_client", lambda *a, **kw: _FakeStreams())
+    monkeypatch.setattr(cmms_client, "ClientSession", lambda *a, **kw: _FakeSession(_FakeCallToolResult(is_error=False)))
+
+    assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "sent"

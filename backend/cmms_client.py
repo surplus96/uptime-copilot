@@ -11,10 +11,13 @@ import logging
 import os
 import re
 from datetime import timedelta
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+
+from core import offline_guard
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -58,24 +61,39 @@ def _format_for_cmms(text: str) -> str:
 
 
 def _is_loopback_url(url: str) -> bool:
-    from urllib.parse import urlparse
+    # 2026-09-29 CP-M2 교차 검토 지적: 이 목록이 offline_guard.OFFLINE_ALLOWED_HOSTS와
+    # 별개로 하드코딩돼 있었다 - 이제 그 상수를 그대로 재사용해서 "유일한 정의처"를
+    # 실제로 지킨다.
     host = urlparse(url).hostname
-    # host.docker.internal은 Docker Desktop이 컨테이너 -> 호스트 방향으로만 열어주는
-    # 별칭이라 실제 네트워크로 나가지 않는다 - localhost와 같은 신뢰 경계로 취급한다.
-    return host in ("localhost", "127.0.0.1", "host.docker.internal")
+    return host in offline_guard.OFFLINE_ALLOWED_HOSTS
 
 
-def push_work_order(machine_id: int, work_order_text: str) -> None:
+def push_work_order(machine_id: int, work_order_text: str) -> str:
     """항상 긴급+승인된 work_order에서만 호출된다(finalize_node 참고) - priority가
-    HIGH로 고정인 이유."""
+    HIGH로 고정인 이유.
+
+    2026-09-29 CP-M2 교차 검토 지적 반영: 예전엔 스킵/차단/전송을 구분 없이 전부
+    None을 반환했다 - 호출부(finalize_node)가 "예외 없이 반환 = 성공"으로 감사
+    로그에 기록해서, CMMS가 애초에 설정 안 된 상태에서도 "성공"이 찍히는 거짓
+    기록을 냈다. 이제 상태 문자열을 반환해서 호출부가 실제로 무슨 일이 있었는지
+    정확히 기록할 수 있게 한다. 반환값: "sent"(실제 전송 시도, 예외 없으면 성공) |
+    "skipped_unconfigured"(URL/TOKEN 미설정) | "blocked_insecure_url"(평문 HTTP
+    비루프백) | "blocked_offline"(OFFLINE=1인데 허용 목록 밖 호스트)."""
     if not CMMS_MCP_URL or not CMMS_MCP_TOKEN:
-        return
+        return "skipped_unconfigured"
     # CMMS_MCP_TOKEN이 평문 HTTP로 그대로 나간다 - 루프백이 아닌 주소에 http://를 쓰면
     # 실수로 토큰을 네트워크에 노출시키게 되므로 아예 막는다 (security-reviewer 지적,
     # 2026-09-18). 지금(Atlas-MCP를 같은 호스트에 두는 구성)은 http://localhost가 정상이다.
     if CMMS_MCP_URL.startswith("http://") and not _is_loopback_url(CMMS_MCP_URL):
         logger.warning("[CMMS push 실패] CMMS_MCP_URL이 루프백이 아닌데 http://를 사용 - 토큰 평문 노출 위험, 요청 차단")
-        return
+        return "blocked_insecure_url"
+    # 2026-09-29 CP-M2 교차 검토 지적: 허용 목록은 지금까지 테스트(pytest-socket)에서만
+    # 검사됐고 실제 기동 경로에는 전혀 적용되지 않았다 - CMMS_MCP_URL을 외부 주소로
+    # 잘못 설정해도 OFFLINE=1이면 그대로 나갔다. 여기서 직접 막는다.
+    if offline_guard.is_offline() and not _is_loopback_url(CMMS_MCP_URL):
+        logger.warning(f"[CMMS push 차단] OFFLINE=1인데 CMMS_MCP_URL이 허용 목록 밖: {CMMS_MCP_URL}")
+        return "blocked_offline"
     title = f"설비 #{machine_id} 긴급 정비"
     asset_id = MACHINE_ID_TO_ASSET_ID.get(machine_id)
     asyncio.run(_create_work_order(title, _format_for_cmms(work_order_text), asset_id))
+    return "sent"

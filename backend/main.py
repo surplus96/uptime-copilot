@@ -4,6 +4,18 @@ FastAPI 백엔드
 실행 방법:
     uvicorn main:app --reload --port 8000
 """
+# ruff: noqa: E402 - dotenv/offline_guard.enforce_offline_env()가 HF_HUB_OFFLINE/
+# LANGCHAIN_TRACING_V2를 다른 모든 import보다 먼저 세팅해야 한다(huggingface_hub는
+# 이 값을 import 시점에 한 번 읽어 캐싱하므로, sentence-transformers/langchain을
+# 끌어오는 rag_service를 import한 뒤에 세팅하면 이미 늦다 - 2026-09-29 CP-M2 교차
+# 검토로 발견).
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from core import offline_guard  # noqa: E402
+
+offline_guard.enforce_offline_env()
 
 import asyncio
 import logging
@@ -12,7 +24,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -22,7 +33,7 @@ from pydantic import BaseModel, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from agent import agent_service
-from core import llm_provider, offline_guard
+from core import llm_provider
 from core.harness import (
     PII_PATTERNS,
     HarnessRejectedError,
@@ -32,8 +43,6 @@ from core.harness import (
 )
 from data import audit_log, event_store, sim_loop, sim_store
 from rag import rag_service
-
-load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,

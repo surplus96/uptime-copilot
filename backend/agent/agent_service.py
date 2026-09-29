@@ -599,12 +599,18 @@ def finalize_node(state: SupervisorState) -> dict:
             result = f"[긴급 승인됨]\n{state.work_order}\n\n-> 승인 처리되었습니다. 현장 책임자에게는 별도로 알려야 합니다."
             audit_log.log_event("approval", thread_id=state.thread_id, target=target, summary="긴급 작업지시서 승인")
             notify.send_alert(f"[긴급 승인] 설비 #{state.machine_id} 작업지시서 승인됨\n{state.work_order}")
+            # 2026-09-29 CP-M2 교차 검토 지적: push_work_order()가 예외 없이 반환되는 걸
+            # 무조건 "성공"으로 기록했다 - CMMS가 미설정이거나 오프라인 허용 목록 밖이라
+            # 스스로 스킵한 경우까지 거짓으로 성공 처리됐다. 이제 반환된 상태 문자열을
+            # 그대로 감사 로그의 result에 남긴다("sent"만 진짜 성공).
             try:
-                cmms_client.push_work_order(state.machine_id, state.work_order)
-                audit_log.log_event("external_push", thread_id=state.thread_id, target=target, summary="CMMS 작업지시서 push", result="성공")
+                status = cmms_client.push_work_order(state.machine_id, state.work_order)
+                audit_log.log_event("external_push", thread_id=state.thread_id, target=target,
+                                     summary="CMMS 작업지시서 push", result=status)
             except Exception as e:
                 logger.error(f"[CMMS push 실패] {e}")
-                audit_log.log_event("external_push", thread_id=state.thread_id, target=target, summary="CMMS 작업지시서 push", result="실패")
+                audit_log.log_event("external_push", thread_id=state.thread_id, target=target,
+                                     summary="CMMS 작업지시서 push", result="실패")
         else:
             result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 반려 처리되었습니다. 별도 조치는 이루어지지 않았습니다."
             audit_log.log_event("rejection", thread_id=state.thread_id, target=target, summary="긴급 작업지시서 반려")

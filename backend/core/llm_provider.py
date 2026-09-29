@@ -21,7 +21,12 @@ def get_base_url() -> str | None:
     return None  # None이면 OpenAI SDK가 자기 기본 엔드포인트를 씀
 
 def _provider() -> str:
-    return os.getenv("LLM_PROVIDER", "openai")
+    # 2026-09-29 CP-M2 교차 검토 지적: 정규화 없이 그대로 비교하면 LLM_PROVIDER=Ollama
+    # (대문자 O)처럼 오타가 나도 "ollama"와 안 맞아서 조용히 openai 분기로 빠진다 -
+    # OFFLINE=1 환경에서는 이게 실제 클라우드 API를 호출하는 심각한 안전 문제로
+    # 이어진다(offline_guard.refuse_unsafe_startup_combo()가 "openai"와 정확히
+    # 일치할 때만 거부하므로, 오타 값은 거부도 안 되고 실제로는 openai로 동작함).
+    return os.getenv("LLM_PROVIDER", "openai").strip().lower()
 
 
 def get_provider_name() -> str:
