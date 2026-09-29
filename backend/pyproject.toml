@@ -27,8 +27,8 @@ ignore_errors = true
 pythonpath = ["."]
 markers = [
     "eval: real-LLM evaluation against tests/eval/golden.jsonl — excluded by default, run with -m eval",
-    "offline_e2e: pytest-socket으로 실제 소켓을 차단한 오프라인 시나리오 테스트 — CI엔 HF 캐시가 없어 기본 제외, 로컬/Docker에서 -m offline_e2e로 실행",
+    "offline_e2e: pytest-socket으로 실제 소켓을 차단한 오프라인 시나리오 테스트 — 2026-09-29 CP-M2 교차 검토로 원래 제외 사유(HF 캐시 없음)가 틀렸음을 확인(이 테스트들은 임베딩 모델을 전혀 안 씀) 후 CI 기본 경로에 포함시킴. 마커는 -m offline_e2e로 선택 실행 용도로만 남김",
 ]
-addopts = "-m 'not eval and not offline_e2e'"
+addopts = "-m 'not eval'"
 
 

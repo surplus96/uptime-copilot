@@ -7,11 +7,15 @@
 전체 LangGraph 시나리오는 실제 코드 경로를 그대로 태운다 - 가드를 깜빡한 새 호출
 지점이 생겨도 이 테스트가 실제로 잡아내야 의미가 있다.
 
-CI에는 HF 캐시가 없어 임베딩 관련 초기화를 건드리면 실패하므로(MRO-FR-07 설계
-메모), 이 파일은 `offline_e2e` 마커로 CI 기본 경로에서 제외되고 로컬/Docker에서
-`pytest -m offline_e2e`로만 돈다 - host.docker.internal 해석도 Docker 컨테이너
-안에서만 보장되므로 어차피 로컬 venv 단독 실행으로는 CMMS 쪽 테스트가 의미가 없다.
-"""
+2026-09-29 CP-M2 교차 검토 지적: "CI엔 HF 캐시가 없어서 제외한다"는 원래 사유는
+틀렸다 - 이 파일은 임베딩 모델을 전혀 안 건드린다(LLM은 전부 가짜, RAG 경로는
+테스트 대상이 아님). 그래서 offline_e2e 마커는 남겨두되(선택 실행용) CI 기본
+경로에 포함시켰다. host.docker.internal이 CI 러너(순수 우분투, Docker 아님)에서
+해석 안 되는 건 맞지만, `pytest_socket.resolve_hostnames()`가 `socket.gaierror`를
+관용적으로 처리(빈 집합 반환, 예외 안 냄)하고, 실제 연결 시도도 빠르게 실패할 뿐
+멈추지 않는다는 걸 직접 확인했다 - 아래 테스트들의 assert는 "연결이 우리 가드에
+막혔는지"만 보므로, DNS 해석 실패로 인한 다른 예외도 "안 막혔다"는 같은 결론을
+낸다."""
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from pytest_socket import SocketConnectBlockedError
