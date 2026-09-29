@@ -4,6 +4,7 @@ import uuid
 import re
 import os
 import math
+import time
 
 
 CHAT_AVATARS = {"user": "🧑‍🔧", "assistant": "🛡️"}
@@ -18,15 +19,28 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 # 무관하게 동일한 신뢰도로 보이는 문제(interface-reviewer 지적)를 막기 위해 전역으로 노출한다.
 if "backend_info" not in st.session_state:
     st.session_state.backend_info = None
-if st.session_state.backend_info is None:
+if "backend_info_failed_at" not in st.session_state:
+    st.session_state.backend_info_failed_at = None
+_health_retry_due = (
+    st.session_state.backend_info_failed_at is None
+    or time.monotonic() - st.session_state.backend_info_failed_at >= 30
+)
+if st.session_state.backend_info is None and _health_retry_due:
     try:
         st.session_state.backend_info = requests.get(f"{BACKEND_URL}/health", timeout=5).json()
+        st.session_state.backend_info_failed_at = None
     except requests.exceptions.RequestException:
         # 2026-09-29 interface-reviewer 지적(B4): 실패를 {}로 캐싱해버리면 다시는
         # 재조회하지 않아서, 오프라인 모드 백엔드인데도 세션 내내 IS_OFFLINE=False로
         # 굳어 "Slack 알림이 발송됩니다" 같은 문구가 계속 잘못 뜰 수 있었다. 실패는
         # 캐싱하지 않고 None으로 남겨서 다음 리런에 다시 시도한다.
+        #
+        # 2026-09-29 interface-reviewer 후속 지적(R6): 위 방식은 백엔드가 연결 거부가
+        # 아니라 아예 응답이 없는 상태(잘못된 호스트 등)일 때, 클릭마다 그리고 사이드바
+        # fragment의 주기적 리런마다 매번 최대 5초씩 멈추게 만든다. 실패 시각을 남겨서
+        # 30초에 한 번만 재시도한다.
         st.session_state.backend_info = None
+        st.session_state.backend_info_failed_at = time.monotonic()
 
 backend_info = st.session_state.backend_info or {}
 _provider = backend_info.get("llm_provider")
@@ -336,9 +350,19 @@ with tab1:
                     # 수정), 복구하려던 원래 응답이 PII 등으로 거부됐을 수도 있다 -
                     # 이 경우는 "아직 처리 중"이 아니라 확정적으로 표시할 수 없는
                     # 결과다.
-                    st.error(f"이 요청의 결과를 표시할 수 없습니다 — {_extract_error_message(e)}")
+                    #
+                    # 2026-09-29 interface-reviewer 후속 지적(R3, B1과 같은 종류): 여기서
+                    # st.error()만 그리고 timeout_recovery를 지우면, 이 에러는 이번 리런에만
+                    # 보이고 다음 리런(다른 클릭이나 사이드바 fragment의 앱 전체 리런)에
+                    # 흔적 없이 사라진다 - 질문은 응답 없이 기록에 남는다. 쿼리 실패 때와
+                    # 같이 채팅 기록(session_state)에 영구히 남긴다.
+                    st.session_state.agent_messages.append({
+                        "role": "assistant",
+                        "content": f"⚠️ 이 요청의 결과를 표시할 수 없습니다 — {_extract_error_message(e)}",
+                    })
                     st.session_state.timeout_recovery = None
                     check_ok = False
+                    st.rerun()
                 except requests.exceptions.RequestException as e:
                     st.error(f"상태 확인 요청 자체가 실패했습니다: {_extract_error_message(e)}")
                     check_ok = False
@@ -399,7 +423,24 @@ with tab1:
                     )
                     res.raise_for_status()
                     data = res.json()
-                except requests.exceptions.Timeout as e:
+                except requests.exceptions.ConnectionError:
+                    # 서버에 요청 자체가 닿지 않았다 - "처리 중일 수 있다"는 말이 거짓이므로
+                    # 복구 패널이 아니라 확정적인 실패로 채팅 기록에 남긴다(채팅 기록은
+                    # session_state 기반이라 리런에도 살아남는다 - prompt 의존 문제 없음).
+                    #
+                    # 2026-09-29 interface-reviewer 후속 지적(R5): ConnectTimeout은
+                    # Timeout과 ConnectionError 둘 다의 하위클래스라, 아래 except Timeout이
+                    # 먼저였을 때는 "연결 자체가 안 됨"인 경우도 전부 "처리 중일 수
+                    # 있습니다" 복구 패널로 갔다. ConnectionError를 먼저 잡아야
+                    # ConnectTimeout이 여기로 오고, 순수 ReadTimeout(ConnectionError의
+                    # 하위클래스 아님)만 아래 Timeout 절로 간다.
+                    st.session_state.agent_messages.append({
+                        "role": "assistant",
+                        "content": "⚠️ 백엔드 서버에 연결하지 못했습니다. 요청은 전송되지 않았습니다. "
+                                   "서버 실행 여부를 확인한 뒤 다시 질문하세요.",
+                    })
+                    request_ok = False
+                except requests.exceptions.Timeout:
                     # 2026-09-29 실사용 중 발견한 버그: 이 자리에서 바로 경고+버튼을
                     # 그렸었는데, 이 블록 전체가 st.chat_input()의 반환값(prompt)에
                     # 의존하고 있어서 - prompt는 메시지를 보낸 바로 그 리런에만 값이
@@ -413,20 +454,14 @@ with tab1:
                     # 뭉뚱그려서 "서버에서는 계속 처리 중이었을 수 있습니다"라고 했다 -
                     # 연결 실패나 확정적 거부는 "처리 중"일 수가 없는데도 같은 복구
                     # 패널을 띄웠다. 타임아웃만 진짜로 재시도할 가치가 있으므로 분리한다.
+                    # 2026-09-29 interface-reviewer 후속 지적(R4): Timeout엔 .response가
+                    # 없어서 _extract_error_message가 원본 예외 문자열(HTTPConnectionPool
+                    # 등 내부 구현 용어)을 그대로 반환했고, 이걸 렌더링할 때 "응답을 받지
+                    # 못했습니다: "를 한 번 더 붙여 같은 말이 두 번 나왔다. 고정 문구만 쓴다.
                     st.session_state.timeout_recovery = {
                         "thread_id": thread_id,
-                        "error_msg": f"60초 안에 응답을 받지 못했습니다: {_extract_error_message(e)}",
+                        "error_msg": "60초 안에 응답이 오지 않았습니다.",
                     }
-                    request_ok = False
-                except requests.exceptions.ConnectionError:
-                    # 서버에 요청 자체가 닿지 않았다 - "처리 중일 수 있다"는 말이 거짓이므로
-                    # 복구 패널이 아니라 확정적인 실패로 채팅 기록에 남긴다(채팅 기록은
-                    # session_state 기반이라 리런에도 살아남는다 - prompt 의존 문제 없음).
-                    st.session_state.agent_messages.append({
-                        "role": "assistant",
-                        "content": "⚠️ 백엔드 서버에 연결하지 못했습니다. 요청은 전송되지 않았습니다. "
-                                   "서버 실행 여부를 확인한 뒤 다시 질문하세요.",
-                    })
                     request_ok = False
                 except requests.exceptions.HTTPError as e:
                     # 서버가 응답은 했지만 확정적으로 거부한 경우(400 harness_rejected,
@@ -481,16 +516,15 @@ with tab2:
                 # (code-quality-reviewer 지적, 2026-09-18).
                 st.session_state.rag_result = res.json()
             except requests.exceptions.HTTPError as e:
-                # 2026-09-29 interface-reviewer 지적(A6): faithfulness 판정 거부(400
-                # harness_rejected, "hallucination 의심")를 "백엔드 요청 실패"라고
-                # 표시했다 - 서버가 고장 난 게 아니라 근거 없는 답변을 의도대로 막은
-                # 것이다. 응답 코드가 있으면(서버가 확정적으로 판단한 것) 다르게 안내한다.
-                body = getattr(e.response, "json", lambda: {})() if e.response is not None else {}
-                if body.get("error") == "harness_rejected":
-                    st.warning(
-                        "답변이 매뉴얼 근거와 맞지 않아 표시하지 않았습니다. 질문을 더 "
-                        "구체적으로(부품명·오류코드 포함) 바꿔 다시 검색하세요."
-                    )
+                # 2026-09-29 interface-reviewer 후속 지적(R1/R2): A6에서 harness_rejected를
+                # 전부 "매뉴얼 근거와 안 맞음"으로 안내했는데, 실제로는 입력 길이 초과·PII
+                # 포함 등 다른 사유도 같은 코드로 온다 - 원인을 추측해 잘못 안내하면 사용자가
+                # 반대 방향으로 질문을 고치게 된다. 서버가 준 reason을 그대로 보여준다
+                # (R1). 또한 e.response.json()을 직접 호출하면 응답 본문이 JSON이 아닐 때
+                # (프록시 502 등) JSONDecodeError로 이 블록 자체가 죽어 탭 전체 렌더링이
+                # 멈췄다 - 이미 안전하게 파싱하는 _extract_error_message를 재사용한다(R2).
+                if e.response is not None and e.response.status_code == 400:
+                    st.warning(f"답변을 표시하지 않았습니다 — {_extract_error_message(e)}")
                 else:
                     st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
             except requests.exceptions.RequestException as e:

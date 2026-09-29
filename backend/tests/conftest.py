@@ -19,14 +19,11 @@ def _no_real_external_calls(monkeypatch):
     생성된다(finalize_node가 실패를 삼켜서 테스트 자체는 계속 초록불로 보임).
     모든 테스트에 기본으로 이 값들을 비워서, 실제로 외부 호출을 테스트하려는
     케이스만 자기 안에서 명시적으로 monkeypatch.setattr로 다시 채우게 한다."""
+    import cmms_client
     import notify
     monkeypatch.setattr(notify, "SLACK_WEBHOOK_URL", None, raising=False)
-    try:
-        import cmms_client
-        monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", None, raising=False)
-        monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", None, raising=False)
-    except ImportError:
-        pass
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", None, raising=False)
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", None, raising=False)
     monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
     monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
 

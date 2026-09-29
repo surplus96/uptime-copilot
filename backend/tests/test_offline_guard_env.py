@@ -98,10 +98,22 @@ def test_get_langsmith_client_returns_none_when_offline(monkeypatch):
 
 
 def test_get_langsmith_client_returns_real_client_when_online(monkeypatch):
+    """2026-09-29 code-quality-reviewer 후속 지적: 이 테스트가 실제 langsmith.Client()를
+    만들면서 api.smith.langchain.com으로 연결을 시도했다(로컬/CI 샌드박스가 이를
+    차단하는 로그로 확인됨) - 이 테스트의 목적은 "오프라인이 아니면 no-op을 안 쓰고
+    진짜 Client를 만든다"는 분기 자체를 확인하는 것이지 langsmith SDK의 네트워크
+    동작을 검증하는 게 아니므로, langsmith.Client를 가짜로 바꿔서 생성자가 네트워크에
+    닿을 일이 없게 한다."""
+    import langsmith
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(langsmith, "Client", _FakeClient)
     monkeypatch.delenv("OFFLINE", raising=False)
     client = offline_guard.get_langsmith_client(anonymizer=None)
-    assert client is not None
-    assert type(client).__name__ == "Client"
+    assert isinstance(client, _FakeClient)
 
 
 def test_wrap_openai_is_passthrough_when_offline(monkeypatch):
