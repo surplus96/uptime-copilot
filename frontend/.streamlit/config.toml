@@ -6,6 +6,12 @@ address = "127.0.0.1"
 
 [browser]
 gatherUsageStats = false
+# 2026-09-30 security-reviewer(실행으로 확인): 컨테이너는 --server.address=0.0.0.0 + DISPLAY 없음이라
+# Streamlit이 헤드리스로 뜨면서 기동 때마다 "외부 URL 안내"를 만들려고 checkip.amazonaws.com에
+# 접속해 이 사이트의 공인 IP를 조회했다(gatherUsageStats=false는 이 조회를 막지 않는다).
+# 폐쇄망 모드의 "외부 호출 0회" 주장과 정면으로 충돌하고, 망이 막힌 곳에서는 시간 초과 대기까지
+# 붙는다. 서버 주소를 명시하면 조회 자체가 일어나지 않는다.
+serverAddress = "localhost"
 
 [theme]
 primaryColor = "#F96D17"

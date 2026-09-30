@@ -1,11 +1,11 @@
-import streamlit as st
-import requests
-import uuid
-import re
-import os
 import math
+import os
+import re
 import time
+import uuid
 
+import requests
+import streamlit as st
 
 CHAT_AVATARS = {"user": "🧑‍🔧", "assistant": "🛡️"}
 
@@ -84,7 +84,79 @@ def _extract_error_message(exc: requests.exceptions.RequestException) -> str:
                 return f"{label}: {detail}"
         except ValueError:
             pass
-    return str(exc)
+    # 2026-09-30 interface-reviewer(N7): 예전엔 str(exc)를 그대로 보여줘서 "HTTPConnectionPool(host=
+    # 'localhost', port=8000)...", "500 Server Error ... for url: ..." 같은 구현 세부가 사용자
+    # 화면에 그대로 나왔다. 원인만 짧게 보여준다(ConnectTimeout은 Timeout이기도 해서 연결 오류를
+    # 먼저 검사).
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "서버에 연결하지 못했습니다"
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "응답 시간이 초과됐습니다"
+    if response is not None:
+        return f"서버 오류(HTTP {response.status_code})"
+    return "요청 중 알 수 없는 오류가 발생했습니다"
+
+
+def _abandoned_request_notice(thread_id: str, *, kind: str) -> str:
+    """화면에서 닫은 요청에 대한 안내(B3) - 채팅 기록에 넣어 리런에도 사라지지 않게 쓴다.
+
+    kind:
+    - "pending": 승인 카드가 떠 있었고 승인/반려를 시도한 적이 없다 -> 서버에 대기 상태로 남아 있는 게 확실.
+    - "attempted": 승인/반려를 눌렀지만 결과를 확인하지 못했다 -> 이미 처리됐을 수도, 아직 대기일 수도 있다
+      (2026-09-30 interface-reviewer N1: 이때 "대기 상태로 남아 있다"고 단정하면 이미 승인된 건에는 거짓).
+    - "processing": 응답을 기다리다 닫았다 -> 서버가 계속 처리해 긴급 건이면 대기 상태로 남는다(조건부).
+    - "failed": 서버가 오류로 중단됐다고 확인한 뒤 닫았다 -> 대기가 남지 않는다(N6: 예전엔 모순된 문구).
+    이 앱에는 닫은 건을 다시 여는 기능이 아직 없다는 점을 숨기지 않는다(N5). 감사 로그에는 '승인 대기'
+    자체가 기록되지 않는다."""
+    reopen = " 이 앱에는 닫은 건을 다시 여는 기능이 아직 없습니다."
+    if kind == "pending":
+        body = (
+            "⚠️ 승인 대기 중이던 긴급 작업지시서를 승인·반려하지 않고 닫았습니다. 서버에는 "
+            "**승인 대기 상태로 남아 있으며 자동으로 반려하지 않습니다.**" + reopen
+        )
+    elif kind == "attempted":
+        body = (
+            "⚠️ 승인/반려 결과를 확인하지 못한 긴급 작업지시서를 닫았습니다. 서버에서 **이미 처리됐거나 "
+            "아직 승인 대기 상태일 수 있습니다**(자동으로 반려하지 않습니다)." + reopen
+        )
+    elif kind == "failed":
+        body = "⚠️ 서버에서 오류로 중단된 요청을 닫았습니다. 승인 대기는 남아 있지 않습니다."
+    else:
+        body = (
+            "⚠️ 결과를 기다리지 않고 이 요청을 닫았습니다. 서버가 계속 처리해 긴급 건으로 "
+            "판정되면 **승인 대기 상태로 남습니다**(자동으로 반려하지 않습니다)." + reopen
+        )
+    return (
+        f"{body} 스레드 ID `{thread_id}` — '감사 로그' 탭에서 이 ID로 진행 기록을 조회할 수 있습니다"
+        "(승인 대기 상태 자체는 기록되지 않습니다)."
+    )
+
+
+def _abandon_notice_message(thread_id: str, *, kind: str) -> dict:
+    """flag를 달아 둬서 이후 '새 진단 시작'이 대화를 비울 때도 이 안내는 남긴다(N4: 예전엔 다음 초기화가
+    지워서, 남겨두겠다던 스레드 ID가 사라졌다)."""
+    return {"role": "assistant", "abandon_notice": True, "content": _abandoned_request_notice(thread_id, kind=kind)}
+
+
+def _describe_resume_failure(exc: requests.exceptions.RequestException, label: str, thread_id: str) -> str:
+    """승인/반려 요청이 실패했을 때의 안내. 예전 문구는 (1) 반려에도 '승인'이라고 했고,
+    (2) 반려는 Slack/CMMS로 아무것도 안 보내는데 거기서 확인하라고 했고, (3) 오프라인·미설정
+    환경에서는 승인이 성공해도 Slack/CMMS가 비어 있어 사용자가 '실패'로 오해해 다시
+    누르게 했다 - 어느 환경에서나 같은 근거인 감사 로그로 안내한다. 연결 오류는 '요청이
+    전달되지 않았다'고 단정하지 않는다(응답 도중 끊긴 경우는 이미 처리됐을 수 있음)."""
+    if isinstance(exc, requests.exceptions.ConnectionError):  # ConnectTimeout은 Timeout이기도 해서 먼저 검사
+        cause = "서버에 연결하지 못했습니다"
+    elif isinstance(exc, requests.exceptions.Timeout):
+        cause = "60초 안에 응답이 오지 않았습니다"
+    elif isinstance(exc, requests.exceptions.HTTPError):
+        cause = _extract_error_message(exc)
+    else:
+        cause = "요청 중 알 수 없는 오류가 발생했습니다"
+    return (
+        f"{label} 결과를 확인하지 못했습니다 ({cause}).\n\n"
+        "요청이 서버에서 이미 처리됐을 수도 있습니다. 다시 누르기 전에 '감사 로그' 탭에서 "
+        f"스레드 ID `{thread_id}`로 '{label}' 기록이 있는지 확인하세요 — 있으면 이미 처리된 것입니다."
+    )
 
 
 def parse_work_order(text: str) -> list[dict]:
@@ -161,11 +233,28 @@ with tab1:
     reset_confirmed = True
     if st.session_state.pending_approval:
         reset_confirmed = st.sidebar.checkbox(
-            "⚠️ 승인 대기 중인 항목을 버리고 새 진단을 시작합니다",
+            "⚠️ 승인 대기 중인 항목을 결정하지 않고 닫습니다 (서버에서 이미 처리됐을 수 있습니다)"
+            if st.session_state.resume_error
+            else "⚠️ 승인 대기 중인 항목을 결정하지 않고 닫습니다 (서버에는 대기 상태로 남습니다)",
         )
     if st.sidebar.button("새 진단 시작", disabled=not reset_confirmed):
+        # B3와 같은 문제: 승인 대기 건을 화면에서 버려도 서버 체크포인트에는 그대로
+        # 남는다. 대화 기록은 비우되, 버린 건의 스레드 ID 안내 하나는 남긴다.
+        abandoned: list[tuple[str, str]] = []
+        if st.session_state.pending_approval:
+            kind = "attempted" if st.session_state.resume_error else "pending"
+            abandoned.append((st.session_state.agent_thread_id, kind))
+        if st.session_state.timeout_recovery:
+            last = st.session_state.timeout_recovery.get("last_status")
+            if last == "failed":
+                abandoned.append((st.session_state.timeout_recovery["thread_id"], "failed"))
+            elif last != "not_found":  # 기록이 없다고 확인된 건은 서버에 남은 게 없어 안내할 게 없다
+                abandoned.append((st.session_state.timeout_recovery["thread_id"], "processing"))
         st.session_state.agent_thread_id = str(uuid.uuid4())
-        st.session_state.agent_messages = []
+        # 이전에 남긴 닫기 안내는 유지한다(N4) - 그 스레드 ID를 다시 볼 곳이 여기뿐이다.
+        st.session_state.agent_messages = [
+            m for m in st.session_state.agent_messages if m.get("abandon_notice")
+        ] + [_abandon_notice_message(tid, kind=k) for tid, k in abandoned]
         st.session_state.pending_approval = None
         st.session_state.timeout_recovery = None
         st.session_state.resume_error = None
@@ -201,7 +290,7 @@ with tab1:
                     # 아무 기록도 없이 조용히 반환되며, CMMS도 skipped_unconfigured/
                     # blocked_insecure_url/blocked_offline일 수 있다. "시도했다"까지만
                     # 확정하고, 실제 결과는 감사 로그로 안내한다.
-                    st.success("✅ 승인됨 — 서버가 Slack 알림과 CMMS 작업지시서 등록을 시도했습니다(설정된 경우).")
+                    st.success("✅ 승인됨 — 외부 전송(Slack/CMMS)이 실제로 일어났는지는 '감사 로그' 탭에서 확인하세요.")
                     thread_id = message.get("thread_id")
                     if thread_id:
                         st.caption(
@@ -236,6 +325,10 @@ with tab1:
             if IS_OFFLINE:
                 st.caption("🔒 오프라인 모드 — 승인해도 Slack 알림은 발송되지 않습니다. CMMS는 "
                            "내부(루프백) 주소로 설정된 경우에만 등록을 시도합니다. 반려하면 아무 것도 전송되지 않습니다.")
+            elif st.session_state.backend_info is None:
+                # /health를 확인하지 못했으면 오프라인 여부를 모른다 - 온라인 문구를 확정처럼 쓰지 않는다(N10)
+                st.caption("⚠️ 백엔드 상태를 확인하지 못해 승인 시 어떤 외부 전송이 일어날지 표시할 수 없습니다. "
+                           "반려하면 아무 것도 전송되지 않습니다.")
             else:
                 st.caption("승인하면 서버가 Slack 긴급 채널 알림과 CMMS 긴급(HIGH) 작업지시서 등록을 "
                            "시도합니다(설정된 경우). 반려하면 아무 것도 전송되지 않습니다.")
@@ -280,43 +373,82 @@ with tab1:
             col1, col2, _ = st.columns([1, 1, 4])
 
             def _resume(approved: bool):
+                label = "승인" if approved else "반려"
+                thread_id = st.session_state.agent_thread_id
+                st.session_state.resume_error = None  # 이전 시도의 오류가 새 시도 결과와 섞여 남지 않게
+                failure = None
                 try:
-                    res = requests.post(
-                        f"{BACKEND_URL}/agent/resume",
-                        json={"thread_id": st.session_state.agent_thread_id, "approved": approved},
-                        timeout=60,
-                    )
-                    res.raise_for_status()
-                    data = res.json()
+                    with st.spinner(f"{label} 처리 중… (최대 60초)"):
+                        res = requests.post(
+                            f"{BACKEND_URL}/agent/resume",
+                            json={"thread_id": thread_id, "approved": approved},
+                            timeout=60,
+                        )
+                        res.raise_for_status()
+                        data = res.json()
                 except requests.exceptions.RequestException as e:
+                    failure = _describe_resume_failure(e, label, thread_id)
+                if failure:
                     # 타임아웃/네트워크 오류만으로는 서버가 실제로 처리했는지 알 수 없다 -
                     # 여기서 pending_approval을 지우면 실제로는 이미 성공(Slack+CMMS까지
                     # 나간)했는데 사용자에게는 "실패"로 보이고 재시도할 방법도 사라진다
                     # (code-quality-reviewer + interface-reviewer 공통 지적, 2026-09-18).
                     # 확실해질 때까지 승인 대기 상태를 그대로 유지한다.
                     #
-                    # 2026-09-29 interface-reviewer 지적(B1, 가장 심각): 이 st.error()는
-                    # 이 함수 호출 시점에만 한 번 그려지는데, 사이드바 이벤트 스캐너
-                    # fragment가 10초마다 앱 전체를 리런시키면(기본 scope="app") 그
-                    # 리런에서는 이 코드가 다시 실행되지 않으니 에러가 조용히 사라진다 -
-                    # 마치 아무 일도 없었던 것처럼 승인 카드만 남는다. session_state로
-                    # 옮겨서 pending_approval이 남아있는 한 계속 보이게 한다.
-                    st.session_state.resume_error = (
-                        f"승인 결과를 확인하지 못했습니다: {_extract_error_message(e)}\n\n"
-                        "요청이 서버에 전달되어 이미 처리됐을 수도 있습니다. 다시 누르기 전에 "
-                        "Slack 채널이나 CMMS에서 작업지시서가 이미 등록됐는지 확인하세요."
-                    )
-                    return
-                st.session_state.resume_error = None
+                    # 2026-09-29 (B1): 이 오류는 session_state에 둔다 - 사이드바 fragment가 10초마다
+                    # 앱 전체를 리런시켜서, 그리는 순간에만 보이면 조용히 사라진다.
+                    # 2026-09-30 interface-reviewer 지적(AppTest로 재현 확인): 오류 상자는 버튼보다
+                    # 먼저 그려지는데 이 함수는 버튼 뒤에서 실행돼서, 세션에 저장만 하고 리런을
+                    # 안 하면 그 클릭에는 오류가 안 보이고 다음 클릭에 '이전 클릭의' 오류가
+                    # 나왔다 - "다시 누르기 전에 확인하라"는 경고가 이미 다시 누른 뒤에 뜨는
+                    # 셈이었다. 저장 직후 리런해서 같은 클릭에 보이게 한다.
+                    st.session_state.resume_error = failure
+                    st.rerun()
+                # 2026-09-30 interface-reviewer(N2, 실제 LangGraph로 확인): 앞선 승인이 타임아웃 났지만
+                # 서버에서는 성공했다면, 그 뒤 "반려"를 눌러도 서버는 이미 끝난 스레드의 이전(승인)
+                # 결과를 돌려준다 - 사용자는 반려를 눌렀는데 "✅ 승인됨"만 보게 된다. 눌렀던 결정과 서버
+                # 기록이 다르면 그 사실을 먼저 알린다.
+                recorded_approved = data["result"].startswith("[긴급 승인됨]")
+                recorded_rejected = data["result"].startswith("[긴급 반려됨]")
+                if (approved and recorded_rejected) or (not approved and recorded_approved):
+                    other = "반려" if recorded_rejected else "승인"
+                    st.session_state.agent_messages.append({
+                        "role": "assistant",
+                        "content": f"ℹ️ '{label}' 버튼을 눌렀지만 이 건은 이미 {other} 처리돼 있었습니다. "
+                                   f"아래는 서버에 기록된 결과입니다.",
+                    })
                 st.session_state.agent_messages.append({
                     "role": "assistant", "content": data["result"], "work_order": data.get("work_order"),
-                    "thread_id": st.session_state.agent_thread_id,
+                    "thread_id": thread_id,
                 })
                 st.session_state.pending_approval = None
                 st.rerun()
 
             if st.session_state.get("resume_error"):
                 st.error(st.session_state.resume_error)
+                # 예전엔 이 상자 아래에 승인/반려 버튼만 있어서, 이미 처리됐는지 알아볼 방법이 없었고
+                # 유일한 출구가 (거짓 문구의) 사이드바 닫기였다(N2). 백엔드의 상태 조회(재실행 없음)를 쓴다.
+                if st.button("이 요청 상태 확인", key="resume_status_check"):
+                    try:
+                        res = requests.get(f"{BACKEND_URL}/agent/status/{st.session_state.agent_thread_id}", timeout=10)
+                        res.raise_for_status()
+                        check = res.json()
+                    except requests.exceptions.RequestException as e:
+                        st.warning(f"상태를 확인하지 못했습니다: {_extract_error_message(e)}")
+                    else:
+                        if check.get("status") == "done":
+                            st.session_state.agent_messages.append({
+                                "role": "assistant", "content": check["result"],
+                                "work_order": check.get("work_order"),
+                                "thread_id": st.session_state.agent_thread_id,
+                            })
+                            st.session_state.pending_approval = None
+                            st.session_state.resume_error = None
+                            st.rerun()
+                        elif check.get("status") == "pending_approval":
+                            st.info("서버에서 아직 승인 대기 상태입니다 — 처리되지 않았으니 승인 또는 반려를 다시 누를 수 있습니다.")
+                        else:
+                            st.info("서버가 이 요청을 아직 처리 중이거나 기록을 찾지 못했습니다. 잠시 뒤 다시 확인하세요.")
 
             if col1.button("승인", use_container_width=True):
                 _resume(True)
@@ -356,17 +488,29 @@ with tab1:
                     # 보이고 다음 리런(다른 클릭이나 사이드바 fragment의 앱 전체 리런)에
                     # 흔적 없이 사라진다 - 질문은 응답 없이 기록에 남는다. 쿼리 실패 때와
                     # 같이 채팅 기록(session_state)에 영구히 남긴다.
-                    st.session_state.agent_messages.append({
-                        "role": "assistant",
-                        "content": f"⚠️ 이 요청의 결과를 표시할 수 없습니다 — {_extract_error_message(e)}",
-                    })
-                    st.session_state.timeout_recovery = None
-                    check_ok = False
-                    st.rerun()
+                    # 2026-09-30 interface-reviewer(N8): 이 종료 처리는 400(harness 거부)처럼 확정적 거부를
+                    # 위한 것이다 - 5xx는 일시적일 수 있어서 패널을 닫아버리면 복구할 방법이 사라진다.
+                    # 확정적일 때만 닫고, 그때도 스레드 ID를 남긴다.
+                    status_code = getattr(e.response, "status_code", None)
+                    if status_code == 400:
+                        st.session_state.agent_messages.append({
+                            "role": "assistant",
+                            "content": f"⚠️ 이 요청의 결과를 표시할 수 없습니다 — {_extract_error_message(e)} "
+                                       f"(스레드 ID `{recovery['thread_id']}`)",
+                        })
+                        st.session_state.timeout_recovery = None
+                        check_ok = False
+                        st.rerun()
+                    else:
+                        st.error(f"상태 확인 중 서버에서 오류가 났습니다: {_extract_error_message(e)} — 잠시 뒤 다시 확인하세요.")
+                        check_ok = False
                 except requests.exceptions.RequestException as e:
                     st.error(f"상태 확인 요청 자체가 실패했습니다: {_extract_error_message(e)}")
                     check_ok = False
 
+                if check_ok:
+                    # 마지막으로 확인한 서버 상태를 기억해 두었다가, 닫을 때 상황에 맞는 안내를 고른다(N6)
+                    recovery["last_status"] = check.get("status")
                 if not check_ok:
                     pass
                 elif check.get("status") == "pending_approval":
@@ -388,13 +532,43 @@ with tab1:
                     })
                     st.session_state.timeout_recovery = None
                     st.rerun()
-                else:
+                elif check.get("status") == "running":
+                    # 2026-09-30 pipeline-optimizer: 백엔드가 이제 "아직 실행 중"을 구분해 알려준다.
+                    # 로컬 모델(Ollama)에서는 긴급 진단이 3분 안팎 걸리는 게 정상이라(문서화된
+                    # 163~177초) 예전처럼 "1~2분 뒤 포기"를 안내하면 멀쩡히 진행 중인 요청을 버리게
+                    # 되고, 버려도 서버 그래프는 단일 추론 슬롯을 계속 점유한다.
                     st.info(
-                        "아직 결과가 없습니다. 서버가 계속 처리 중이거나, 요청이 도중에 실패해 "
-                        "결과가 남지 않았을 수 있습니다. 1~2분 뒤에도 같다면 '포기하고 새로 "
-                        "시작'으로 다시 질문하세요."
+                        "서버가 아직 이 요청을 처리 중입니다. 로컬 모델에서는 긴급 진단에 3분 안팎이 "
+                        "걸릴 수 있습니다 — 잠시 뒤 '이 요청 상태 확인'을 다시 누르세요. 서버가 도중에 "
+                        "중단됐다면 계속 이 상태로 보일 수 있습니다(5분이 넘으면 '기다리지 않고 닫기' 후 "
+                        "다시 질문하세요)."
                     )
-            if col2.button("포기하고 새로 시작", use_container_width=True):
+                elif check.get("status") == "failed":
+                    st.error(
+                        f"서버에서 이 요청을 처리하다 오류가 났습니다(오류 유형: {check.get('error_type', '알 수 없음')}). "
+                        "결과는 만들어지지 않았습니다 — '기다리지 않고 닫기' 후 다시 질문하세요."
+                    )
+                elif check.get("status") == "not_found":
+                    # N3: 이 패널은 응답 시간 초과 뒤에만 열리므로 요청은 서버에 도달했다 - "도달하지 못했을
+                    # 수 있다"는 원인 설명이 틀렸다. 기록이 없는 실제 이유(재시작·저장 전 중단)를 든다.
+                    st.info(
+                        "서버에 이 요청의 처리 기록이 없습니다 — 서버가 재시작됐거나 첫 기록이 저장되기 전에 "
+                        "중단됐을 수 있습니다. '기다리지 않고 닫기' 후 다시 질문하세요."
+                    )
+                else:
+                    st.info("서버가 알 수 없는 상태로 답했습니다. 잠시 뒤 다시 확인하거나 닫고 다시 질문하세요.")
+            if col2.button("기다리지 않고 닫기", use_container_width=True):
+                # B3(2026-09-29 interface-reviewer): 여기서 복구 패널만 지우면, 서버는
+                # 타임아웃과 무관하게 계속 돌아서 긴급 작업지시서를 승인 대기 상태로
+                # 체크포인트에 남겼을 수 있는데 화면엔 아무 흔적도 안 남았다. 서버 쪽
+                # 대기 건을 자동 반려하지 않는 건 의도적이다 - 실제 긴급 건이 사람의
+                # 판단 없이 반려로 기록되면 안 된다. 대신 채팅 기록에 스레드 ID와 함께
+                # 영구히 남겨서 나중에라도 찾아갈 수 있게 한다.
+                last = recovery.get("last_status")
+                if last == "failed":
+                    st.session_state.agent_messages.append(_abandon_notice_message(recovery["thread_id"], kind="failed"))
+                elif last != "not_found":  # 서버에 남은 게 없다고 확인된 건은 안내할 게 없다
+                    st.session_state.agent_messages.append(_abandon_notice_message(recovery["thread_id"], kind="processing"))
                 st.session_state.timeout_recovery = None
                 st.rerun()
     else:
@@ -603,7 +777,7 @@ def _simulator_panel():
             st.error(f"최근 진행 {status.get('consecutive_failures', 0)}회 연속 실패: {status['last_error']}")
 
         if status["has_stale_events"]:
-            st.info(f"감지 목록에 항목이 있습니다. 시뮬레이터 상태와는 별개로 유지되며, 이전 실행이나 수동 전체 스캔의 결과일 수 있습니다.")
+            st.info("감지 목록에 항목이 있습니다. 시뮬레이터 상태와는 별개로 유지되며, 이전 실행이나 수동 전체 스캔의 결과일 수 있습니다.")
 
         col_r1, col_r2 = st.columns([3, 1])
         col_r1.caption(
@@ -761,6 +935,22 @@ def _fetch_inventory_risk():
     return res.json()["rows"]
 
 
+def _stock_outlook(on_hand: int, demand_30d: float, demand_90d: float) -> dict:
+    """재고 위험 탭이 화면에 보여줄 정수 수치를 한곳에서 계산한다. 수요를 올림(math.ceil)한 값에서
+    부족분을 계산해서 화면 안의 산수가 맞는다 - 백엔드의 shortfall은 round(수요-재고, 1)을 먼저 해서
+    재고 5·수요 5.05일 때 "약 6개 수요"인데 부족분은 0으로 나왔다(2026-09-30 interface-reviewer N9).
+    재고 소진 시점은 90일 수요를 균등하게 나눈 단순 추정이다."""
+    d30, d90 = math.ceil(demand_30d), math.ceil(demand_90d)
+    daily = demand_90d / 90
+    return {
+        "demand_30d": d30,
+        "demand_90d": d90,
+        "shortfall_30d": max(0, d30 - on_hand),
+        "shortfall_90d": max(0, d90 - on_hand),
+        "stockout_days": int(on_hand / daily) if daily > 0 else None,
+    }
+
+
 with tab4:
     st.subheader("📦 부품 재고 위험")
     st.caption("예상 수요(30/90일)가 현재 재고를 초과하는 부품을 보여줍니다. 리드타임이 예측 기간보다 길면 지금 발주해도 늦을 수 있습니다.")
@@ -768,11 +958,24 @@ with tab4:
     # 전부 합성값이고(docs/design/parts_assumptions.md), 수요는 과거 교체율 기반
     # 추정치라 이미 발주해둔 물량은 반영하지 못한다는 걸 화면에서 밝혀야 한다.
     st.caption("⚠️ 부품 재고·리드타임은 합성(가상) 데이터입니다. 수요는 과거 교체 이력 기반 추정치이며, 이미 발주해 입고 대기 중인 물량은 반영하지 않습니다.")
+    inventory_ok = True
     try:
         rows = _fetch_inventory_risk()
     except requests.exceptions.RequestException as e:
-        st.error(f"백엔드 요청 실패: {_extract_error_message(e)}")
+        # 백엔드가 준 설명(예: 모델·CSV 누락 503의 해결 명령)은 그대로 보여주되, "백엔드 요청 실패: 오류:"
+        # 접두를 붙여 설정 문제를 장애처럼 보이게 하지 않는다(2026-09-30 interface-reviewer N11).
+        reason = _extract_error_message(e)
+        if reason.startswith("오류: "):
+            reason = reason[len("오류: "):]
+        st.error(f"부품 재고 위험을 계산할 수 없습니다 — {reason}")
         rows = []
+        inventory_ok = False
+
+    if inventory_ok and not rows:
+        # 2026-09-30 interface-reviewer 지적: 백엔드는 조회에 실패한 부품을 조용히 빼기 때문에,
+        # 빈 화면이 "위험 없음"으로 읽혔다.
+        st.info("표시할 부품 데이터가 없습니다 — 부품 마스터가 초기화되지 않았거나 조회에 실패한 "
+                "부품만 있을 수 있습니다. 위험이 없다는 뜻이 아닙니다.")
 
     for r in rows:
         with st.container(border=True):
@@ -782,40 +985,45 @@ with tab4:
             # 똑같이 "임박"으로 나와서, 이미 단종된 부품을 아직 여유 있다는 듯 오독하게
             # 만들었다. eol_status를 그대로 반영한다.
             if r["eol_status"] == "경과":
-                title += " ⚠️ 단종됨(단종일 경과)"
+                title += f" ⚠️ 단종됨(단종일 {r['eol_date']} 경과)" if r.get("eol_date") else " ⚠️ 단종됨(단종일 경과)"
             elif r["eol_status"] == "임박":
-                title += " ⚠️ 단종 임박"
+                title += f" ⚠️ 단종 임박({r['eol_date']})" if r.get("eol_date") else " ⚠️ 단종 임박"
             st.markdown(f"**{title}**")
             c1, c2, c3 = st.columns(3)
             c1.metric("현재 재고", r["on_hand"])
-            c2.metric("30일 예상수요", f"약 {round(r['demand_30d'])}개")
-            c3.metric("90일 예상수요", f"약 {round(r['demand_90d'])}개")
-            # 2026-09-28 문서 정합성 3차 점검 지적 + 사용자 결정: 90일 기준 부족분은
-            # 리드타임 안에 조달 가능하면(coverable) "정상 재주문 신호"이지 comp4류의
-            # 실제 위험(30일 안에도 조달이 안 맞는 경우)과 같은 급이 아니다 - 지금까지는
-            # 둘 다 비슷한 톤으로 떠서 화면만 보면 구분이 안 됐다. coverable 여부로
-            # 위험(st.warning)과 정상 재주문 시점(st.caption)을 시각적으로 분리한다.
-            if r["shortfall_30d"] > 0:
-                warn = f"⚠️ 30일 내 약 {math.ceil(r['shortfall_30d'])}개 부족 예상"
-                if not r["coverable_30d"]:
-                    warn += f" (리드타임 {r['lead_time_days']}일 > 30일 — 지금 발주해도 기간 내 입고 불가)"
+            outlook = _stock_outlook(r["on_hand"], r["demand_30d"], r["demand_90d"])
+            c2.metric("30일 예상수요", f"약 {outlook['demand_30d']}개")
+            c3.metric("90일 예상수요", f"약 {outlook['demand_90d']}개")
+            lead = r["lead_time_days"]
+            if outlook["shortfall_30d"] > 0:
+                warn = f"⚠️ 30일 내 약 {outlook['shortfall_30d']}개 부족 예상"
+                if lead > 30:
+                    warn += f" (리드타임 {lead}일 > 30일 — 지금 발주해도 기간 내 입고 불가)"
                 st.warning(warn)
-            elif r["shortfall_90d"] > 0 and not r["coverable_90d"]:
-                st.warning(
-                    f"⚠️ 90일 내 약 {math.ceil(r['shortfall_90d'])}개 부족 예상 "
-                    f"(리드타임 {r['lead_time_days']}일 > 90일 — 지금 발주해도 기간 내 입고 불가)"
-                )
-            elif r["shortfall_90d"] > 0:
-                st.caption(
-                    f"🔵 정상 재주문 신호 — 90일 내 약 {math.ceil(r['shortfall_90d'])}개 소요 예상, "
-                    f"리드타임 {r['lead_time_days']}일이면 지금 발주 안 해도 기간 내 조달 가능 (위험 아님)"
-                )
+            elif outlook["shortfall_90d"] > 0:
+                days = outlook["stockout_days"]
+                note = "수요가 90일 동안 일정하다는 단순 추정"
+                if days is not None and lead > days:
+                    # 2026-09-30 interface-reviewer(N0, AppTest 재현): 예전엔 리드타임이 90일 이하면 무조건
+                    # "지금 발주 안 해도 기간 내 조달 가능 (위험 아님)"이라고 했다 - 재고 1개·90일 수요 2.7개·
+                    # 리드타임 85일이면 재고는 약 33일 뒤 소진되는데도. 재고가 언제 떨어지는지를
+                    # 리드타임과 직접 비교한다.
+                    st.warning(
+                        f"⚠️ 재고가 약 {days}일 뒤 소진될 것으로 추정되는데 리드타임이 {lead}일이라, 지금 "
+                        f"발주해도 소진 전에 입고되기 어렵습니다 (90일 내 약 {outlook['shortfall_90d']}개 부족 예상 · {note})"
+                    )
+                else:
+                    st.caption(
+                        f"🔵 재주문 필요 — 90일 내 약 {outlook['shortfall_90d']}개 부족 예상. 재고는 약 {days}일 뒤 "
+                        f"소진 추정, 리드타임이 {lead}일이라 약 {days - lead}일 안에는 발주해야 소진 전에 "
+                        f"입고됩니다 ({note})"
+                    )
             else:
                 st.caption("재고 위험 없음")
 
 @st.cache_data(ttl=10)
 def _fetch_audit_log(event_type=None, thread_id=None):
-    params = {"limit": 200}
+    params = {"limit": AUDIT_LIMIT}
     if event_type:
         params["event_type"] = event_type
     if thread_id:
@@ -832,9 +1040,23 @@ EVENT_TYPE_LABELS = {
     "tool_call": "도구 호출",
     "approval": "승인",
     "rejection": "반려",
-    "external_push": "외부 전송(Slack/CMMS)",
+    "external_push": "외부 전송 시도(Slack/CMMS)",
     "blocked_by_offline": "오프라인 차단",
 }
+
+# 결과값이 영문 코드(sent/skipped_unconfigured/...)와 한글(성공/실패/차단)이 섞여 나오던 것을
+# 한 벌의 한글 라벨로 통일해 보여준다. 저장된 원값은 바꾸지 않는다(테스트·API가 그 값에 의존).
+RESULT_LABELS = {
+    "sent": "전송됨",
+    "skipped_unconfigured": "미설정 — 전송 안 함",
+    "blocked_insecure_url": "차단 — 평문 HTTP 주소",
+    "blocked_offline": "차단 — 오프라인 모드",
+}
+AUDIT_COLUMNS = {
+    "ts": "시각", "thread_id": "스레드 ID", "event_type": "유형", "target": "대상",
+    "summary": "요약", "result": "결과", "provider": "제공자",
+}
+AUDIT_LIMIT = 200  # _fetch_audit_log가 요청하는 limit과 같아야 한다
 
 with tab5:
     st.subheader("🧾 감사 로그")
@@ -867,6 +1089,22 @@ with tab5:
         if not rows:
             st.caption("조건에 맞는 감사 로그가 없습니다.")
         else:
-            display_rows = [{**r, "event_type": EVENT_TYPE_LABELS.get(r["event_type"], r["event_type"])} for r in rows]
+            display_rows = [
+                {
+                    AUDIT_COLUMNS[k]: (
+                        EVENT_TYPE_LABELS.get(v, v) if k == "event_type"
+                        else RESULT_LABELS.get(v, v) if k == "result"
+                        else v
+                    )
+                    for k, v in r.items() if k in AUDIT_COLUMNS
+                }
+                for r in rows
+            ]
+            st.caption(
+                "결과 — 차단: 정책(오프라인 모드 등)에 따라 의도적으로 보내지 않음 · 실패: 전송을 "
+                "시도했으나 오류 · 미설정: 대상 설정이 없어 시도하지 않음"
+            )
+            if len(rows) >= AUDIT_LIMIT:
+                st.caption(f"최근 {AUDIT_LIMIT}건만 표시합니다 — 유형이나 스레드 ID로 좁혀 보세요.")
             st.dataframe(display_rows, use_container_width=True)
 
