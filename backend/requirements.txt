@@ -17,6 +17,11 @@ langchain-community
 langgraph
 langgraph-checkpoint-sqlite
 pandas
+# 아래 셋은 코드가 직접 import한다(data/demand_forecast.py, ml/*) - 전에는 다른 패키지의 전이
+# 의존성으로만 설치됐다(scikit-learn은 sentence-transformers를 통해서만). 2026-09-30 build-doctor.
+numpy
+scikit-learn
+joblib
 requests
 mcp==1.30.0
 pytest

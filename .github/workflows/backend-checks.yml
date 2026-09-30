@@ -1,9 +1,10 @@
 name: Backend checks
 
 # ruff/mypy/pytest만 돈다 - 2026-09-22 sim_only_now() 삭제 사고(테스트 하나로도 안
-# 잡히고 배포 후에야 500으로 드러남) 재발 방지용. OPENAI_API_KEY 없이 돈다: 테스트가
-# import하는 모듈 중 OpenAI 클라이언트를 모듈 레벨에서 만드는 agent_service.py/main.py는
-# 어떤 테스트도 직접 import하지 않는다(ruff/mypy는 소스만 정적으로 읽지 실행하지 않음).
+# 잡히고 배포 후에야 500으로 드러남) 재발 방지용. OPENAI_API_KEY 없이 돈다: agent_service.py는
+# 이제 테스트가 직접 import하지만(지연 초기화 덕분에 키 없이도 import됨), main.py는 어떤 테스트도
+# import하지 않는다. .env 없이도 통과해야 한다 - tests/conftest.py가 외부 호출·프록시·DB 경로를
+# 테스트마다 격리한다. push 트리거는 아래 브랜치 목록뿐이고, 나머지 브랜치는 PR로 검사된다.
 on:
   push:
     branches: [main, workspace-mac, workspace-mac-2]
@@ -26,10 +27,17 @@ jobs:
         run: |
           pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
-          pip install mypy ruff
+          # 버전 고정: pyproject의 warn_unused_ignores=true 때문에 mypy가 올라가면 코드 변경 없이
+          # CI가 빨개진다(ml/train.py 주석에 실제로 겪은 사례가 있다). 로컬과 같은 버전이다.
+          pip install ruff==0.16.8 mypy==2.3.1
 
       - name: ruff
         run: python -m ruff check .
+
+      - name: ruff (frontend)
+        # 백엔드의 규칙 세트를 그대로 쓴다. 프론트엔드는 테스트가 없어서 린트가 유일한 정적 검사다.
+        working-directory: .
+        run: python -m ruff check --config backend/pyproject.toml frontend/
 
       - name: mypy (data/ + cmms_client.py)
         run: python -m mypy
