@@ -7,188 +7,134 @@
 
 **Uptime Copilot — Predictive Maintenance & MRO Copilot**
 
-OpenAI 기반 RAG + 멀티에이전트 백엔드와 Streamlit 프론트엔드로 구성된 프로젝트입니다.
-제조 설비 정비 도메인을 배경으로 하며, Azure Predictive Maintenance 데이터셋을 사용합니다.
-MRO(부품·재고·조달) 계층과 폐쇄망 보안 운영(오프라인 모드, 감사 로그)까지 확장했습니다 —
-아래 MRO 확장 섹션 참고.
+RAG + 멀티에이전트 백엔드(FastAPI/LangGraph)와 Streamlit 프론트엔드로 구성된, 제조 설비
+정비 도메인 예제입니다(Azure Predictive Maintenance 데이터셋 기반). MRO(부품·재고·조달)
+계층과 폐쇄망 보안 운영(오프라인 모드, 감사 로그)까지 확장했습니다 — 아래 MRO 확장 참고.
 
-> 📄 **[포트폴리오 케이스 스터디 →](docs/PORTFOLIO_KOR.md)** — 아키텍처 다이어그램, 핵심 로직, 주요 엔지니어링 결정.
+> 📄 **[포트폴리오 케이스 스터디 →](docs/PORTFOLIO_KOR.md)** — 아키텍처, 설계 결정, 엔지니어링 사례.
 
-> **한화의 TOMMS/HUMS 공개 자료에서 착안한 독립 프로젝트**입니다
-> ([mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md) §0-1에서 비교 목적으로만 언급) —
-> 한화와 제휴·후원 관계가 없으며 한화를 위해 만들어진 것도 아닙니다. 이 저장소의 부품번호·
-> 재고·리드타임·단가·단종일은 모두 합성값입니다(아래 MRO 확장 섹션 참고). 수요 예측에 쓰는 교체
-> 이력은 공개 Azure PdM 데이터셋의 것이며, 그 데이터셋 자체도 시뮬레이션 데이터입니다.
+> **한화의 TOMMS/HUMS 공개 자료에서 착안한 독립 프로젝트**입니다 — 한화와 제휴·후원 관계가
+> 없으며 한화를 위해 만들어진 것도 아닙니다. 부품번호·재고·리드타임·단가·단종일은 모두
+> 합성값입니다. 수요 예측에 쓰는 교체 이력은 공개 Azure PdM 데이터셋의 것이며, 그 데이터셋
+> 자체도 시뮬레이션 데이터입니다.
 
 ## MRO 확장 (부품·수요예측·재고위험·오프라인 모드·감사 로그)
 
-위 예지보전 코어 위에 부품 마스터, 수요 예측, 재고 위험 대시보드를 얹고, 기존 진단
-파이프라인과 연결해서 실제 설비 고장이 발생했을 때 필요한 부품이 실제로 있는지까지
-같이 보여줍니다. 계획·결정 기록: [mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md),
-[docs/decisions.md](docs/decisions.md).
+핵심 파이프라인 위에 부품 마스터, 수요 예측, 재고 위험 대시보드를 얹고 오프라인 모드와
+감사 로그로 폐쇄망 배포를 지원합니다. 계획·결정 기록:
+[mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md), [docs/decisions.md](docs/decisions.md).
 
-- **부품 마스터(`backend/data/parts_master.py`)** — 합성 부품 5개(comp1~4 + comp4용
-  단종 대체품 1개), 백엔드 기동 시 자동 시드. **부품번호·재고·리드타임·단종일 전부
-  합성값**입니다 — 생성 규칙과 comp4를 의도적으로 부족하게 설정한 이유는
-  [docs/design/parts_assumptions.md](docs/design/parts_assumptions.md) 참고(아래
-  조달 권고 시연 시나리오의 대상입니다).
-- **수요 예측(`backend/data/demand_forecast.py`)** — 부품별 30/90일 예상 교체 건수를
-  예방정비 항(계획대로, 모델과 무관)과 고장교체 항으로 나눠 계산합니다. 고장교체 항은
-  "오늘"(실제 경보 상태를 아는 날)은 검증기간의 조건부 확률을, "미래"(경보 상태를
-  아직 모르는 날)는 모집단 기본율을 씁니다 — 이 둘을 바꿔 쓰면 실제로 버그가
-  났습니다(`docs/decisions.md`, 2026-09-28 참고). 2015-11-01 시점 스냅샷만으로
-  11~12월 Azure PdM 데이터셋의 실측 교체 건수를 예측하는 백테스트(교체율은 1~10월 데이터로
-  적합하고 11~12월 데이터는 적합에 쓰지 않음) 오차 -5.0%~+3.5%. **이 백테스트가 검증하는 건
-  기본 교체율이지 경보 항이 아닙니다** — 경보 항이 더하는 양은 ~120건 중 0~2건이고, 경보 항
-  없이 예측해도 오차는 잡음 범위 안에서 같습니다(대략 -6%~+3%).
-- **재고 위험 탭** — `GET /parts/inventory_risk`, Streamlit 4번째 탭에 표시. 화면
-  수치는 반올림해서 보여주고, 이미 발주해 입고 대기 중인 물량은 반영하지 않는
-  추정치임을 명시합니다.
-- **우선순위는 부품 가용성과 분리**되어 있습니다 — 부품이 없다고 진단이 더 급해지지
-  않습니다(긴급도는 기존과 동일하게 안전/생산/정비 관점과 위험도 모델에서만 나옵니다).
-  재고 부족이나 단종 임박은 우선순위를 올리는 대신 작업지시서에 별도
-  `[조달 긴급도]` 줄로 표시됩니다.
-- **오프라인 모드(`backend/core/offline_guard.py`)** — 모듈별 스위치가 아니라 목적지 기반
-  허용 목록(`localhost`/`127.0.0.1`/`host.docker.internal`)입니다. 목록 안(Ollama, 자체 호스팅
-  CMMS)은 `OFFLINE=1`에서도 그대로 동작합니다. 아래는 각각 읽기만 한 게 아니라 실제로 실행해서
-  확인한 동작입니다:
-  - **기동을 거부**하는 경우: `OFFLINE` 값을 알아볼 수 없을 때(`y` 같은 오타가 조용히 온라인으로
-    동작하던 문제 - 허용 값은 `1/true/yes/on`, `0/false/no/off` 또는 빈 값), `LLM_PROVIDER`가
-    `openai`이거나 모르는 값일 때, `OLLAMA_BASE_URL`/`CMMS_MCP_URL`이 허용 목록 밖이거나 모호한
-    URL(userinfo·백슬래시·제어문자·http/https 외 스킴)일 때, 프록시 변수(`HTTP(S)_PROXY`/
-    `ALL_PROXY`, 대소문자 무관)가 있어서 허용 목록 호스트로 가는 요청까지 프록시로 새게 될 때
-    (`NO_PROXY`에 포함해야 하며, 빈 값의 소문자 `no_proxy`가 우선함). 환경변수만 검사하고 OS 수준
-    프록시 설정은 검사하지 않습니다.
-  - **다른 어떤 것보다 먼저 꺼두는 것**: `HF_HUB_OFFLINE=1`(임베딩 모델이 이미 캐시에 있어야
-    함 - 캐시가 빈 채로 `OFFLINE=1` 첫 실행을 하면 멈추지 않고 기동 시점에 실패함)과 모든
-    LangChain/LangSmith 트레이싱 변수. Slack은 스킵하고, CMMS push는 호출 시점에 호스트가 허용
-    목록 안일 때만 허용합니다.
-  - **CI에서 자동으로 확인하는 것**: `backend/tests/test_offline_guard.py`(CI 기본 경로에 포함,
-    `-m offline_e2e`로 단독 선택 가능)가 `pytest-socket`으로 허용 목록 밖 실제 소켓을 막고,
-    *LLM과 진단을 스텁으로 대체한* 진단→승인 시나리오를 돌립니다. 이 시나리오에서 Slack은 가드가
-    스킵하고 CMMS는 미설정입니다. 기동 거부·호출 시점 CMMS 검사·URL 파싱은 소켓 테스트가 아니라
-    단위 테스트로 확인합니다.
-  - **증명하지 못한 것**: `pytest-socket`은 TCP `connect()`만 봅니다 - 프록시 경유, DNS 조회,
-    HTTP 리다이렉트는 범위 밖입니다(프록시는 대신 기동 시점에 거부). 소켓 테스트는 `main.py`를
-    import하지 않으므로 기동과 RAG 초기화는 CI에서 검증되지 않습니다 - 소켓을 막은 상태로
-    따로 실행해서 확인했습니다. 프론트엔드 컨테이너는 기동 때마다 자기 공인 IP를 조회했는데,
-    `browser.serverAddress` 설정으로 없앴습니다(컨테이너의 Streamlit 설정을 흉내 내서 확인했고
-    실제 컨테이너에서 확인한 것은 아닙니다).
-- **감사 로그(`backend/data/audit_log.py`)** — LLM을 쓰는 모든 단계(라우팅, 3관점 평가,
-  일정/일반 답변, RAG 답변, 로컬 모델 워밍업 - 실패 포함), 부품 가용성 조회, 승인/반려,
-  Slack·CMMS 전송을 실제 결과(전송됨/실패/미설정/오프라인 차단)와 함께 시각·스레드ID·
-  이벤트유형·대상·결과·제공자로 기록합니다. **기록하지 않는 것**: 진단용 데이터 조회(정비
-  이력·이상 탐지·위험도 모델)와 백그라운드 스캔의 부품 조회이며, 재시도한 호출과 RAG 답변+
-  충실도 판정은 각각 한 행으로 남습니다. 자유 텍스트는 저장 전에 개인정보를 마스킹합니다(주민등록
-  번호·카드·휴대폰·국제전화·유선전화·이메일). 이름·주소는 형식으로 잡을 수 없어 마스킹하지
-  않습니다. `GET /audit_log`(`event_type`·`thread_id`·`since`·`until` 필터, `limit` 1~1000)와
-  Streamlit 5번째 탭에서 조회하며, 스레드ID로 필터링하면 라우팅→부품조회→3관점 평가→승인→전송까지
-  한 시나리오가 재구성됩니다.
+- **부품 마스터** (`backend/data/parts_master.py`) — 합성 부품 5개(comp1~4 + comp4용 단종
+  대체품 1개), 기동 시 자동 시드. 부품번호·재고·리드타임·단종일 전부 합성값입니다 —
+  [docs/design/parts_assumptions.md](docs/design/parts_assumptions.md) 참고.
+- **수요 예측** (`backend/data/demand_forecast.py`) — 부품별 30/90일 교체 수요를 예방정비
+  항(계획대로, 모델 무관)과 고장교체 항(오늘은 실제 경보 상태, 미래는 모집단 기본율 —
+  이 둘을 바꿔 쓰면 실제로 버그가 났습니다, `docs/decisions.md` 2026-09-28)으로 나눠
+  계산합니다. 1~10월 데이터로만 적합해 11~12월 실측 교체 건수와 대조한 백테스트 오차
+  **-5.0%~+3.5%**. 이 값은 기본 교체율을 검증할 뿐 경보 항은 아닙니다 — 경보 항 자체는
+  ~120건 중 0~2건만 더합니다.
+- **재고 위험 탭** — `GET /parts/inventory_risk`. 반올림된 추정치이며 이미 발주해 입고
+  대기 중인 물량은 반영하지 않습니다.
+- **우선순위는 부품 가용성과 분리** — 부품이 없다고 진단이 더 급해지지 않습니다. 작업지시서의
+  별도 `[조달 긴급도]` 줄로만 표시됩니다.
+- **오프라인 모드** (`backend/core/offline_guard.py`) — 모듈별 스위치가 아니라 목적지 기반
+  허용 목록(`localhost`/`127.0.0.1`/`host.docker.internal`)입니다. `OFFLINE=1`이면 알 수
+  없는 값, `LLM_PROVIDER=openai`, 허용 목록 밖 엔드포인트, 모호한 URL, 허용 목록 호스트를
+  우회시키는 프록시(`NO_PROXY`로 제외해야 함)에서 기동을 거부하고, 다른 무엇보다 먼저
+  `HF_HUB_OFFLINE=1`(임베딩 모델이 이미 캐시에 있어야 함 — 캐시가 빈 채로 `OFFLINE=1` 첫
+  실행을 하면 멈추지 않고 기동 시점에 실패함)과 LangSmith 트레이싱 비활성화를 적용하며
+  (`main.py` 진입점에 한해 성립), Slack은 스킵, CMMS는 허용 목록 밖이면 거부합니다. 환경변수만
+  검사하고 OS 수준 프록시 설정은 검사하지 않습니다. CI(`test_offline_guard.py`)가 실제 소켓을
+  막고 LLM과 진단을 스텁으로 둔 진단→승인 시나리오를 돌립니다. **증명하지 못한 것**: 프록시
+  경유·DNS·리다이렉트(프록시는 대신 기동 시점에 거부), 기동·RAG 초기화(따로 확인했지만 CI
+  대상은 아님).
+- **감사 로그** (`backend/data/audit_log.py`) — LLM을 쓰는 모든 단계(실패 포함), 부품
+  가용성 조회, 승인/반려, Slack·CMMS 전송을 실제 결과(전송됨/실패/미설정/차단)와 함께
+  시각·스레드ID·이벤트유형·결과로 기록합니다. **기록하지 않는 것**: 진단용 데이터 조회와
+  백그라운드 스캔의 부품 조회이며, 재시도한 호출과 RAG 답변+판정은 각각 한 행으로 남습니다.
+  자유 텍스트는 저장 전 개인정보를 마스킹합니다(주민번호·카드·휴대폰·국제전화·유선전화·
+  이메일 — 이름·주소는 불가). `GET /audit_log` 또는 Streamlit 5번째 탭에서 조회.
 
 ## 폴더 구조
 
 ```
 uptime-copilot/
-├── archive/               Azure PdM 원본 CSV (직접 다운로드 필요 - 아래 "데이터 준비" 참고)
+├── archive/               Azure PdM 원본 CSV (직접 다운로드 필요 - "데이터 준비" 참고)
 ├── backend/                FastAPI 백엔드
 │   ├── main.py               진입점 (uvicorn main:app)
 │   ├── core/                  Harness(입출력 검증), LLM 제공자 어댑터, 오프라인 가드
 │   ├── rag/                    RAG 파이프라인(하이브리드 BM25+Dense 검색) + docs/
-│   │                             (`pump_manual.py`는 에이전트가 직접 읽는 정적 조회용 dict —
-│   │                             RAG로 검색하지 않음. "아키텍처 원칙" 참고)
 │   ├── agent/                  LangGraph 멀티에이전트 그래프(라우팅 + HITL + 이벤트 스캐너)
 │   ├── ml/                      고장 위험 모델: 피처 파이프라인, 학습, 예측
-│   ├── data/                    PdM 데이터 적재/조회 계층 + 이벤트 스토어, 부품 마스터,
-│   │                             수요 예측, 감사 로그(SQLite)
-│   │                             (`sim_*.py`: 자동 열화 시뮬레이터 —
-│   │                             "아키텍처 원칙"과 `docs/design/SIMULATOR_PLAN.md` 참고)
-│   ├── store/                    생성되는 상태(pdm_telemetry.db, checkpoints.db,
-│   │                             chroma_db/) — gitignore 대상. 소스와 분리해서 Docker 볼륨을
-│   │                             마운트해도 코드를 덮어쓰지 않음
-│   ├── tests/                    pytest 회귀 테스트 — 아래 "검사 실행" 참고
+│   ├── data/                    PdM 데이터 계층 + 이벤트 스토어, 부품 마스터, 수요 예측,
+│   │                             감사 로그, 열화 시뮬레이터(SQLite)
+│   ├── store/                    생성되는 상태(gitignore 대상) — Docker 볼륨 마운트 위치
+│   ├── tests/                    pytest 회귀 테스트 — "검사 실행" 참고
 │   ├── notify.py                 Slack 알림 — 선택 사항, "환경 변수" 참고
 │   ├── cmms_client.py             CMMS 작업지시서 전송 — 선택 사항, docs/design/PHASE_7_PLAN.md 참고
-│   ├── pyproject.toml             ruff / mypy / pytest 설정 — 아래 "검사 실행" 참고
 │   └── Dockerfile
 ├── frontend/                Streamlit 채팅 UI
 │   └── Dockerfile
 ├── .github/workflows/       CI: 모든 push/PR마다 ruff + mypy + pytest 실행
-└── docker-compose.yml       아래 "Docker Compose로 실행" 참고
+└── docker-compose.yml       "Docker Compose로 실행" 참고
 ```
 
 ## 사전 요구사항
 
-- Python 3.12 (CI와 Docker 이미지가 쓰는 버전. 의존성이 고정돼 있지 않고 현재 해석은 ≥3.12가 필요한 numpy 2.x/scipy를 받습니다 — 그 이하 버전은 검증하지 않았습니다)
-- Docker + Docker Compose (아래 수동 venv 설정을 건너뛰고 싶은 경우)
+- Python 3.12 (CI와 Docker가 쓰는 버전. 의존성이 고정돼 있지 않고 현재 해석은 ≥3.12가
+  필요한 numpy 2.x/scipy를 받습니다 — 그 이하는 검증하지 않았습니다)
+- Docker + Docker Compose (수동 venv 설정을 건너뛰고 싶은 경우)
 
 ## Docker Compose로 실행 (권장)
 
-데이터셋은 어떤 방식이든 직접 다운로드해야 합니다(재배포 불가라 이미지에 포함할 수 없음).
-따라서 아래 "데이터 준비"는 실행 방식과 관계없이 필요합니다.
+데이터셋은 어떤 방식이든 직접 다운로드해야 합니다(재배포 불가). 아래 "데이터 준비"는
+실행 방식과 관계없이 필요합니다.
 
 ```bash
 # 1) 데이터 준비(아래 참고) — 먼저 데이터셋을 archive/에 다운로드
 
 # 2) 설정
 cp backend/.env.example backend/.env
-# backend/.env 채우기 (도커 경로는 OpenAI 키가 필요 없습니다 — compose가 기본으로 로컬
-# Ollama를 씁니다. LLM_PROVIDER=openai로 바꿀 때만 필요. 아래 "환경 변수" 참고)
+# backend/.env 채우기 — OpenAI 키는 여기선 필요 없습니다(compose가 기본으로 로컬 Ollama를
+# 씁니다). "환경 변수" 참고
 
 # 3) 두 서비스 빌드 및 실행
 docker compose up -d --build
 ```
 
-- 프론트엔드: http://localhost:8501 — 백엔드: http://localhost:8000 (`/docs`에서 대화형 API 문서)
-- **완전히 처음 켜는 경우(cold boot) 최대 10분 정도 걸릴 수 있습니다**(헬스체크가
-  `start_period: 600s`까지 허용): 백엔드가 아래에 언급된 약 470MB 임베딩 모델을 컨테이너
-  안에서 내려받습니다. `docker compose logs -f backend`로 진행 상황을 볼 수 있고, 완료
-  전까지는 "starting"(아직 healthy 아님) 상태이며 프론트엔드 컨테이너는 자동으로
-  기다립니다 — 별도 조치 없이 기다리면 됩니다. 이후엔 모델이 named volume(`hf_cache`)에
-  캐시되어 재빌드해도 몇 분이 아니라 몇 초 만에 healthy가 됩니다.
-- **최초 1회 데이터 적재는 컨테이너 안에서 직접 실행해야 합니다**(이미지에는 의도적으로 데이터를
-  넣지 않음 — `backend/.dockerignore` 참고. 그래서 처음 `docker compose up`하면 빈 DB로 시작):
+- 프론트엔드: http://localhost:8501 — 백엔드: http://localhost:8000 (`/docs`에서 API 문서)
+- **완전 cold boot는 최대 10분 정도**(헬스체크가 `start_period: 600s`까지 허용): 백엔드가
+  컨테이너 안에서 약 470MB 임베딩 모델을 내려받습니다. `docker compose logs -f backend`로
+  진행 확인. 이후 `hf_cache` 볼륨에 캐시되어 재빌드 시 몇 초 만에 healthy가 됩니다.
+- **최초 1회 데이터 적재**, 컨테이너 안에서 직접(이미지에는 의도적으로 데이터가 없음):
   ```bash
   docker compose exec backend python data/pdm_dataloader.py
   ```
-- **고장 위험 예측 모델도 똑같이 최초 1회 실행이 필요합니다** — `backend/store/`가 이미지에
-  안 들어가는 별도 볼륨이라, 새 컨테이너엔 학습된 모델도 없습니다. 이걸 안 하면
-  `_diagnose_machine()`이 (훨씬 약한) Z-score 기준선으로 조용히 대체되고
-  `위험도 모델 파일이 없어 Z-score만으로 판정합니다`라는 경고 로그가 뜹니다 — 이건
-  이 단계를 실행하기 전까지는 정상적으로 나오는 로그이지 뭔가 고장난 게 아닙니다. **재고 위험
-  탭도 이 단계가 필요합니다**: 수요 예측이 학습된 모델(과 원본 CSV)을 읽기 때문에, 없으면
-  `GET /parts/inventory_risk`가 누락된 파일과 이 명령을 알려주는 `503`으로 답합니다:
+- **고장 위험 모델도 같은 최초 1회 실행 필요** — 안 하면 진단이 더 약한 Z-score 기준선으로
+  조용히 대체되고, `/parts/inventory_risk`는 `503`으로 답합니다:
   ```bash
   docker compose exec backend python -m ml.build_features
   docker compose exec backend python -m ml.train
   ```
-- 상태(`backend/store/`: SQLite DB와 RAG 인덱스)는 이미지가 아니라 Docker named volume에
-  저장되어 `docker compose down` / `up` 사이에도 유지됩니다. `docker compose down -v`만
-  이를 삭제합니다(그 경우 위 적재 단계를 다시 실행해야 하고, `hf_cache` 볼륨도 같이
-  지워져서 임베딩 모델도 다시 받아야 함).
-- 두 서비스 모두 `127.0.0.1`에만 바인딩됩니다(아래 수동 설정과 동일) — 이 스택은 LAN에 아무것도
-  노출하지 않습니다. (아래에서 권하는 `OLLAMA_HOST=0.0.0.0`으로 Ollama를 켜는 것만 예외 — 그
-  항목의 경고 참고.)
+- 상태(`backend/store/`)는 named volume에 저장되어 `down`/`up` 사이에도 유지됩니다.
+  `docker compose down -v`만 삭제합니다(적재·임베딩 다운로드를 다시 해야 함).
+- 두 서비스 모두 `127.0.0.1`에만 바인딩 — 아래 Ollama 설정을 제외하면 LAN에 아무것도
+  노출하지 않습니다.
 - 중지는 `docker compose down`.
-- **`docker-compose.yml`은 백엔드 기본값을 `LLM_PROVIDER=ollama`로 강제합니다**(코드 자체의
-  기본값 — 도커 없이 직접 실행할 때 등 — 은 `openai`입니다. 이 override는
-  `docker-compose.yml`의 `environment:` 블록에 있고, `backend/.env`보다 항상 우선합니다.
-  이 트레이드오프가 실제로 뭘 의미하는지는 아래 평가 기준선 참고). 컨테이너가 접근하려면
-  호스트에서 `OLLAMA_HOST=0.0.0.0 ollama serve`로 Ollama를 켜야 합니다(기본값인 루프백
-  전용 바인딩은 컨테이너에서 접근 불가) — `docker-compose.yml`이 `OLLAMA_BASE_URL`을 이미
-  `host.docker.internal`로 맞춰뒀습니다(Linux Docker Engine을 위해 `extra_hosts`로 그 이름을
-  호스트 게이트웨이에 연결도 해둡니다. Linux 호스트에서는 검증하지 못했습니다).
-  **보안 주의:** Ollama를 `0.0.0.0`에 바인딩하면 인증 없는 API가 호스트의 모든 네트워크
-  인터페이스에 열립니다 — 같은 LAN의 누구나 추론을 돌리거나 모델을 인터넷에서 받게 시킬 수
-  있어서 "오프라인" 배포의 취지와 어긋납니다. 방화벽으로 Docker 브리지/루프백만 허용하거나 특정
-  인터페이스에만 바인딩하세요. Docker Desktop이 루프백에만 바인딩된 Ollama에 접근할 수 있는지는
-  여기서 검증하지 못했습니다. 모델은 한 번 `ollama pull qwen3:8b`로 받아두면
-  됩니다. 컨테이너에서 클라우드 모델을 쓰고 싶으시면 `docker-compose.yml`의
-  `LLM_PROVIDER: openai`로 바꾸시면 됩니다.
-- **권장**: 호스트에서 Ollama를 `OLLAMA_KEEP_ALIVE=30m ollama serve`로 켜두면 유휴 시간
-  뒤에도 모델이 메모리에서 곧바로 내려가지 않습니다. 기본 설정(보통 5분)이면 한동안
-  요청이 없다가 들어온 첫 요청이 디스크에서 모델을 다시 로드하는 지연까지 떠안습니다
-  (백엔드가 기동 시 한 번 워밍업 호출을 보내지만, 그 뒤로도 유휴 시간이 길면 다시
-  내려갑니다).
+- **compose는 백엔드 기본값을 `LLM_PROVIDER=ollama`로 강제**합니다(코드 자체 기본값은
+  `openai`; compose의 `environment:` 블록이 `.env`보다 항상 우선 — 트레이드오프는 아래
+  평가 기준선 참고). 컨테이너가 접근하려면 호스트에서 `OLLAMA_HOST=0.0.0.0 ollama serve`로
+  Ollama를 켜고(기본값인 루프백 바인딩은 컨테이너에서 접근 불가) `ollama pull qwen3:8b`로
+  모델을 받으세요. compose가 `OLLAMA_BASE_URL`을 `host.docker.internal`로 이미 맞춰뒀습니다
+  (Linux Docker Engine용 `extra_hosts`도 포함, Linux 호스트에서는 검증하지 못함). 클라우드
+  모델을 쓰려면 `docker-compose.yml`의 `LLM_PROVIDER: openai`로 바꾸세요.
+  **보안 주의:** `OLLAMA_HOST=0.0.0.0`은 인증 없는 API를 모든 네트워크 인터페이스에
+  노출합니다 — 방화벽으로 Docker 브리지/루프백만 허용하세요(그렇지 않으면 "오프라인"
+  배포 취지와 어긋납니다). Docker Desktop이 루프백에만 바인딩된 Ollama에 대신 접근할 수
+  있는지는 여기서 검증하지 못했습니다.
+- **권장**: 호스트에서 `OLLAMA_KEEP_ALIVE=30m ollama serve`로 켜두면 유휴 시간 뒤에도
+  모델이 메모리에서 바로 내려가지 않습니다(기본 약 5분 유휴 후 첫 요청은 디스크 재로드
+  지연을 떠안습니다).
 
 ## Docker 없이 실행
 
@@ -199,21 +145,20 @@ python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env             # Windows: copy .env.example .env
-# .env 채우기 (OPENAI_API_KEY 필수, 나머지는 선택 - 아래 "환경 변수" 참고)
+# .env 채우기 (LLM_PROVIDER=ollama가 아니면 OPENAI_API_KEY 필수 - "환경 변수" 참고)
 ```
 
 ### 데이터 준비 (최초 1회, `pip install` 이후 첫 실행 전)
 
 1. [Microsoft Azure Predictive Maintenance 데이터셋](https://www.kaggle.com/datasets/arnabbiswas1/microsoft-azure-predictive-maintenance)을
    다운로드합니다 (PdM_machines.csv, PdM_errors.csv, PdM_maint.csv, PdM_failures.csv,
-   PdM_telemetry.csv — PdM_telemetry.csv만 약 87만 행이라 적재에 시간이 좀 걸립니다).
+   PdM_telemetry.csv — 마지막 파일만 약 87만 행이라 적재에 시간이 좀 걸립니다).
 2. 파일들을 `uptime-copilot/archive/` 아래에 둡니다.
-3. 최초 1회 SQLite 적재를 실행합니다 (`backend/`에서, 위 venv 활성화 상태로):
+3. 최초 1회 SQLite 적재 (`backend/`에서, venv 활성화 상태):
    ```bash
    python data/pdm_dataloader.py
    ```
-4. 고장 위험 예측 모델의 피처를 만들고 학습합니다(이것도 최초 1회 — 안 하면
-   `_diagnose_machine()`이 더 약한 Z-score 기준선으로 대체되고 경고 로그가 뜹니다):
+4. 고장 위험 모델 피처 생성·학습(최초 1회 — 안 하면 더 약한 Z-score로 대체되고 경고 로그):
    ```bash
    python -m ml.build_features
    python -m ml.train
@@ -225,11 +170,10 @@ cp .env.example .env             # Windows: copy .env.example .env
 uvicorn main:app --reload --port 8000
 ```
 
-최초 실행 시 `intfloat/multilingual-e5-small` 임베딩 모델(약 470MB)을 Hugging Face에서 내려받고
-RAG 인덱스를 만듭니다 — 몇 분과 네트워크 연결이 필요하며, 멈춘 것처럼 보이지만 정상입니다.
-이후 재시작은 빠릅니다. 다운로드가 몇 분째 진행이 없으면 uvicorn 실행 전에 셸에서
-`HF_HUB_DISABLE_XET=1`을 설정해보세요 — 일부 네트워크 환경에서는 최신 "xet" 전송 경로
-자체가 막혀 있습니다. `docker-compose.yml`에는 컨테이너 경로용으로 이미 설정돼 있습니다.
+최초 실행 시 `intfloat/multilingual-e5-small` 임베딩 모델(약 470MB)을 내려받고 RAG
+인덱스를 만듭니다 — 몇 분과 네트워크가 필요하며 멈춘 것처럼 보이지만 정상입니다. 이후
+재시작은 빠릅니다. 다운로드가 멈추면 uvicorn 실행 전에 `HF_HUB_DISABLE_XET=1`을
+설정하세요(일부 네트워크에서 "xet" 전송 경로가 막혀 있습니다. 컨테이너 경로엔 이미 설정됨).
 
 ```bash
 # 프론트엔드 (별도 터미널)
@@ -246,20 +190,19 @@ streamlit run streamlit_app.py
 cd backend
 source .venv/bin/activate
 pip install ruff mypy          # requirements.txt엔 없음(개발 전용)
-ruff check .                   # 린트 + import 순서 (설정: pyproject.toml)
+ruff check .                   # 린트 + import 순서
 mypy                           # data/ + cmms_client.py 타입 검사, 항상 0 에러 유지
 pytest tests/ --ignore=tests/test_rag_dedup.py   # 빠른 경로 - 임베딩 모델 테스트 제외
-pytest tests/                                     # 전체 스위트, 임베딩 모델 다운로드/로드 포함
+pytest tests/                                     # 전체 스위트, 임베딩 모델 포함
 ```
 
-CI(`.github/workflows/backend-checks.yml`)가 모든 push와 PR마다 `ruff check`, `mypy`,
-빠른 경로 pytest를 실행합니다.
+CI(`.github/workflows/backend-checks.yml`)가 모든 push/PR마다 `ruff check`, `mypy`, 빠른
+경로 pytest를 실행합니다.
 
 ## 평가 기준선
 
-40문항 골든셋(`backend/tests/eval/golden.jsonl`)으로 실제 LLM 호출을 통해 에이전트의
-라우팅과 설비번호 추출 정확도를 확인합니다. 실제 API 토큰 비용이 들어서 기본 테스트
-실행과 CI에서는 제외되어 있고, 아래처럼 명시적으로 실행해야 합니다:
+40문항 골든셋(`backend/tests/eval/golden.jsonl`)으로 실제 LLM 호출을 통해 라우팅·설비번호
+추출 정확도를 확인합니다. API 토큰 비용이 들어 기본 테스트와 CI에서 제외되어 있습니다:
 
 ```bash
 cd backend
@@ -272,97 +215,53 @@ pytest tests/eval/test_golden.py -m eval -v -s
 | 설비번호 추출 | 100.0% | 2026-09-27 |
 | 번호 없을 때 되묻기 | 100.0% | 2026-09-27 |
 
-(클라우드 모델 `gpt-5.6-luna`, 40문항 골든셋 1회 실행. 2026-09-23/25의 이전 실행은 어느 제공자로
-잰 것인지 기록이 없어 인용하지 않습니다.)
-
-실행할 때마다 문항별 상세 결과가 `backend/tests/eval/results/<timestamp>.json`에 저장됩니다
-(gitignore 대상 — 버전 관리 대신 재실행으로 재현). 기대 긴급도는 골든셋 파일에 일부러
-고정하지 않았습니다 — 백그라운드 시뮬레이터가 매 틱마다 실제 설비 상태를 바꾸기 때문에,
-긴급도 정답은 평가 실행 시점에 `_diagnose_machine()`으로 그때그때 실측합니다.
+(클라우드 모델 `gpt-5.6-luna`, 1회 실행. 2026-09-23/25의 이전 실행은 제공자 기록이 없어
+인용하지 않습니다.) 실행마다 상세 결과가 `backend/tests/eval/results/<timestamp>.json`에
+저장됩니다(gitignore 대상 — 재실행으로 재현).
 
 ### 로컬(Ollama) vs 클라우드
 
-같은 골든셋을 완전 로컬 `LLM_PROVIDER=ollama`(Qwen3-8B, Apple Silicon, GPU 가속 없이 Metal만)로
-돌린 결과입니다:
-
-| 지표 | 클라우드 (gpt-5.6-luna, 1회) | 로컬 (Ollama Qwen3-8B, 5회) |
+| 지표 | 클라우드 (1회) | 로컬 Qwen3-8B (5회) |
 |---|---|---|
-| 라우터 정확도 (골든셋 40문항) | 90.0% | 87.5~92.5%(평균 91.0%) |
-| 라우터 정확도 (홀드아웃 10문항, 안전장치 튜닝에 안 씀) | 100.0% | 90~100%(평균 96.0%) |
-| 설비번호 추출 | 100.0% | 100.0%(5회 전부) |
-| 번호 없을 때 되묻기 | 100.0% | 100.0%(5회 전부) |
-| 위험한 오분류(설비 번호 있는데 근거없는 노드로) | 0건 | 0건(골든+홀드아웃 10회 전체) |
-| 호출당 평균 지연 | 약 1.2초 | 약 13초(라우팅+추출 병합, 메모리 압박 시 최대 ~40초까지 튀는 경우 있음, 아래 참고) |
+| 라우터 정확도 (골든셋 40문항) | 90.0% | 87.5~92.5% (평균 91.0%) |
+| 라우터 정확도 (홀드아웃 10문항, 튜닝에 안 씀) | 100.0% | 90~100% (평균 96.0%) |
+| 설비번호 추출 / 번호 없을 때 되묻기 | 100.0% / 100.0% | 100.0% / 100.0% |
+| 위험한 오분류(설비 언급 → 근거없는 노드) | 0 | 0 (10회 전체) |
+| 호출당 평균 지연 | 약 1.2초 | 약 13초(메모리 압박 시 최대 ~40초까지 튀는 경우 있음) |
 
-**방법론 주의**: 이전 버전의 이 표는 로컬 1회 실행("77.5%→90.0%")을, 지금의 안전장치를
-거치지 않은 오래된 클라우드 1회 실행과 비교한 것이었습니다 — 상위 모델 교차 검토가
-"안전장치를 만들 때 참고한 그 실패 사례로 다시 채점한, 표본 안에서 맞춘 점수"라고
-지적했습니다. 위 수치는 이 지적을 반영해 다시 잰 것입니다: 클라우드는 현재 코드로
-1회, 로컬은 5회 반복, 둘 다 안전장치를 만들 때 쓴 40문항과 한 번도 참고하지 않은
-홀드아웃 10문항으로 나눠서 측정했습니다. 2026-09-27 이후의 평가 결과 파일은 어느 제공자/모델로 잰 것인지(`llm_provider`/`llm_model`)
-기록합니다. 다만 그 파일들은 **gitignore 대상이라 실행한 컴퓨터에만 존재**합니다 — 수치를 다시
-확인하려면 `pytest -m eval`을 다시 실행해야 합니다(OpenAI 키 또는 실행 중인 Ollama 필요).
-지연 시간(~1.2초 / ~13초 / ~40초)은 저장된 산출물이 아예 없습니다.
-
-추출·되묻기는 처음부터 로컬에서도 똑같이 나왔습니다 — 범위가 좁고 형태가 정해진 작업이라
-그렇습니다. 라우팅은 처음엔 두 자릿수 %p만큼 떨어졌고, 모든 호출이 라우팅→추출 두 번의
-별도 호출이라 자릿수 하나만큼 느렸습니다. 두 격차 모두 더 큰 모델이 아니라 코드 쪽에서
-좁혔습니다: 라우팅+추출을 구조화 출력 하나로 병합해서 진단/일정 문의마다 호출 왕복
-하나를 통째로 없앴고, 로컬 모델이 반복적으로 근거 없는 자유채팅 노드로 잘못 보내던
-정확한 문장 패턴들을 결정론적 후처리로 잡아냈습니다 — 설비 번호 어순("설비 46번" vs
-"46번 설비"), 설비 번호 없이 증상만 신고하는 문장("설비가 이상해요"). 골든셋 회귀
-테스트(`tests/eval/test_golden.py`)는 전체 정확도와 별개로, 실존 설비 번호가 있는
-문의가 근거 없는 노드로 빠지면 무조건 실패하도록 만들어뒀습니다 — 이 조합이 실제
-고장을 "정상"이라고 답하는 허위 안심 응답을 만드는 유일한 경로이기 때문입니다
-(`docs/decisions.md`, 2026-09-25 및 2026-09-27).
-
-골든셋 범위 밖(라우팅·추출만 다룸)인 안전/생산/정비 관점 평가에서도 클라우드에서는 안
-나오던 모순된 출력이 로컬에서 나온 적이 있습니다 — `risk_level: "중간"`인데
-`requires_shutdown: true`(정지 필요). 이제는 로그로 남기는 수준이 아니라 구조적으로
-불가능합니다 — `requires_shutdown`은 더 이상 LLM이 직접 채우는 필드가 아니라
-`risk_level`/`recommended_window`로부터 코드가 유도하므로, 모델이 애초에 모순된 값을 낼
-방법이 없습니다.
-
-결론: 어댑터(`LLM_PROVIDER=ollama`)는 이제 정확도가 클라우드와 같은 범위에서 반복
-측정되고(평균 91.0% vs 90.0%), 안전 관련 핵심 지표(위험한 오분류)는 10회 전체 실행에서
-0건으로 완벽히 재현됩니다. 지연 격차도 호출 병합만으로 대략 절반으로 줄었습니다 —
-남은 비용은 여전히 실재하는 호출당 ~10배 지연(워밍업 + `OLLAMA_KEEP_ALIVE`로 완화되지만
-없어지진 않음)과 이 기기의 메모리 여유(16GB 통합 메모리가 Docker Desktop과 이 앱 자체
-컨테이너만으로도 이미 빠듯하고, 위 지연 튐의 유력한 원인)입니다 — 폐쇄망 환경이라면
-여전히 감수할 가치가 있지만, 더 이상 "정확도와 속도를 내주고 폐쇄망을 얻는" 단순한
-트레이드오프는 아닙니다.
+로컬이 이제 클라우드와 같은 범위의 정확도이고, 안전 관련 핵심 지표(위험한 오분류)는
+전체 실행에서 0건입니다. 남은 비용은 지연(~10배, 호출 병합과 워밍업으로 완화되나 없어지진
+않음)입니다. 전체 방법론과 라우팅 격차를 줄인 방법은 `docs/PORTFOLIO_KOR.md` §09 참고.
+지연 수치는 저장된 산출물이 없고, 평가 결과 JSON은 gitignore 대상이라 `pytest -m eval`
+재실행으로만 재확인할 수 있습니다.
 
 ## 환경 변수 (`backend/.env`)
 
 | 변수 | 필수 | 미설정 시 동작 |
 |---|---|---|
-| `LLM_PROVIDER` | 선택 | 코드 기본값은 `openai`. `ollama`로 설정하면 완전히 로컬 Ollama 서버로만 동작(`backend/core/llm_provider.py`) — API 키·인터넷 불필요, 대신 실측 가능한 정확도/지연 손실 있음(아래 평가 기준선 참고). **`docker-compose.yml`은 이 값을 `ollama`로 강제** — `.env`에 뭐라고 써도 도커 경로에선 이게 이깁니다. 위 "Docker Compose로 실행" 참고. |
-| `OFFLINE` | 선택 | `1`/`true`/`yes`/`on`이면 목적지 기반 오프라인 가드(`backend/core/offline_guard.py`, 위 MRO 확장 참고)가 켜지고, `0`/`false`/`no`/`off`/빈 값이면 꺼지며, 그 밖의 값은 기동을 거부합니다. 켜졌을 때: LangSmith 트레이싱 끔, Slack 스킵, `HF_HUB_OFFLINE=1` 강제(임베딩 모델이 이미 캐시에 있어야 함), 허용 목록 밖 CMMS push 거부. `LLM_PROVIDER=openai`나 모르는 제공자, 허용 목록 밖 `OLLAMA_BASE_URL`/`CMMS_MCP_URL`, `NO_PROXY`가 `localhost,127.0.0.1,host.docker.internal`을 포함하지 않는 프록시 변수와 함께면 기동을 거부합니다. |
-| `OPENAI_API_KEY` | **`LLM_PROVIDER=ollama`가 아니면 필수** | 백엔드가 시작되지 않음. 도커 경로는 compose가 기본으로 `LLM_PROVIDER=ollama`를 설정하므로 필요 없음. |
+| `LLM_PROVIDER` | 선택 | 코드 기본값 `openai`; `ollama`면 완전히 로컬 서버로 동작 — API 키·인터넷 불필요, 정확도/지연 손실 있음("평가 기준선" 참고). **`docker-compose.yml`이 이 값을 `ollama`로 강제**(`.env`보다 우선). |
+| `OFFLINE` | 선택 | `1`/`true`/`yes`/`on`이면 오프라인 가드 켜짐(위 MRO 확장 참고), `0`/`false`/`no`/`off`/빈 값이면 꺼짐, 그 외 값은 기동 거부. 켜지면(`main.py` 진입점에 한해 성립): LangSmith 끔, Slack 스킵, `HF_HUB_OFFLINE=1` 강제(임베딩 모델이 이미 캐시에 있어야 함), 허용 목록 밖 CMMS 거부. `LLM_PROVIDER=openai`, 허용 목록 밖 엔드포인트, `NO_PROXY`로 제외 안 된 프록시(환경변수만 검사, OS 수준 설정은 검사 안 함)에서도 기동 거부. |
+| `OPENAI_API_KEY` | **`LLM_PROVIDER=ollama`가 아니면 필수** | 백엔드가 시작되지 않음. 도커 경로는 불필요(compose가 `ollama` 설정). |
 | `OPENAI_MODEL` | 선택 | 기본값 `gpt-5.6-luna`. `LLM_PROVIDER=openai`일 때만 사용 |
 | `OLLAMA_BASE_URL` | 선택 | 기본값 `http://localhost:11434/v1`. `LLM_PROVIDER=ollama`일 때만 사용 |
-| `OLLAMA_MODEL` | 선택 | 기본값 `qwen3:8b`. `LLM_PROVIDER=ollama`일 때만 사용 — 먼저 `ollama pull qwen3:8b`로 받아야 함 |
+| `OLLAMA_MODEL` | 선택 | 기본값 `qwen3:8b` — 먼저 `ollama pull qwen3:8b`로 받아야 함 |
 | `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` | 선택 | LangSmith 트레이싱 비활성화 |
-| `SLACK_WEBHOOK_URL` | 선택 | 긴급/주의 감지 시 Slack 알림을 조용히 건너뜀 (`backend/notify.py`) |
-| `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | 선택 | 승인 시 CMMS 작업지시서 전송을 조용히 건너뜀 (`backend/cmms_client.py`). 설정한다면 실행 중인 Atlas-MCP + Atlas CMMS 인스턴스가 필요 — `docs/design/PHASE_7_PLAN.md` 참고 |
-| `ALLOWED_HOSTS` | 선택 | 항상 허용되는 `localhost`/`127.0.0.1` 외에 `TrustedHostMiddleware`(`backend/main.py`)를 통과시킬 추가 호스트명(쉼표 구분). `docker-compose.yml`이 `backend`로 자동 설정하며(이 키에 한해 compose의 `environment:` 블록이 `backend/.env` 값보다 항상 우선) — 백엔드를 다른 호스트명이나 리버스 프록시 뒤에 둘 때만 직접 설정 필요. |
-| `BACKEND_URL` (프론트엔드용, `backend/.env` 아님) | 선택 | Streamlit 앱이 백엔드를 찾는 주소. 기본값 `http://localhost:8000`, `docker-compose.yml`이 `http://backend:8000`으로 자동 설정. |
-| `SIM_TICK_SECONDS` | 선택 | 기본값 `60` — 자동 열화 시뮬레이터가 켜져 있을 때 실제 몇 초마다 한 번씩 전진할지 |
-| `SIM_HOURS_PER_TICK` | 선택 | 기본값 `1` — 한 번 전진할 때 시뮬레이션 시간으로 몇 시간을 진행할지 |
-| `SIM_SEED` | 선택 | 기본값 `42` — 시뮬레이터 난수 시드. `POST /simulator/reset`을 호출하면 이 시드로 새로 시작 |
+| `SLACK_WEBHOOK_URL` | 선택 | 긴급/주의 Slack 알림을 조용히 건너뜀 (`backend/notify.py`) |
+| `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | 선택 | CMMS 작업지시서 전송을 조용히 건너뜀 — 설정 시 Atlas-MCP + Atlas CMMS 인스턴스 필요, `docs/design/PHASE_7_PLAN.md` 참고 |
+| `ALLOWED_HOSTS` | 선택 | `localhost`/`127.0.0.1` 외에 `TrustedHostMiddleware`를 통과시킬 추가 호스트. compose가 `backend`로 자동 설정. |
+| `BACKEND_URL` (프론트엔드용) | 선택 | Streamlit이 백엔드를 찾는 주소. 기본값 `http://localhost:8000`, compose는 `http://backend:8000`. |
+| `SIM_TICK_SECONDS` | 선택 | 기본값 `60` — 시뮬레이터가 실제 몇 초마다 전진할지 |
+| `SIM_HOURS_PER_TICK` | 선택 | 기본값 `1` — 한 번에 시뮬레이션 몇 시간을 진행할지 |
+| `SIM_SEED` | 선택 | 기본값 `42` — 시뮬레이터 난수 시드. `POST /simulator/reset`으로 재시작 |
 
-> **`backend/.env.example`엔 데모용으로 조정된 시뮬레이터 값**(`SIM_TICK_SECONDS=15`,
-> `SIM_HOURS_PER_TICK=12`)이 들어있습니다 — 위 표의 코드 기본값(`60`/`1`)이 아닙니다.
-> 실제 코드 기본값 대비 약 48배 빠른 속도라, 데모에서 1분도 안 돼 이벤트가 뜹니다.
-> 더 느린(실시간에 가까운) 속도를 원하면 이 두 줄을 지우거나 `60`/`1`로 바꾸세요.
+> **`backend/.env.example`은 데모용 시뮬레이터 값**(`SIM_TICK_SECONDS=15`,
+> `SIM_HOURS_PER_TICK=12`, 코드 기본값 대비 약 48배 빠름)을 씁니다 — 1분 안에 이벤트가
+> 뜹니다. 더 느린(실시간에 가까운) 속도를 원하면 이 두 줄을 지우거나 `60`/`1`로 바꾸세요.
 
-> **호스트에 있는 Atlas-MCP를 Docker 안의 백엔드에서 사용할 때:** `backend` 컨테이너 안의
-> `localhost`는 호스트 머신이 아니라 컨테이너 자신을 가리키므로
-> `CMMS_MCP_URL=http://localhost:PORT/mcp`는 연결에 실패합니다.
-> `http://host.docker.internal:PORT/mcp`를 쓰고, Atlas-MCP 쪽 `ALLOWED_HOSTS`에도
-> `host.docker.internal:PORT`를 추가하세요(DNS 리바인딩 방어용 Host 헤더 검사가 그렇지 않으면
-> 421로 거부합니다). `backend/cmms_client.py`의 루프백 검사는 이미 이 목적으로
-> `host.docker.internal`을 허용 목록에 넣어두었습니다.
+> **호스트의 Atlas-MCP를 Docker 백엔드에서 쓸 때:** 컨테이너 안의 `localhost`는 컨테이너
+> 자신을 가리킵니다. `CMMS_MCP_URL`에 `http://host.docker.internal:PORT/mcp`를 쓰고,
+> Atlas-MCP의 `ALLOWED_HOSTS`에도 `host.docker.internal:PORT`를 추가하세요(안 그러면
+> 421로 거부됩니다).
 
 ## 주요 API 엔드포인트
 
@@ -372,18 +271,18 @@ pytest tests/eval/test_golden.py -m eval -v -s
 | POST | `/rag/query` | RAG 기반 문서 Q&A |
 | POST | `/agent/query` | 멀티에이전트 질의 — 긴급 건이면 `pending_approval` 반환 |
 | POST | `/agent/resume` | HITL 승인/반려 결정 후 그래프 재개 |
-| GET | `/agent/status/{thread_id}` | 클라이언트 타임아웃 뒤 재실행 없이 요청을 복구 조회: `pending_approval`(작업지시서 포함), `done`, `running`(그래프가 아직 실행 중 — 로컬 모델에서는 3분 안팎이 정상), `failed`(노드가 예외를 던짐 — 오류 유형만 반환), `not_found` |
+| GET | `/agent/status/{thread_id}` | 클라이언트 타임아웃 뒤 복구 조회: `pending_approval`, `done`, `running`(로컬 모델에서 3분 안팎 정상), `failed`(오류 유형만 반환), `not_found` |
 | POST | `/scan` | 100대 설비 전체 스캔(LLM 미사용), 긴급/주의 건을 이벤트 스토어에 저장 |
 | GET | `/events` | 대기 중인 감지 이벤트 목록 |
-| POST | `/events/complete` | 이벤트를 완료 처리 — 보관되며, 진짜 새로운 근거가 있을 때만 다시 표면화 |
-| POST | `/events/delete` | 기록 없이 이벤트 폐기 (다음 스캔에서 다시 나타날 수 있음) |
-| POST | `/simulator/start` | 자동 열화 시뮬레이터 백그라운드 루프 시작 (현재 상태에서 이어감) |
+| POST | `/events/complete` | 이벤트 완료 처리 — 진짜 새 근거가 있을 때만 재표면화 |
+| POST | `/events/delete` | 기록 없이 이벤트 폐기 (다음 스캔에서 재등장 가능) |
+| POST | `/simulator/start` | 자동 열화 시뮬레이터 시작 (현재 상태에서 이어감) |
 | POST | `/simulator/stop` | 루프 정지 |
-| GET | `/simulator/status` | 실행 여부, 시뮬레이션 시각, 열화 진행 중인 설비 목록, `has_stale_events`, 백그라운드 틱이 실패 중이면 `last_error`/`consecutive_failures`도 포함 |
-| POST | `/simulator/inject` | 특정 설비를 강제로 강하게 열화시킴, 데모용 (`{"machine_id": 12}`, 선택적으로 `"signal"`: `volt`/`rotate`/`pressure`/`vibration` 중 하나, 생략하면 무작위) |
-| POST | `/simulator/reset` | 시뮬레이터 상태/데이터 **및** 감지/완료 이벤트 테이블 전체 초기화 — 새로 시작하기 전에 호출. 자동으로는 지워지지 않음. `docs/design/SIMULATOR_PLAN.md` 참고 |
-| GET | `/parts/inventory_risk` | 부품별 30/90일 수요 대비 현재고, 예측 기간별 조달 가능 여부 플래그 포함 (위 MRO 확장 참고) |
-| GET | `/audit_log` | 감사 로그 조회 — 필터 `event_type`·`thread_id`·`since`·`until`, `limit` 1~1000(기본 100). LLM 사용 단계·부품 조회·승인/반려·외부 전송·오프라인 차단 |
+| GET | `/simulator/status` | 실행 여부, 시뮬레이션 시각, 열화 진행 설비, 오류 상태 |
+| POST | `/simulator/inject` | 특정 설비를 강제 열화, 데모용 (`{"machine_id": 12}`) |
+| POST | `/simulator/reset` | 시뮬레이터+이벤트 상태 초기화 — 새로 시작하기 전에 호출 |
+| GET | `/parts/inventory_risk` | 부품별 30/90일 수요 대비 재고, 조달 가능 여부 플래그 |
+| GET | `/audit_log` | 감사 로그 조회 (`event_type`·`thread_id`·`since`·`until`, `limit` 1~1000) |
 
 `/agent/query` 요청 예시:
 ```json
@@ -394,43 +293,30 @@ pytest tests/eval/test_golden.py -m eval -v -s
 
 ## 아키텍처 원칙
 
-- **Harness**: 각 모델 호출 전후로 입출력을 검증하는 결정론적 계층(`core/harness.py`) —
-  정규식 기반 PII 체크(계산적)와 LLM-as-judge 체크(추론적)를 함께 사용.
-- **RAG**: 하이브리드(BM25 + Dense) 검색, 자동 Faithfulness 채점. Multi-Query
-  재작성과 Self-RAG 검색 필요성 판단은 2026-09-23에 제거됨 - 이 코퍼스 규모에서는
-  둘 다 측정 가능한 실익이 없었음(`docs/decisions.md` 참고).
-- **Agent**: LangGraph `StateGraph` 기반. 질문을 진단 / 정비 일정 / 일반 문의 분기로 라우팅.
-  진단은 3단계 긴급도 모델을 사용: 일반(normal) / 주의(caution — 고장 위험 모델 경보,
-  확정 고장 아님. Z-score 텔레메트리 이상은 학습된 모델이 없을 때의 대체 수단으로만 씀) / 긴급(urgent — 실제 로그된 고장 기록). 긴급 건만 3개 관점 병렬 평가
-  (안전 / 생산 / 정비)를 거쳐 Human-in-the-Loop(HITL) 승인을 기다리고, 주의 건은 바로
-  작업지시서로 넘어갑니다. HITL 승인 상태는 메모리에만 두지 않고 SQLite
-  (`backend/store/checkpoints.db`)에 체크포인트되어 `--reload`/재시작에도 유지됩니다.
-  별도의 `/scan`은 동일한 진단 로직을 LLM 없이 100대 전체에 돌려 긴급/주의 건을 이벤트
-  스토어에 저장하고, 완료 처리된 이벤트는 완료 시점 이후의 진짜 새로운 근거가 나타나야만
-  이후 스캔에서 다시 표면화됩니다 — `backend/data/event_store.py` 참고.
-- **자동 시뮬레이터**: `backend/data/sim_engine.py`/`sim_store.py`/`sim_query.py`/`sim_loop.py`가
-  백그라운드 열화 모델을 돌립니다(설비별 상태 머신: HEALTHY → DEGRADING → FAULT → 고장+정비).
-  실제 데이터셋에서 측정한 통계(편차 크기, 리드 타임, 오류 동시발생 등 — `docs/design/SIMULATOR_PLAN.md`
-  참고)로 보정했습니다. 원본과 분리된 `sim_*` 테이블에만 기록하고(원본 읽기 전용 데이터는
-  건드리지 않음), `asyncio` 백그라운드 태스크가 `SIM_TICK_SECONDS`마다 한 번씩 전진시키며,
-  매 틱마다 증분 스캔과 새로 감지된 건을 묶은 Slack 알림이 뒤따릅니다. 완전히 선택 사항이라
-  꺼져 있어도(기본값) 앱은 동일하게 동작합니다.
-- **Data**: 모든 경로 상수는 현재 작업 디렉터리가 아니라 파일 자신의 위치(`Path(__file__).parent`)
-  기준으로 해석하므로, 코드를 어디서 실행하거나 옮겨도 올바르게 동작합니다. 생성/변경되는 상태
-  (`pdm_telemetry.db`, `checkpoints.db`, RAG Chroma 인덱스)는 `backend/store/` 아래에 두어,
-  Docker named volume을 마운트해도 애플리케이션 코드를 가리지 않도록 소스와 분리했습니다.
-- **Observability**: LangSmith 연동. 동일한 PII 정규식으로 만든 익명화기가 트레이스 전송 전에
-  민감 정보를 마스킹합니다.
+- **Harness**: 모델 입출력을 검증하는 결정론적 계층(`core/harness.py`) — 정규식 PII
+  체크(계산적) + LLM-as-judge 체크(추론적).
+- **RAG**: 하이브리드(BM25 + Dense) 검색, 자동 Faithfulness 채점. Multi-Query 재작성과
+  Self-RAG 검색 필요성 판단은 2026-09-23에 제거 — 이 코퍼스 규모에서는 측정 가능한 실익이
+  없었습니다.
+- **Agent**: LangGraph `StateGraph`가 질문을 진단/정비 일정/일반 문의로 라우팅합니다.
+  진단은 3단계: 일반(normal) / 주의(caution — 고장 위험 모델 경보, 학습된 모델이 없을
+  때만 Z-score로 대체) / 긴급(urgent — 실제 로그된 고장 기록). 긴급만 3관점 병렬 평가 후
+  HITL 승인 대기, 주의는 바로 작업지시서로. 승인 상태는 SQLite에 체크포인트되어 재시작에도
+  유지됩니다. 별도 `/scan`이 LLM 없이 100대 전체에 같은 진단 로직을 돌리며, 완료된 이벤트는
+  진짜 새 근거가 나타나야만 다시 표면화됩니다.
+- **자동 시뮬레이터**: `backend/data/sim_engine.py` 등이 설비별 열화 상태 머신(HEALTHY →
+  DEGRADING → FAULT → 고장+정비)을 돌리며, 실제 데이터셋에서 측정한 통계로 보정했습니다
+  (`docs/design/SIMULATOR_PLAN.md` 참고). 전용 `sim_*` 테이블에만 기록하며 완전히 선택
+  사항입니다(기본값은 정지).
+- **Data**: 경로 상수는 작업 디렉터리가 아니라 파일 자신의 위치 기준입니다. 생성되는
+  상태는 `backend/store/` 아래에 소스와 분리되어 있어 Docker 볼륨이 코드를 가리지 않습니다.
+- **Observability**: LangSmith 연동, 같은 PII 정규식으로 트레이스 전송 전 익명화.
 
 ## 관련 문서
 
-- `docs/PORTFOLIO_KOR.md` — 포트폴리오 독자를 위한 아키텍처/설계 케이스 스터디
-  (다이어그램, 주요 엔지니어링 결정, 디버깅 사례)
-- `docs/design/SIMULATOR_PLAN.md` — 자동 열화 시뮬레이터 설계 기록: 실측 보정 데이터, 상태 머신,
-  백그라운드 루프, `/simulator/*` API
-- `docs/design/PHASE_7_PLAN.md` — **선택적 연동, 이 프로젝트 실행에 필수 아님.** Slack 알림 + CMMS
-  작업지시서 전송의 설계/진행 기록. `SLACK_WEBHOOK_URL` / `CMMS_MCP_URL` / `CMMS_MCP_TOKEN`을
-  비워두면 두 기능 모두 동작하지 않고, 앱은 이 파일에 적힌 어떤 것도 없이 완전히 동작합니다.
-- `docs/design/UI_UPGRADE_PLAN.md` — 프론트엔드 개선 작업 기록. 완전히 종료되었으며 진행 중인
-  백로그가 아닌 이력으로 보관
+- `docs/PORTFOLIO_KOR.md` — 아키텍처/설계 케이스 스터디 (다이어그램, 주요 결정, 사례)
+- `docs/design/SIMULATOR_PLAN.md` — 시뮬레이터 설계 기록: 보정 데이터, 상태 머신
+- `docs/design/PHASE_7_PLAN.md` — **선택 사항, 실행에 필수 아님.** Slack + CMMS 연동 설계.
+  `SLACK_WEBHOOK_URL` / `CMMS_MCP_URL`을 비워두면 둘 다 no-op.
+- `docs/design/UI_UPGRADE_PLAN.md` — 프론트엔드 개선 이력, 완전히 종료됨
 - `LICENSE` — MIT
