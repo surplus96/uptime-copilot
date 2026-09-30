@@ -336,6 +336,22 @@ def scan_all_machines() -> list[dict]:
     return detected
 
 
+def _audited_completion(thread_id: str | None, target: str, summary: str, **create_kwargs):
+    """자유 생성 LLM 호출(schedule/general)을 감사 로그와 함께 실행한다. 예전엔 성공했을
+    때만 기록해서, 호출이 예외로 실패하면 흔적이 없었다(route_node/관점 평가/RAG/워밍업은
+    실패도 기록하는데 이 둘만 빠져 있었음 - 2026-09-30 감사 경로 점검). 실패는 기록한 뒤
+    그대로 다시 던진다 - 호출부의 오류 처리 동작은 바꾸지 않는다."""
+    try:
+        completion = client.chat.completions.create(**create_kwargs)
+    except Exception:
+        audit_log.log_event("llm_call", thread_id=thread_id, target=target, summary=summary,
+                             result="실패", provider=llm_provider.get_provider_name())
+        raise
+    audit_log.log_event("llm_call", thread_id=thread_id, target=target, summary=summary,
+                         provider=llm_provider.get_provider_name())
+    return completion
+
+
 def schedule_node(state: SupervisorState) -> dict:
     """route_node가 분류와 함께 뽑아둔 설비 번호(state.machine_id)를 쓴다 - 별도 추출
     호출을 하지 않는다(2026-09-25, 라우팅+추출 호출 병합으로 지연 절감)."""
@@ -343,7 +359,8 @@ def schedule_node(state: SupervisorState) -> dict:
         return {"machine_id": None, "result": "몇 번 설비의 정비 일정인지 알려주시겠어요?"}
     schedule_info = pdm_operations.estimate_next_maintenance(state.machine_id)
 
-    completion2 = client.chat.completions.create(
+    completion2 = _audited_completion(
+        state.thread_id, "schedule", "정비 일정 답변 생성",
         model=MODEL,
         **llm_provider.filter_kwargs(reasoning_effort="none"),
         max_completion_tokens=300,
@@ -357,13 +374,12 @@ def schedule_node(state: SupervisorState) -> dict:
             {"role": "user", "content": state.user_message},
         ],
     )
-    audit_log.log_event("llm_call", thread_id=state.thread_id, target="schedule",
-                         summary="정비 일정 답변 생성", provider=llm_provider.get_provider_name())
     return {"machine_id": state.machine_id, "result": completion2.choices[0].message.content}
 
 
 def general_node(state: SupervisorState) -> dict:
-    completion = client.chat.completions.create(
+    completion = _audited_completion(
+        state.thread_id, "general", "일반 문의 답변 생성",
         model=MODEL,
         **llm_provider.filter_kwargs(reasoning_effort="none"),
         max_completion_tokens=500,
@@ -372,8 +388,6 @@ def general_node(state: SupervisorState) -> dict:
             {"role": "user", "content": state.user_message},
         ],
     )
-    audit_log.log_event("llm_call", thread_id=state.thread_id, target="general",
-                         summary="일반 문의 답변 생성", provider=llm_provider.get_provider_name())
     return {"result": completion.choices[0].message.content}
 
 def manual_lookup_node(state: SupervisorState) -> dict:
@@ -494,13 +508,15 @@ def _assess_perspective(label: str, system_prompt: str, diagnosis: str, thread_i
             raise ValueError(f"관점 평가 모델이 응답을 거부함: {message.refusal}")
         assessment = message.parsed.model_dump()
         assessment["is_fallback"] = False
-        audit_log.log_event("llm_call", thread_id=thread_id, target=label, summary=f"{label} 관점 평가",
-                             provider=llm_provider.get_provider_name())
+        audit_result = "성공"
     except Exception as e:
         logger.warning(f"[{label}] 관점 평가 실패, 안전한 기본값으로 대체: {e}")
         assessment = dict(_DEFAULT_ASSESSMENT)
-        audit_log.log_event("llm_call", thread_id=thread_id, target=label, summary=f"{label} 관점 평가",
-                             result="실패", provider=llm_provider.get_provider_name())
+        audit_result = "실패"
+    # 감사 기록은 try 밖에서 한다 - 안에 있으면 감사 쪽 예외가 "성공한 평가를 버리고 기본값으로
+    # 대체"하는 업무 결과 변화로 번질 수 있다(2026-09-30 code-quality-reviewer 지적).
+    audit_log.log_event("llm_call", thread_id=thread_id, target=label, summary=f"{label} 관점 평가",
+                         result=audit_result, provider=llm_provider.get_provider_name())
 
     assessment["requires_shutdown"] = _derive_requires_shutdown(
         assessment["risk_level"], assessment["recommended_window"]
@@ -617,13 +633,21 @@ def finalize_node(state: SupervisorState) -> dict:
             # 스스로 스킵한 경우까지 거짓으로 성공 처리됐다. 이제 반환된 상태 문자열을
             # 그대로 감사 로그의 result에 남긴다("sent"만 진짜 성공).
             try:
-                status = cmms_client.push_work_order(state.machine_id, state.work_order)
-                audit_log.log_event("external_push", thread_id=state.thread_id, target=target,
-                                     summary="CMMS 작업지시서 push", result=status)
+                cmms_status = cmms_client.push_work_order(state.machine_id, state.work_order)
             except Exception as e:
                 logger.error(f"[CMMS push 실패] {e}")
+                cmms_status = "실패"
+            # 감사 기록은 try 밖 - 안에 있으면 성공한 push 뒤의 감사 예외가 "실패"로 한 번 더
+            # 기록됐을 것이다(2026-09-30 code-quality-reviewer 지적).
+            if cmms_status == "blocked_offline":
+                # Slack 오프라인 차단과 같은 이벤트 유형으로 남긴다 - 예전엔 external_push/
+                # blocked_offline이라 감사 탭의 "오프라인 차단" 필터에 CMMS 차단이 안 나왔다
+                # (2026-09-30 interface-reviewer가 실행으로 확인).
+                audit_log.log_event("blocked_by_offline", thread_id=state.thread_id, target="CMMS",
+                                     summary=f"CMMS 작업지시서 push 스킵({target})", result="차단")
+            else:
                 audit_log.log_event("external_push", thread_id=state.thread_id, target=target,
-                                     summary="CMMS 작업지시서 push", result="실패")
+                                     summary="CMMS 작업지시서 push", result=cmms_status)
         else:
             result = f"[긴급 반려됨]\n{state.work_order}\n\n-> 반려 처리되었습니다. 별도 조치는 이루어지지 않았습니다."
             audit_log.log_event("rejection", thread_id=state.thread_id, target=target, summary="긴급 작업지시서 반려")
@@ -735,6 +759,25 @@ def resume_agent(thread_id: str, approved: bool) -> dict:
     _validate_output(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}
 
+_ERROR_REPR_RE = re.compile(r"^\s*([^\W\d][\w.]*)\(")
+
+
+def _error_type_name(error) -> str:
+    """체크포인트의 task.error에서 예외 '유형명'만 꺼낸다. 실제 LangGraph는 예외 객체가 아니라
+    repr 문자열("ValueError('상세 메시지 ...')")로 저장한다 - 처음엔 type(error).__name__을 썼다가
+    항상 'str'이 나오는 걸 실제 그래프로 돌려보고서야 알았다(가짜 상태 테스트는 객체를 가정해서
+    통과했었다). 메시지에는 입력 데이터(전화번호 등)가 섞일 수 있어 유형명 외에는 노출하지 않으며,
+    repr 형태가 아니면 'Error'로 뭉갠다."""
+    if isinstance(error, BaseException):
+        return type(error).__name__
+    match = _ERROR_REPR_RE.match(str(error))
+    # 모듈 경로가 붙은 이름("openai.APITimeoutError")의 각 부분이 식별자일 때만 인정한다. 사용자 정의
+    # __repr__이 "Kim_Cheolsu(...)"처럼 앞 토큰에 데이터를 넣는 경우까지는 막지 못한다(알려진 한계).
+    if match and all(part.isidentifier() for part in match.group(1).split(".")):
+        return match.group(1)
+    return "Error"
+
+
 def check_pending(thread_id: str) -> dict | None:
     """타임아웃 등으로 잃어버린 응답을 thread_id로 복구 조회한다. app.invoke를 다시
     하지 않고 체크포인트 상태만 읽는다 - 재실행/중복 side-effect 없음.
@@ -766,4 +809,13 @@ def check_pending(thread_id: str) -> dict | None:
                 "work_order": payload.get("work_order"),
                 "perspectives": payload.get("perspectives", []),
             }
-    return None
+    # 2026-09-30 pipeline-optimizer 지적(실행으로 확인): 여기까지 왔다는 건 다음에 실행할 노드가
+    # 남아 있는데 승인 대기(interrupt)는 아니라는 뜻이다 - 예전엔 이 경우 None(=not_found)을
+    # 돌려줘서 "아직 실행 중인 그래프"와 "노드가 예외로 멈춘 그래프"와 "기록 없음"이 화면에서 구분이
+    # 안 됐다. 로컬 LLM에서는 긴급 진단이 60초 타임아웃을 넘기는 게 정상(문서화된 163~177초)이라
+    # 화면은 "1~2분 뒤 포기"를 안내했고, 포기해도 서버 그래프는 단일 Ollama 슬롯을 계속 점유했다.
+    # 예외로 멈춘 노드는 task.error에 남는다 - 내부 메시지는 노출하지 않고 오류 유형만 돌려준다.
+    for task in state.tasks:
+        if task.error is not None:
+            return {"status": "failed", "error_type": _error_type_name(task.error)}
+    return {"status": "running", "next": list(state.next)}

@@ -6,7 +6,7 @@ LLM 제공자 어댑터: `LLM_PROVIDER` 환경변수 하나로 OpenAI <-> Ollama
 """
 import os
 
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 
 
 def get_api_key() -> str:
@@ -44,13 +44,24 @@ def get_provider_name() -> str:
     return _provider()
 
 
+OLLAMA_TIMEOUT_SECONDS = 300.0
+
+
 def get_client() -> OpenAI:
     """제공자에 맞는 OpenAI SDK 클라이언트를 만든다. agent_service.py/main.py가
     module-level에서 한 번만 호출해서 재사용한다 - 매 요청마다 새로 만들지 않는다."""
     if _provider() == "ollama":
+        # 2026-09-30 pipeline-optimizer 지적(실행으로 확인): timeout을 안 주면 SDK 기본
+        # 읽기 타임아웃 600초가 적용되고, SDK 자체 재시도(max_retries=2)에 parse_with_retry의
+        # 재시도가 곱해져 5xx/타임아웃에서 호출당 HTTP 6회까지 쌓였다 - 멈춘 Ollama 하나가
+        # 워커와 단일 추론 슬롯을 호출당 최대 60분 붙잡을 수 있다. 문서화된 가장 긴 단일
+        # 호출(관점 3개 직렬화 시 ~60초)보다 넉넉한 300초로 상한을 두고, 재시도는
+        # parse_with_retry 한 겹으로만 둔다(최대 2회).
         return OpenAI(
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
             api_key="ollama",  # OpenAI SDK가 빈 문자열은 거부해서 더미 값을 넣는다 - Ollama는 실제로 안 씀
+            timeout=OLLAMA_TIMEOUT_SECONDS,
+            max_retries=0,
         )
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY") or "sk-not-set", timeout=30.0)
 
@@ -81,5 +92,10 @@ def parse_with_retry(client, *, model: str, messages: list, response_format, **k
     kwargs = filter_kwargs(**kwargs)
     try:
         return client.chat.completions.parse(model=model, messages=messages, response_format=response_format, **kwargs)
+    except APITimeoutError:
+        # 타임아웃은 다시 시도하지 않는다: Ollama 클라이언트의 timeout(300초)이 재시도와 곱해져 호출
+        # 하나가 최대 600초 워커와 단일 추론 슬롯을 붙잡는다(2026-09-30 code-quality-reviewer).
+        # 멈춘 서버에 같은 요청을 한 번 더 보내도 나아지지 않는다.
+        raise
     except Exception:
         return client.chat.completions.parse(model=model, messages=messages, response_format=response_format, **kwargs)

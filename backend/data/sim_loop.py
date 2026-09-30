@@ -49,6 +49,18 @@ def _set_control(key: str, value: str) -> None:
     conn.close()
 
 
+def _set_controls(values: dict[str, str]) -> None:
+    """여러 제어값을 한 트랜잭션으로 쓴다 - 오류 상태의 두 키(last_error,
+    consecutive_failures)를 따로 쓰다가 사이에서 취소/실패하면 한쪽만 남아 어긋났다
+    (2026-09-30 code-quality-reviewer, 실행으로 확인)."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.executemany("INSERT OR REPLACE INTO sim_control VALUES (?, ?)", list(values.items()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _load_rng() -> random.Random:
     raw = _get_control("rng_state")
     rng = random.Random()
@@ -224,10 +236,20 @@ async def run_forever() -> None:
     정지시키는데 아무 데도 안 남는다). 연속 실패가 쌓이면 last_error에 기록해서
     /simulator/status로 드러나게 한다."""
     consecutive = 0
+    # 서버가 다시 뜨면 이전 실행의 오류 상태는 의미가 없다 - 메모리 카운터는 0에서 시작하는데
+    # DB에는 옛 값이 남아 있어서, 정상 틱이 이어져도 화면의 "N회 연속 실패" 배너가 안 지워졌다.
+    try:
+        await asyncio.to_thread(_set_controls, {"last_error": "", "consecutive_failures": "0"})
+    except Exception:
+        logger.exception("[시뮬레이터] 기동 시 오류 상태 초기화 실패")
     while True:
         await asyncio.sleep(SIM_TICK_SECONDS)
+        # pipeline-optimizer 인계(2026-09-29): 틱 본체만 스레드로 빼고 is_running()/
+        # _set_control()은 이벤트 루프에서 동기로 SQLite를 열고 있었다. 감사 로그와
+        # 같은 파일을 쓰므로 잠기면 busy_timeout 동안 루프 전체(모든 async 엔드포인트)가
+        # 멈춘다 - 이것들도 스레드에서 실행한다.
         try:
-            if not is_running():
+            if not await asyncio.to_thread(is_running):
                 continue
             await asyncio.to_thread(_tick_once)
         except asyncio.CancelledError:
@@ -235,10 +257,20 @@ async def run_forever() -> None:
         except Exception as e:
             consecutive += 1
             logger.exception("[시뮬레이터] 틱 실행 중 오류 (연속 %d회)", consecutive)
-            _set_control("last_error", f"{type(e).__name__}: {e}")
-            _set_control("consecutive_failures", str(consecutive))
+            try:
+                await asyncio.to_thread(_set_controls, {
+                    "last_error": f"{type(e).__name__}: {e}",
+                    "consecutive_failures": str(consecutive),
+                })
+            except Exception:
+                # 상태 기록 실패가 루프를 죽이면 안 된다(위 docstring의 원칙과 동일)
+                logger.exception("[시뮬레이터] 오류 상태 기록 실패")
         else:
             if consecutive:
-                consecutive = 0
-                _set_control("last_error", "")
-                _set_control("consecutive_failures", "0")
+                # 카운터는 DB를 실제로 지운 뒤에만 0으로 돌린다 - 예전엔 먼저 0으로 만들어서,
+                # 지우는 쓰기가 실패하면 이후 정상 틱이 다시는 지우려 하지 않았다.
+                try:
+                    await asyncio.to_thread(_set_controls, {"last_error": "", "consecutive_failures": "0"})
+                    consecutive = 0
+                except Exception:
+                    logger.exception("[시뮬레이터] 오류 상태 초기화 실패 - 다음 정상 틱에서 다시 시도")

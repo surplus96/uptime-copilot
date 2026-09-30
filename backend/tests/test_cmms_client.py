@@ -124,3 +124,29 @@ def test_push_work_order_allows_allowlisted_host_when_offline(monkeypatch):
     monkeypatch.setattr(cmms_client, "ClientSession", lambda *a, **kw: _FakeSession(_FakeCallToolResult(is_error=False)))
 
     assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "sent"
+
+
+@pytest.mark.parametrize("url", ["HTTP://evil.example/mcp", "Http://evil.example/mcp"])
+def test_push_work_order_blocks_uppercase_scheme_http(monkeypatch, url):
+    """security-reviewer 인계(2026-09-29): startswith("http://")가 대소문자를 구분해서
+    `HTTP://`로 쓰면 평문 HTTP 차단을 통과해 토큰이 그대로 나갔다."""
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", url)
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "sometoken")
+    assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "blocked_insecure_url"
+
+
+@pytest.mark.parametrize("url", [
+    "http://evil.example\\@localhost/mcp",
+    "https://localhost@evil.example/mcp",
+])
+def test_push_work_order_blocks_ambiguous_urls(monkeypatch, url):
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", url)
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "sometoken")
+    assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "blocked_insecure_url"
+
+
+def test_push_work_order_is_unconfigured_when_only_the_token_is_missing(monkeypatch):
+    """URL만 있고 토큰이 없으면 미설정이다 - 토큰 없이 요청을 보내면 안 된다(2026-09-30 test-engineer, CM6)."""
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://localhost:3100/mcp")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", None)
+    assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "skipped_unconfigured"

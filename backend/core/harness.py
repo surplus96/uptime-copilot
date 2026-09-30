@@ -73,9 +73,14 @@ def _call_judge(client, prompt: str) -> JudgeResult:
     Pydantic 모델 기준으로 JSON 스키마를 강제하고, 결과를 곧바로
     파싱된 JudgeResult 인스턴스(message.parsed)로 반환한다.
     """
+    # 2026-09-30 pipeline-optimizer/code-quality-reviewer 지적: 이 호출만 reasoning_effort를
+    # filter_kwargs 없이 보냈다(나머지 모든 호출 지점은 거친다). Ollama가 이 파라미터를
+    # 거부하면 judge가 두 번 실패한 뒤 fail-open해서, 로컬 경로의 모든 /rag/query가
+    # verified=False로 나오고 환각 검사가 사실상 꺼진다 - 실제로 거부하는지는 확인하지
+    # 못했지만, 어느 쪽이든 다른 호출과 같은 경로로 통일하는 게 맞다.
     completion = client.chat.completions.parse(
         model=JUDGE_MODEL,
-        reasoning_effort="none",
+        **llm_provider.filter_kwargs(reasoning_effort="none"),
         messages=[{"role": "user", "content": prompt}],
         response_format=JudgeResult,
     )

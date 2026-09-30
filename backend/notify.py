@@ -40,6 +40,10 @@ def send_alert(text: str, *, thread_id: str | None = None) -> None:
                              summary="오프라인 - 웹훅 스킵", result="차단")
         return
     if not SLACK_WEBHOOK_URL:
+        # M5: 미설정 스킵도 하나의 결과다 - 이 행이 없으면 감사 로그만 보고는
+        # "전송 안 됨"과 "기록 누락"을 구분할 수 없다(CMMS의 skipped_unconfigured와 동일).
+        audit_log.log_event("external_push", thread_id=thread_id, target="Slack",
+                             summary="Slack 알림 전송", result="skipped_unconfigured")
         return
 
     try:

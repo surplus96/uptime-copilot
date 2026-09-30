@@ -68,7 +68,17 @@ def test_cmms_host_is_reachable_through_the_allowlist_when_offline(monkeypatch):
     없어도 되고, 이 테스트가 확인할 건 "연결 시도 자체가 허용 목록을 통과하는가"
     뿐이다 - 그래서 아무도 안 듣는 포트로 붙여서, 실패하더라도
     SocketConnectBlockedError(가드가 막음)가 아니라 연결 거부(가드는 통과, 상대가
-    없어서 실패)여야 한다는 걸 확인한다."""
+    없어서 실패)여야 한다는 걸 확인한다.
+
+    2026-09-30 정확히 무엇을 증명하는가(build-doctor/docs-reviewer/security-reviewer가 "CI에서는
+    공허하다"고 지적해서 변이로 직접 확인했다):
+    - 증명함: OFFLINE_ALLOWED_HOSTS에서 host.docker.internal을 빼면 이 테스트가 실패한다 -
+      런타임 가드(cmms_client.push_work_order)가 예외 없이 "blocked_offline"을 반환하고, 그러면
+      아래 pytest.raises가 걸린다. 이 검증은 DNS와 무관해서 CI에서도 유효하다.
+    - 증명 못 함: 소켓 층. CI 러너는 순수 우분투라 host.docker.internal이 DNS 단계에서 실패해
+      connect()까지 가지 못하므로, 아래 SocketConnectBlockedError 검사는 CI에서 도달하지 않는다
+      (Docker 안에서 돌려야 실제로 검사됨). 또 pytest-socket은 connect()만 보므로 프록시·DNS·
+      리다이렉트 경로는 이 테스트로 증명되지 않는다."""
     monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://host.docker.internal:19999/mcp")
     monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "dummy-token")
 

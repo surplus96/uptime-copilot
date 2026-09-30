@@ -64,8 +64,10 @@ def _is_loopback_url(url: str) -> bool:
     # 2026-09-29 CP-M2 교차 검토 지적: 이 목록이 offline_guard.OFFLINE_ALLOWED_HOSTS와
     # 별개로 하드코딩돼 있었다 - 이제 그 상수를 그대로 재사용해서 "유일한 정의처"를
     # 실제로 지킨다.
-    host = urlparse(url).hostname
-    return host in offline_guard.OFFLINE_ALLOWED_HOSTS
+    # 2026-09-29 security-reviewer 인계: urllib로 호스트만 뽑아 비교하면
+    # `http://evil\@localhost/` 같은 URL을 localhost로 오판한다(실제 접속은 다른
+    # 파서가 함) - 모호한 URL을 먼저 거르는 offline_guard.is_allowed_url()로 통일.
+    return offline_guard.is_allowed_url(url)
 
 
 def push_work_order(machine_id: int, work_order_text: str) -> str:
@@ -84,7 +86,13 @@ def push_work_order(machine_id: int, work_order_text: str) -> str:
     # CMMS_MCP_TOKEN이 평문 HTTP로 그대로 나간다 - 루프백이 아닌 주소에 http://를 쓰면
     # 실수로 토큰을 네트워크에 노출시키게 되므로 아예 막는다 (security-reviewer 지적,
     # 2026-09-18). 지금(Atlas-MCP를 같은 호스트에 두는 구성)은 http://localhost가 정상이다.
-    if CMMS_MCP_URL.startswith("http://") and not _is_loopback_url(CMMS_MCP_URL):
+    # 2026-09-29 security-reviewer 인계: startswith("http://")는 대소문자를 구분해서
+    # `HTTP://evil.example/`이 평문 차단을 그대로 통과했다(토큰 평문 노출). 스킴은
+    # 대소문자 무관이므로 파싱한 뒤 소문자로 비교하고, 모호한 URL은 여기서도 막는다.
+    if offline_guard.is_ambiguous_url(CMMS_MCP_URL):
+        logger.warning("[CMMS push 차단] CMMS_MCP_URL이 모호한 형식(userinfo/백슬래시/공백/비HTTP 스킴) - 요청 차단")
+        return "blocked_insecure_url"
+    if urlparse(CMMS_MCP_URL).scheme.lower() == "http" and not _is_loopback_url(CMMS_MCP_URL):
         logger.warning("[CMMS push 실패] CMMS_MCP_URL이 루프백이 아닌데 http://를 사용 - 토큰 평문 노출 위험, 요청 차단")
         return "blocked_insecure_url"
     # 2026-09-29 CP-M2 교차 검토 지적: 허용 목록은 지금까지 테스트(pytest-socket)에서만

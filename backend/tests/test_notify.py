@@ -64,7 +64,7 @@ def test_format_for_slack_bolds_labels_and_breaks_numbered_steps():
 
 
 def test_send_alert_noop_when_unconfigured(monkeypatch):
-    """SLACK_WEBHOOK_URL 미설정 시 조용히 아무것도 안 해야 한다(요청 자체를 안 보냄)."""
+    """SLACK_WEBHOOK_URL 미설정 시 요청 자체를 안 보내야 한다(감사 기록은 별도 테스트)."""
     import notify
 
     monkeypatch.setattr(notify, "SLACK_WEBHOOK_URL", None)
@@ -135,3 +135,18 @@ def test_send_alert_logs_blocked_by_offline_with_thread_id(monkeypatch, isolated
     assert row["event_type"] == "blocked_by_offline"
     assert row["result"] == "차단"
     assert row["thread_id"] == "t1"
+
+
+def test_send_alert_logs_unconfigured_skip_to_audit(monkeypatch, isolated_audit):
+    """M5(2026-09-29): 웹훅 미설정 스킵이 감사 로그에 아무 흔적도 안 남아서 "전송 안 됨"과
+    "기록 누락"을 구분할 수 없었다. CMMS의 skipped_unconfigured와 같은 값으로 남긴다."""
+    import notify
+
+    monkeypatch.setattr(notify, "SLACK_WEBHOOK_URL", None)
+    notify.send_alert("테스트", thread_id="t-unconf")
+
+    rows = isolated_audit.list_events(thread_id="t-unconf")
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "external_push"
+    assert rows[0]["target"] == "Slack"
+    assert rows[0]["result"] == "skipped_unconfigured"

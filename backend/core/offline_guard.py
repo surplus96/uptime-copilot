@@ -10,15 +10,36 @@
 모델 로딩이 매번 huggingface.co에 접속함. 이 파일이 실제 강제 지점이 되도록
 `enforce_offline_env()`/`validate_allowed_endpoints()`를 추가했다."""
 import os
+from urllib import request as urllib_request
 from urllib.parse import urlparse
 
 OFFLINE_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "host.docker.internal"}
 
 
+_OFFLINE_TRUE = ("1", "true", "yes", "on")
+_OFFLINE_FALSE = ("", "0", "false", "no", "off")
+
+
 def is_offline() -> bool:
     # "1"만 인식하던 걸 완화 - true/yes/on도 같은 의미로 받아들인다(대소문자 무관).
-    # 값 자체가 없거나 "0"/"false" 등이면 여전히 온라인으로 취급한다.
-    return os.getenv("OFFLINE", "").strip().lower() in ("1", "true", "yes", "on")
+    # 값 자체가 없거나 "0"/"false" 등이면 온라인으로 취급한다. 그 밖의 값은 여기서 예외를
+    # 던지지 않는다(알림 전송마다 호출되는 함수라 런타임에 터지면 안 된다) - 대신 기동
+    # 시점에 validate_offline_flag()가 거부한다.
+    return os.getenv("OFFLINE", "").strip().lower() in _OFFLINE_TRUE
+
+
+def validate_offline_flag() -> None:
+    """알 수 없는 OFFLINE 값(y, enabled, 2 ...)은 is_offline()에서 조용히 온라인으로
+    취급돼서, 운영자가 오프라인이라고 믿는 채로 LangSmith 업로드·HF 접속·Slack 전송이
+    그대로 일어났다 - 실제로 OFFLINE=y에서 import 시점에 LangSmith 접속이 시도되는 걸
+    소켓을 막고 재현했다(2026-09-30 security-reviewer). LLM_PROVIDER처럼 모르는 값이면
+    "안전한 쪽으로 추측"하지 않고 기동 초기에 크게 실패시킨다."""
+    value = os.getenv("OFFLINE", "").strip().lower()
+    if value not in _OFFLINE_TRUE and value not in _OFFLINE_FALSE:
+        raise RuntimeError(
+            f"OFFLINE={value!r}는 알 수 없는 값입니다 - 켜려면 {list(_OFFLINE_TRUE)}, "
+            f"끄려면 {list(_OFFLINE_FALSE)[1:]} 또는 비워두세요. 오타로 조용히 온라인이 되는 걸 막기 위해 거부합니다."
+        )
 
 
 def _hostname(url: str | None) -> str | None:
@@ -27,11 +48,37 @@ def _hostname(url: str | None) -> str | None:
     return urlparse(url).hostname
 
 
+def is_ambiguous_url(url: str) -> bool:
+    """파서마다 호스트를 다르게 읽을 수 있는 URL인지(security-reviewer 인계, 2026-09-29).
+    예: `http://evil.example\\@localhost/`를 urllib은 localhost로 읽지만 WHATWG 규칙을
+    따르는 HTTP 클라이언트는 `\\`를 `/`로 취급해 evil.example로 접속한다 - 허용 목록
+    검사(urllib)와 실제 접속(httpx)이 서로 다른 호스트를 보게 된다. 서버 설정값에
+    userinfo·백슬래시·공백·제어문자가 들어갈 정당한 이유가 없으므로 전부 거부한다."""
+    if "\\" in url or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        return True
+    try:
+        parsed = urlparse(url)
+        parsed.port  # noqa: B018 - 잘못된 포트("localhost:3100:80")는 여기서 ValueError
+    except ValueError:
+        # `http://[localhost]/`처럼 urllib 자체가 못 읽는 URL - 클라이언트마다 다르게 읽을 수
+        # 있으므로 fail-closed(2026-09-30 security-reviewer 실행 확인).
+        return True
+    return "@" in parsed.netloc or parsed.scheme.lower() not in ("http", "https")
+
+
+def is_allowed_url(url: str | None) -> bool:
+    """허용 목록 판정의 유일한 진입점 - 모호한 URL은 호스트와 무관하게 불허."""
+    if not url or is_ambiguous_url(url):
+        return False
+    return urlparse(url).hostname in OFFLINE_ALLOWED_HOSTS
+
+
 def enforce_offline_env() -> None:
     """OFFLINE이면 이 프로세스가 앞으로 만들 모든 서브시스템(HF, LangChain 자동
     트레이싱)이 스스로 온라인 시도를 안 하도록 환경변수 자체를 덮어쓴다. main.py가
     다른 어떤 것도 import하기 전에 제일 먼저 호출해야 한다 - HuggingFace/LangChain은
     import 시점에 이미 이 값을 읽어가는 경우가 있어서, 늦게 부르면 늦다."""
+    validate_offline_flag()
     if not is_offline():
         return
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -47,6 +94,40 @@ def enforce_offline_env() -> None:
         os.environ[var] = "false"
 
 
+def validate_no_proxy_bypass() -> None:
+    """프록시 환경변수가 있으면 httpx/httpx2가 허용 목록 호스트(localhost 등)로 가는 요청도
+    프록시로 보낸다 - 프롬프트와 CMMS 베어러 토큰이 프록시로 나가고, 로컬 프록시는 소켓
+    허용 목록 검사도 통과해서 CI 증명이 이 환경에서는 공허해진다(2026-09-30
+    security-reviewer가 두 클라이언트 모두 실행으로 확인).
+
+    판정은 직접 구현하지 않고 urllib의 함수를 쓴다(httpx가 같은 원천을 쓴다). 처음에는
+    `NO_PROXY or no_proxy`를 직접 읽었는데, 대문자 NO_PROXY에 허용 호스트를 다 넣고 소문자
+    no_proxy를 *빈 값*으로 두면 urllib은 프록시를 거친다고 판단하는데 이 검사는 통과시켰고,
+    `Http_Proxy` 같은 혼합 대소문자도 놓쳤다(2026-09-30 code-quality-reviewer, 실행으로 확인).
+    한계: 환경변수만 본다 - macOS/Windows의 OS 수준 프록시 설정은 검사하지 않는다(Docker의 Linux
+    컨테이너에서는 환경변수가 전부다)."""
+    if not is_offline():
+        return
+    proxies = {k: v for k, v in urllib_request.getproxies_environment().items() if k in ("http", "https", "all") and v}
+    if not proxies:
+        return
+    # proxy_bypass_environment는 CPython에 오래전부터 있고 httpx가 프록시 제외를 판단하는 것과 같은 원천이지만
+    # typeshed에는 노출돼 있지 않다 - 직접 재구현하면 이번에 고친 불일치(NO_PROXY/no_proxy 우선순위)가
+    # 재발하므로 호출 지점에서만 좁게 ignore한다.
+    env_proxies = urllib_request.getproxies_environment()
+    leaking = sorted(
+        h for h in OFFLINE_ALLOWED_HOSTS
+        if not urllib_request.proxy_bypass_environment(h, env_proxies)  # type: ignore[attr-defined]
+    )
+    if leaking:
+        raise RuntimeError(
+            "OFFLINE=1인데 프록시 환경변수(HTTP_PROXY/HTTPS_PROXY/ALL_PROXY, 대소문자 무관)가 설정돼 "
+            f"있고 NO_PROXY가 허용 목록 호스트 {leaking}를 제외하지 않습니다 - 이 호스트로 가는 요청도 "
+            "프록시를 거치게 됩니다. 프록시 변수를 해제하거나 NO_PROXY에 허용 목록 호스트를 넣으세요"
+            "(소문자 no_proxy가 빈 값으로 설정돼 있으면 그것이 우선합니다)."
+        )
+
+
 def validate_allowed_endpoints() -> None:
     """오프라인인데 OLLAMA_BASE_URL/CMMS_MCP_URL이 허용 목록 밖 호스트를 가리키면
     기동을 거부한다. 허용 목록은 "코드가 알아서 안전하게 처리하겠다"는 뜻이 아니라
@@ -54,11 +135,17 @@ def validate_allowed_endpoints() -> None:
     바로 실패시킨다."""
     if not is_offline():
         return
+    validate_no_proxy_bypass()
     checks = {
         "OLLAMA_BASE_URL": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
         "CMMS_MCP_URL": os.getenv("CMMS_MCP_URL"),
     }
     for var, url in checks.items():
+        if url and is_ambiguous_url(url):
+            raise RuntimeError(
+                f"OFFLINE=1인데 {var}가 모호한 URL입니다(userinfo·백슬래시·공백 또는 "
+                f"http/https 외 스킴) - 허용 목록 검사를 우회할 수 있어 거부합니다."
+            )
         host = _hostname(url)
         if host is not None and host not in OFFLINE_ALLOWED_HOSTS:
             raise RuntimeError(

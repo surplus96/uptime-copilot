@@ -456,6 +456,60 @@ def test_approval_flow_produces_complete_audit_trail(monkeypatch, isolated_audit
     # approval - 이 시나리오에서 반드시 나와야 하는 최소 집합.
     assert {"llm_call", "tool_call", "approval"} <= event_types_seen
 
+    # 2026-09-29 test-engineer 인계("승인 경로 검증 누락"): 위 부분집합 검사는
+    # 승인 후 외부 전송이 아예 기록되지 않거나 엉뚱한 결과로 기록돼도 통과했다.
+    # 전송 행의 대상·결과·순서, 3관점 기록까지 고정한다. conftest가 Slack/CMMS를
+    # 비워두므로 두 전송 모두 "미설정 스킵"이 정답이다(거짓 "성공" 금지).
+    by_type: dict[str, list[dict]] = {}
+    for r in rows:
+        by_type.setdefault(r["event_type"], []).append(r)
+
+    assert len(by_type["approval"]) == 1
+    assert by_type["approval"][0]["target"] == "설비#1"
+
+    pushes = {r["target"]: r["result"] for r in by_type["external_push"]}
+    assert pushes == {"Slack": "skipped_unconfigured", "설비#1": "skipped_unconfigured"}
+
+    approval_id = by_type["approval"][0]["id"]
+    assert all(r["id"] > approval_id for r in by_type["external_push"]), "전송이 승인보다 먼저 기록됨"
+
+    llm_targets = [r["target"] for r in by_type["llm_call"]]
+    assert sorted(t for t in llm_targets if t) == ["생산", "안전", "정비"]
+    assert llm_targets.count(None) == 1  # 라우팅 1회
+    assert all(r["provider"] for r in by_type["llm_call"])
+    assert not by_type.get("rejection")
+
+
+def test_approval_flow_records_real_push_results(monkeypatch, isolated_audit):
+    """설정된 환경에서 승인 → Slack 성공 + CMMS 실패일 때 각각의 실제 결과가
+    그대로 남는지 - 한쪽 실패가 다른 쪽 기록을 덮거나 거짓 성공으로 바뀌면 안 된다."""
+    import cmms_client
+    import notify
+
+    _patch_common(monkeypatch, "긴급")
+    monkeypatch.setattr("data.parts_operations.check_parts", lambda comp: {
+        "needs_procurement": False, "on_hand": 90, "min_stock": 20, "lead_time_days": 14,
+    })
+    monkeypatch.setattr(notify, "SLACK_WEBHOOK_URL", "https://hooks.example/fake")
+
+    class _OK:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(notify.requests, "post", lambda *a, **kw: _OK())
+
+    def _cmms_down(machine_id, text):
+        raise RuntimeError("CMMS create-work-order 실패")
+
+    monkeypatch.setattr(cmms_client, "push_work_order", _cmms_down)
+
+    agent_service.start_agent("1번 설비 이상해", "test-thread-real-push")
+    agent_service.resume_agent("test-thread-real-push", approved=True)
+
+    rows = [r for r in isolated_audit.list_events() if r["thread_id"] == "test-thread-real-push"]
+    pushes = {r["target"]: r["result"] for r in rows if r["event_type"] == "external_push"}
+    assert pushes == {"Slack": "성공", "설비#1": "실패"}
+
 
 def test_check_pending_recovers_pending_approval(monkeypatch):
     """2026-09-29 실사용 중 발견: 프론트엔드가 응답 타임아웃 후 이 함수로 복구를
@@ -521,3 +575,144 @@ def test_check_pending_still_validates_output_on_done_recovery(monkeypatch):
     # PII 포함 result가 남아있다 - check_pending()의 done 분기도 같은 검증을 해야 한다.
     with pytest.raises(HarnessRejectedError):
         agent_service.check_pending("test-thread-pii-recovery")
+
+
+class _RaisingClient:
+    """create()가 항상 예외를 던지는 가짜 클라이언트 - LLM 호출 실패 경로 재현용."""
+    class _C:
+        def create(self, **kwargs):
+            raise RuntimeError("LLM 다운")
+    chat = type("Chat", (), {"completions": _C()})()
+
+
+class _AnsweringClient:
+    class _C:
+        def create(self, **kwargs):
+            return _FakeCompletion(_FakeMessage(content="답변"))
+    chat = type("Chat", (), {"completions": _C()})()
+
+
+@pytest.mark.parametrize("node_name, target, state_kwargs", [
+    ("general_node", "general", {}),
+    ("schedule_node", "schedule", {"machine_id": 1}),
+])
+def test_free_generation_nodes_audit_success_and_failure(monkeypatch, isolated_audit, node_name, target, state_kwargs):
+    """2026-09-30 감사 경로 점검: schedule_node/general_node는 성공했을 때만 감사 행을 남겨서,
+    LLM 호출이 실패하면 흔적이 없었다(다른 LLM 호출 지점은 전부 실패도 기록). 성공은 '성공',
+    실패는 '실패'로 남기고 예외는 그대로 전파돼야 한다(호출부 동작을 바꾸지 않음)."""
+    monkeypatch.setattr(agent_service.pdm_operations, "estimate_next_maintenance", lambda mid: {"next": "테스트"})
+    node = getattr(agent_service, node_name)
+    state = agent_service.SupervisorState(user_message="질문", thread_id=f"t-{target}", **state_kwargs)
+
+    monkeypatch.setattr(agent_service, "client", _AnsweringClient())
+    assert node(state)["result"] == "답변"
+
+    monkeypatch.setattr(agent_service, "client", _RaisingClient())
+    with pytest.raises(RuntimeError, match="LLM 다운"):
+        node(state)
+
+    rows = [r for r in isolated_audit.list_events() if r["thread_id"] == f"t-{target}"]
+    assert [(r["event_type"], r["target"], r["result"]) for r in reversed(rows)] == [
+        ("llm_call", target, "성공"),
+        ("llm_call", target, "실패"),
+    ]
+    assert all(r["provider"] for r in rows)
+
+
+def test_cmms_offline_block_is_audited_as_blocked_by_offline_like_slack(monkeypatch, isolated_audit):
+    """2026-09-30 interface-reviewer(실행으로 확인): CMMS 오프라인 차단은 external_push/
+    blocked_offline로, Slack은 blocked_by_offline 이벤트로 남아서 감사 탭의 "오프라인 차단"
+    필터에 CMMS가 안 나왔다. 두 목적지 모두 같은 이벤트 유형이어야 한다."""
+    import cmms_client
+
+    _patch_common(monkeypatch, "긴급")
+    monkeypatch.setattr("data.parts_operations.check_parts", lambda comp: {
+        "needs_procurement": False, "on_hand": 90, "min_stock": 20, "lead_time_days": 14,
+    })
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "https://cmms.example.com/mcp")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "tok")
+
+    agent_service.start_agent("1번 설비 이상해", "t-cmms-offline")
+    agent_service.resume_agent("t-cmms-offline", approved=True)
+
+    rows = [r for r in isolated_audit.list_events() if r["thread_id"] == "t-cmms-offline"]
+    blocked = {r["target"] for r in rows if r["event_type"] == "blocked_by_offline"}
+    assert blocked == {"Slack", "CMMS"}
+    assert all(r["result"] == "차단" for r in rows if r["event_type"] == "blocked_by_offline")
+    assert not [r for r in rows if r["event_type"] == "external_push"], "차단된 전송이 push 시도로 기록됨"
+
+
+def test_check_pending_distinguishes_running_failed_and_unknown(monkeypatch):
+    """2026-09-30 pipeline-optimizer: 진행 중/예외로 멈춤/기록 없음이 전부 None(not_found)이었다."""
+    from types import SimpleNamespace
+
+    def fake_state(next_, tasks, values):
+        return SimpleNamespace(next=next_, tasks=tasks, values=values)
+
+    class _App:
+        def __init__(self, state):
+            self._state = state
+
+        def get_state(self, config):
+            return self._state
+
+    task = lambda error=None, interrupts=(): SimpleNamespace(error=error, interrupts=list(interrupts))  # noqa: E731
+
+    # 아직 실행 중: 다음 노드가 남아 있고 오류도 승인 대기도 없음
+    monkeypatch.setattr(agent_service, "app", _App(fake_state(("safety", "production"), [task(), task()], {})))
+    assert agent_service.check_pending("t") == {"status": "running", "next": ["safety", "production"]}
+
+    # 노드가 예외로 멈춤: 오류 유형만 노출하고 메시지는 노출하지 않는다. 실제 LangGraph는 task.error를
+    # 예외 객체가 아니라 repr *문자열*로 저장한다(실제 그래프 테스트로 확인) - 두 형태 모두 처리한다.
+    for error in ("ValueError('내부 상세 - 노출 금지 010-1234-5678')", ValueError("내부 상세 - 노출 금지")):
+        monkeypatch.setattr(agent_service, "app", _App(fake_state(
+            ("production",), [task(), task(error=error)], {})))
+        failed = agent_service.check_pending("t")
+        assert failed == {"status": "failed", "error_type": "ValueError"}
+        assert "노출 금지" not in str(failed) and "010-" not in str(failed)
+
+    # repr 형태가 아닌 문자열은 유형을 추측하지 않고 일반 표기로(메시지 조각 노출 방지)
+    monkeypatch.setattr(agent_service, "app", _App(fake_state(
+        ("production",), [task(error="something went wrong for 홍길동")], {})))
+    assert agent_service.check_pending("t") == {"status": "failed", "error_type": "Error"}
+
+    # 기록 자체가 없음: 실행된 적 없는 thread
+    monkeypatch.setattr(agent_service, "app", _App(fake_state((), [], {})))
+    assert agent_service.check_pending("t") is None
+
+
+def test_check_pending_reports_failed_for_a_real_graph_whose_node_raised(monkeypatch):
+    """가짜 상태가 아니라 실제 컴파일된 그래프로 - 병렬 3관점 중 하나가 예외로 멈추면 체크포인트에
+    task.error가 남아 check_pending이 'failed'를 돌려줘야 한다(그 전에는 not_found로 보였다)."""
+    _patch_common(monkeypatch, "긴급")
+    monkeypatch.setattr("data.parts_operations.check_parts", lambda comp: {
+        "needs_procurement": False, "on_hand": 90, "min_stock": 20, "lead_time_days": 14,
+    })
+    real = agent_service._assess_perspective
+
+    def flaky(label, system_prompt, diagnosis, thread_id=None):
+        if label == "생산":
+            raise ValueError("관점 노드 내부 오류 - 노출 금지")
+        return real(label, system_prompt, diagnosis, thread_id)
+
+    monkeypatch.setattr(agent_service, "_assess_perspective", flaky)
+    with pytest.raises(ValueError):
+        agent_service.start_agent("1번 설비 이상해", "t-real-failed")
+
+    status = agent_service.check_pending("t-real-failed")
+    assert status == {"status": "failed", "error_type": "ValueError"}
+    assert "노출 금지" not in str(status)
+
+
+def test_failed_perspective_assessment_is_audited_as_failure_not_success(monkeypatch, isolated_audit):
+    """실패해서 기본값으로 대체된 평가가 감사 로그에는 '성공'으로 남아도 통과했다(2026-09-30 test-engineer, AS14)."""
+    def boom(*a, **kw):
+        raise RuntimeError("LLM 다운")
+
+    monkeypatch.setattr(agent_service.llm_provider, "parse_with_retry", boom)
+    out = agent_service._assess_perspective("안전", "프롬프트", "진단", "t-persp-fail")
+
+    assert out["perspective_assessments"][0]["is_fallback"] is True
+    rows = [r for r in isolated_audit.list_events() if r["thread_id"] == "t-persp-fail"]
+    assert [(r["event_type"], r["target"], r["result"]) for r in rows] == [("llm_call", "안전", "실패")]

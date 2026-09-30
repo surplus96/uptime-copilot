@@ -160,3 +160,156 @@ def test_traceable_wraps_when_online(monkeypatch):
 
     import os
     assert "HF_HUB_OFFLINE" not in os.environ
+
+
+@pytest.mark.parametrize("url", [
+    "http://evil.example\\@localhost/mcp",        # urllib은 localhost, WHATWG 클라이언트는 evil.example
+    "http://localhost@evil.example/mcp",          # userinfo로 허용 호스트를 위장
+    "http://localhost:3100/mcp\n",                # 제어문자
+    "http://localhost:3100/ mcp",                 # 공백
+    "file:///etc/passwd",                          # http/https 외 스킴
+    "ftp://localhost/mcp",
+])
+def test_is_allowed_url_rejects_ambiguous_urls_even_with_allowlisted_host(url):
+    """security-reviewer 인계(2026-09-29): 허용 목록 검사(urllib)와 실제 접속(다른
+    파서)이 서로 다른 호스트를 볼 수 있는 URL은 호스트가 허용 목록에 있어 보여도
+    불허해야 한다."""
+    assert offline_guard.is_ambiguous_url(url) is True
+    assert offline_guard.is_allowed_url(url) is False
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:3100/mcp",
+    "http://127.0.0.1:3100/mcp",
+    "http://host.docker.internal:3100/mcp",
+    "HTTP://LOCALHOST:3100/mcp",                   # 스킴·호스트는 대소문자 무관
+])
+def test_is_allowed_url_accepts_plain_allowlisted_urls(url):
+    assert offline_guard.is_ambiguous_url(url) is False
+    assert offline_guard.is_allowed_url(url) is True
+
+
+def test_is_allowed_url_rejects_lookalike_and_empty():
+    assert offline_guard.is_allowed_url("http://127.0.0.1.nip.io/mcp") is False
+    assert offline_guard.is_allowed_url("http://0.0.0.0/mcp") is False
+    assert offline_guard.is_allowed_url(None) is False
+    assert offline_guard.is_allowed_url("") is False
+
+
+def test_validate_allowed_endpoints_rejects_ambiguous_url_when_offline(monkeypatch):
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setenv("CMMS_MCP_URL", "http://evil.example\\@localhost/mcp")
+    with pytest.raises(RuntimeError, match="모호한 URL"):
+        offline_guard.validate_allowed_endpoints()
+
+
+@pytest.mark.parametrize("value", ["y", "enabled", "2", "onn", "disable"])
+def test_validate_offline_flag_rejects_unknown_values(monkeypatch, value):
+    """2026-09-30 security-reviewer: OFFLINE=y 같은 오타는 조용히 온라인으로 동작했다(실제로
+    import 시점에 LangSmith 접속이 시도됨) - 모르는 값이면 기동 초기에 크게 실패해야 한다."""
+    monkeypatch.setenv("OFFLINE", value)
+    with pytest.raises(RuntimeError, match="알 수 없는 값"):
+        offline_guard.validate_offline_flag()
+    with pytest.raises(RuntimeError, match="알 수 없는 값"):
+        offline_guard.enforce_offline_env()  # main.py가 제일 먼저 부르는 진입점에서도 거부
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES", "on", "0", "false", "no", "off", ""])
+def test_validate_offline_flag_accepts_known_values(monkeypatch, value):
+    monkeypatch.setenv("OFFLINE", value)
+    offline_guard.validate_offline_flag()
+
+
+def test_offline_refuses_proxy_env_that_would_route_allowlisted_hosts(monkeypatch):
+    """프록시 변수가 있으면 httpx가 localhost/host.docker.internal로 가는 요청도 프록시로
+    보낸다(프롬프트와 CMMS 토큰이 프록시로 나감) - 허용 목록 호스트가 NO_PROXY로 제외되지
+    않았다면 기동을 거부한다."""
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:3128")
+    with pytest.raises(RuntimeError, match="프록시"):
+        offline_guard.validate_allowed_endpoints()
+
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")  # host.docker.internal이 빠짐
+    with pytest.raises(RuntimeError, match="host.docker.internal"):
+        offline_guard.validate_allowed_endpoints()
+
+
+def test_offline_allows_proxy_env_when_allowlisted_hosts_are_excluded(monkeypatch):
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:3128")
+    monkeypatch.setenv("NO_PROXY", "localhost, 127.0.0.1 ,host.docker.internal")
+    offline_guard.validate_allowed_endpoints()
+    monkeypatch.setenv("NO_PROXY", "*")
+    offline_guard.validate_allowed_endpoints()
+
+
+def test_proxy_env_is_ignored_when_online(monkeypatch):
+    monkeypatch.delenv("OFFLINE", raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:3128")
+    offline_guard.validate_allowed_endpoints()
+
+
+@pytest.mark.parametrize("url", ["http://[localhost]/mcp", "http://localhost:3100:80/mcp", "http://localhost/\x7f"])
+def test_urls_the_parser_cannot_read_are_treated_as_ambiguous(url):
+    """urllib이 예외를 던지거나 클라이언트마다 다르게 읽을 수 있는 URL은 fail-closed."""
+    assert offline_guard.is_ambiguous_url(url) is True
+    assert offline_guard.is_allowed_url(url) is False
+
+
+def test_proxy_guard_agrees_with_urllib_when_lowercase_no_proxy_is_set_but_empty(monkeypatch):
+    """2026-09-30 code-quality-reviewer(실행으로 확인): 대문자 NO_PROXY에 허용 호스트를 전부 넣어도
+    소문자 no_proxy가 *빈 값*이면 urllib(httpx가 쓰는 원천)은 프록시를 거친다고 판단한다 - 예전 검사는
+    `NO_PROXY or no_proxy`를 직접 읽어서 이 경우를 통과시켰다."""
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.corp.example:3128")
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,host.docker.internal")
+    monkeypatch.setenv("no_proxy", "")
+    with pytest.raises(RuntimeError, match="프록시"):
+        offline_guard.validate_allowed_endpoints()
+
+
+def test_proxy_guard_recognises_mixed_case_proxy_variable_names(monkeypatch):
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setenv("Http_Proxy", "http://proxy.corp.example:3128")  # 혼합 대소문자 - 예전 목록은 놓쳤다
+    with pytest.raises(RuntimeError, match="프록시"):
+        offline_guard.validate_allowed_endpoints()
+
+
+def test_error_type_name_handles_module_paths_and_non_ascii_but_not_data_like_tokens():
+    from agent.agent_service import _error_type_name
+
+    assert _error_type_name("openai.APITimeoutError('Request timed out.')") == "openai.APITimeoutError"
+    assert _error_type_name("설비오류('상세')") == "설비오류"
+    assert _error_type_name("1bad('x')") == "Error"            # 식별자가 아님(숫자로 시작) - 일반 표기로
+    assert _error_type_name("a b.c('x')") == "Error"           # 공백이 섞인 토큰
+    assert _error_type_name("no parentheses here") == "Error"
+    # 정규식은 통과하지만 점으로 나눈 부분이 식별자가 아닌 경우 - isidentifier 검증이 잡아야 한다
+    assert _error_type_name("pkg..Err('x')") == "Error"          # 빈 부분
+    assert _error_type_name("pkg.1Err('x')") == "Error"          # 숫자로 시작하는 부분
+
+
+def test_offline_rejects_a_remote_ollama_base_url(monkeypatch):
+    """가장 비싼 공백(2026-09-30 test-engineer, OG27): OLLAMA_BASE_URL 검사를 통째로 지워도 모든 테스트가
+    통과했다 - 프롬프트가 외부 호스트로 나가도 아무것도 실패하지 않는다."""
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama.example.com:11434/v1")
+    with pytest.raises(RuntimeError, match="OLLAMA_BASE_URL"):
+        offline_guard.validate_allowed_endpoints()
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")
+    offline_guard.validate_allowed_endpoints()  # 허용 목록 안이면 통과
+
+
+def test_offline_refuses_all_proxy_alone(monkeypatch):
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.setenv("ALL_PROXY", "socks5://proxy.corp.example:1080")
+    with pytest.raises(RuntimeError, match="프록시"):
+        offline_guard.validate_allowed_endpoints()
+
+
+@pytest.mark.parametrize("url", ["http://localhost\\evil.example/", "http://localhost/\x01", "http://localhost/\x1f"])
+def test_backslash_and_non_space_control_characters_are_ambiguous(url):
+    """백슬래시 검사와 공백이 아닌 제어문자(< 0x20) 검사를 각각 따로 못박는다 - 예전 테스트는 URL이
+    `@`도 함께 담고 있거나 공백류만 써서 각 절을 지워도 통과했다."""
+    assert offline_guard.is_ambiguous_url(url) is True

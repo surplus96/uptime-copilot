@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -88,18 +88,27 @@ async def _warm_up_ollama() -> None:
     백그라운드로 더미 호출 한 번을 보내 모델을 미리 올려둔다. 헬스체크/기동을 막지 않게
     fire-and-forget으로 실행하고 실패해도 무시한다(2026-09-25, 지연시간 개선)."""
     try:
-        agent_service.client.chat.completions.create(
+        # pipeline-optimizer 인계(2026-09-29): async 함수 안에서 동기 클라이언트를 그대로
+        # 부르면 콜드 로드(수십 초) 동안 이벤트 루프 전체가 멈춰서, "헬스체크를 막지 않는
+        # fire-and-forget"이라는 의도와 반대로 /health까지 응답하지 못했다. 스레드로 뺀다.
+        await asyncio.to_thread(
+            agent_service.client.chat.completions.create,
             model=agent_service.MODEL,
             max_completion_tokens=1,
             messages=[{"role": "user", "content": "ping"}],
         )
         logging.getLogger(__name__).info("Ollama 워밍업 완료")
-        audit_log.log_event("llm_call", target="warm_up", summary="Ollama 워밍업 핑",
-                             provider=llm_provider.get_provider_name())
+        warm_up_result = "성공"
     except Exception as e:
         logging.getLogger(__name__).warning(f"Ollama 워밍업 실패(무시하고 계속 진행): {e}")
-        audit_log.log_event("llm_call", target="warm_up", summary="Ollama 워밍업 핑",
-                             result="실패", provider=llm_provider.get_provider_name())
+        warm_up_result = "실패"
+    # 감사 쓰기(SQLite)도 이벤트 루프 밖에서 - 시뮬레이터 틱이 쓰기 잠금을 잡고 있으면 루프가
+    # 그만큼 멈췄다(2026-09-30 pipeline-optimizer가 3.04초 정지를 실측). try 밖이라 감사
+    # 예외가 워밍업 결과 처리에 영향을 주지도 않는다.
+    await asyncio.to_thread(
+        audit_log.log_event, "llm_call", target="warm_up", summary="Ollama 워밍업 핑",
+        result=warm_up_result, provider=llm_provider.get_provider_name(),
+    )
 
 
 @asynccontextmanager
@@ -121,7 +130,9 @@ async def lifespan(app: FastAPI):
         with SqliteSaver.from_conn_string(str(CHECKPOINT_DB_PATH)) as checkpointer:
             agent_service.initialize_agent(langsmith_client, checkpointer)
             if llm_provider.get_provider_name() == "ollama":
-                asyncio.create_task(_warm_up_ollama())
+                # create_task의 반환값을 안 잡으면 이벤트 루프가 약한 참조만 들고 있어 태스크가
+                # 실행 도중 수거될 수 있다(asyncio 문서) - app.state에 참조를 유지한다.
+                app.state.warm_up_task = asyncio.create_task(_warm_up_ollama())
             yield
     finally:
         # finally: yield에서 예외가 올라와도 태스크를 반드시 정리한다.
@@ -247,20 +258,27 @@ def rag_query(req: RAGRequest):
     try:
         context, answer = rag_service.answer_with_context(req.question)
     except Exception as e:
-        audit_log.log_event("llm_call", target="rag_query", summary=req.question[:50],
+        audit_log.log_event("llm_call", target="rag_query", summary=req.question,
                              result="실패", provider=llm_provider.get_provider_name())
         raise LLMAPIError(str(e))
 
-    check_output_forbidden_words(answer)
+    try:
+        check_output_forbidden_words(answer)
+    except HarnessRejectedError:
+        # M6: LLM 호출 자체는 일어났는데 응답이 PII 검사에서 거부된 경우 - 이 분기만
+        # 감사 기록 없이 빠져나가고 있었다(실패/faithfulness 거부/성공은 기록됨).
+        audit_log.log_event("llm_call", target="rag_query", summary=req.question,
+                             result="거부됨(PII)", provider=llm_provider.get_provider_name())
+        raise
 
     faithfulness_result = judge_faithfulness(client, context, answer)
     if not faithfulness_result.get("pass", True):
-        audit_log.log_event("llm_call", target="rag_query", summary=req.question[:50],
+        audit_log.log_event("llm_call", target="rag_query", summary=req.question,
                              result="거부됨", provider=llm_provider.get_provider_name())
         raise HarnessRejectedError(
             f"RAG 답변이 검색 문맥에 근거하지 않음(hallucination 의심): {faithfulness_result.get('reason')}"
         )
-    audit_log.log_event("llm_call", target="rag_query", summary=req.question[:50],
+    audit_log.log_event("llm_call", target="rag_query", summary=req.question,
                          result="성공", provider=llm_provider.get_provider_name())
     verified = faithfulness_result.get("score") is not None
     verified_reason = None if verified else faithfulness_result.get("reason")
@@ -342,8 +360,21 @@ def parts_inventory_risk():
     from data.demand_forecast import COMPONENTS, forecast_demand
     from data.parts_operations import check_parts
 
-    demand_30 = forecast_demand(30)
-    demand_90 = forecast_demand(90)
+    try:
+        demand_30 = forecast_demand(30)
+        demand_90 = forecast_demand(90)
+    except FileNotFoundError as e:
+        # 2026-09-30 build-doctor/interface-reviewer: 수요 예측은 원본 CSV와 학습된 모델 파일이
+        # 있어야 한다 - 학습을 건너뛴 새 환경에서는 원인을 알 수 없는 500으로만 보였다(진단 경로는
+        # 모델이 없으면 Z-score로 조용히 대체되지만 이 경로는 그럴 수 없다). 원인과 해결 명령을 알려준다.
+        # str(e)는 서버의 절대 경로를 담을 수 있어 인증 없는 클라이언트에 내보내지 않는다(filename이
+        # 없는 FileNotFoundError - ml/predict.py의 명시적 raise 등 - 는 일반 표기로). bytes 경로도 안전하게.
+        missing = Path(os.fsdecode(e.filename)).name if e.filename else "모델/데이터 파일"
+        raise HTTPException(status_code=503, detail=(
+            f"수요 예측에 필요한 파일을 찾지 못했습니다({missing}). 원본 데이터 적재"
+            "(data/pdm_dataloader.py)와 모델 학습(python -m ml.build_features, python -m ml.train)을 "
+            "먼저 실행하세요."
+        ))
     rows = []
     for comp in COMPONENTS:
         parts = check_parts(comp)

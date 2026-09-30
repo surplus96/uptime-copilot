@@ -28,6 +28,45 @@ def _no_real_external_calls(monkeypatch):
     monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_proxy_or_offline_flag(monkeypatch):
+    """테스트가 실행 환경에 좌우되지 않게 한다: 프록시 환경변수(회사망·Docker·이 개발
+    환경의 샌드박스가 설정함)가 있으면 OFFLINE 기동 검증이 거부되고, OFFLINE/LLM_PROVIDER가
+    셸에 남아 있으면 테스트 결과가 달라진다. 필요한 테스트는 자기 안에서 명시적으로 세팅한다."""
+    import os
+    # urllib은 프록시 변수를 대소문자 구분 없이 읽는다(Http_Proxy도 인식) - 이름을 나열하지 말고 전부 찾는다.
+    for var in list(os.environ):
+        if var.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+            monkeypatch.delenv(var, raising=False)
+    # 셸에 OFFLINE=1이 남아 있으면 notify 테스트 3개가 실패했다(2026-09-30 code-quality-reviewer, 실행으로 확인).
+    monkeypatch.delenv("OFFLINE", raising=False)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_audit_db(tmp_path, monkeypatch):
+    """2026-09-29 test-engineer 지적: audit_log.DB_PATH가 격리되지 않아서, 에이전트/
+    notify 테스트가 개발자의 실제 store/pdm_telemetry.db에 감사 행을 썼다(그 DB에
+    audit_log 테이블이 없는 CI에서는 경고만 남기고 조용히 버려졌다). 모든 테스트가
+    기본으로 임시 DB를 쓰게 한다 - 자기 DB를 따로 지정하는 테스트(audit_db 등)는
+    나중에 monkeypatch로 덮어쓰므로 영향 없다."""
+    from data import audit_log
+    monkeypatch.setattr(audit_log, "DB_PATH", str(tmp_path / "default_audit.db"))
+    audit_log.init_audit_table()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_parts_db(tmp_path, monkeypatch):
+    """2026-09-30 깨끗한 환경 재현 중 발견: check_parts()를 스텁하지 않는 그래프 테스트 4개가
+    실제 store/pdm_telemetry.db를 열었다 - 개발자 로컬에서는 진짜 부품 마스터를 읽고, 데이터가
+    없는 CI에서는 sqlite가 빈 파일을 만든 뒤 '테이블 없음' 오류 경로를 타서, 같은 테스트가
+    환경마다 다른 경로를 검증했다. 기본으로 비어 있는 임시 DB를 가리키게 해서 어디서나 같은
+    (오류 -> '정보 없음') 경로를 타게 한다. 부품 데이터가 필요한 테스트는 자기 DB를 만들어
+    monkeypatch로 덮어쓴다(test_parts_operations.py 참고)."""
+    from data import parts_operations
+    monkeypatch.setattr(parts_operations, "DB_PATH", str(tmp_path / "default_parts.db"))
+
+
 @pytest.fixture
 def event_store_module(tmp_path, monkeypatch):
     """실제 pdm_telemetry.db를 절대 건드리지 않도록, DB_PATH를 테스트마다 새로 만드는
