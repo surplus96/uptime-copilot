@@ -16,8 +16,10 @@ security operations (offline mode, audit log) — see the MRO Extension section 
 
 > **Independent project inspired by Hanwha's public materials on TOMMS/HUMS** (predictive-maintenance
 > program names referenced for comparison in [mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md) §0-1) —
-> not affiliated with, endorsed by, or built for Hanwha. All part numbers, stock levels, and other
-> MRO-domain data in this repo are synthetic (see the MRO Extension section below).
+> not affiliated with, endorsed by, or built for Hanwha. All part numbers, stock levels, lead times,
+> costs, and end-of-life dates in this repo are synthetic (see the MRO Extension section below); the
+> replacement history behind the demand forecast comes from the public Azure PdM dataset, which is
+> itself simulated data.
 
 ## MRO Extension (parts, demand forecast, inventory risk, offline mode, audit log)
 
@@ -39,8 +41,11 @@ decision log: [mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md),
   (conditional probability from the validation period) and a population base rate for
   future days whose alarm state isn't known yet — mixing these up the wrong way produced a
   real, measured bug during development (see `docs/decisions.md`, 2026-09-28). Backtested
-  against the real Nov–Dec 2015 replacement counts using only a 2015-11-01 snapshot (no
-  training/validation data reused): -5.0% to +3.5% error.
+  against the Nov–Dec 2015 replacement counts of the Azure PdM dataset using only a 2015-11-01
+  snapshot for the alarm state; rates are fitted on Jan–Oct 2015 and no Nov–Dec data is used
+  for fitting: -5.0% to +3.5% error. **This validates the base rates, not the alarm term** —
+  the alarm term adds only 0–2 units of ~120, and a forecast without it scores the same
+  within noise (roughly -6% to +3%).
 - **Inventory-risk tab** — `GET /parts/inventory_risk`, shown in the Streamlit app's fourth
   tab. Numbers are rounded for display and explicitly labeled as estimates that don't
   account for stock already on order.
@@ -50,21 +55,43 @@ decision log: [mro-copilot-upgrade-plan.md](mro-copilot-upgrade-plan.md),
   imminent end-of-life shows as its own `[조달 긴급도]` line on the work order instead of
   inflating the priority level.
 - **Offline mode (`backend/core/offline_guard.py`)** — a destination-based allowlist
-  (`localhost` / `127.0.0.1` / `host.docker.internal`), not a per-module switch: anything
-  inside it (Ollama, a self-hosted CMMS) keeps working with `OFFLINE=1`; anything outside it
-  (LangSmith tracing, Slack) becomes a no-op instead of failing loudly. Setting
-  `OFFLINE=1` together with `LLM_PROVIDER=openai` refuses to start rather than silently
-  reaching a cloud endpoint from inside a closed network. Proven with `pytest-socket`
-  (`backend/tests/test_offline_guard.py`, run with `-m offline_e2e` — excluded from the
-  default CI path since CI has no cached embedding model to survive it): real sockets are
-  blocked except to the allowlist, and a full diagnose→approve→CMMS-push scenario is driven
-  through the actual `notify.py`/`cmms_client.py` code paths, not mocks, so a forgotten guard
-  would show up as a real blocked connection, not a false pass.
-- **Audit log (`backend/data/audit_log.py`)** — every LLM call, tool call, approval/rejection,
-  external push (Slack, CMMS), and offline-blocked call is recorded with a timestamp, thread
-  ID, event type, target, result, and provider, queryable via `GET /audit_log` and the
-  Streamlit app's fifth tab. Correlating by thread ID reconstructs one full scenario end to
-  end — routing → parts check → the three perspective assessments → approval → CMMS push.
+  (`localhost` / `127.0.0.1` / `host.docker.internal`), not a per-module switch: anything inside
+  it (Ollama, a self-hosted CMMS) keeps working with `OFFLINE=1`. What it does, each part
+  checked by running it rather than only by reading it:
+  - **Refuses to start** when `OFFLINE` has an unrecognised value (a typo like `y` used to run
+    silently online — accepted: `1/true/yes/on`, `0/false/no/off` or empty), when `LLM_PROVIDER`
+    is `openai` or unknown, when `OLLAMA_BASE_URL`/`CMMS_MCP_URL` point outside the allowlist or
+    are ambiguous URLs (userinfo, backslashes, control characters, non-http schemes), or when a
+    proxy variable (`HTTP(S)_PROXY`/`ALL_PROXY`, any letter case) would send allowlisted hosts through
+    a proxy — set `NO_PROXY` to include them (an empty lowercase `no_proxy` overrides it). Only
+    environment variables are checked, not OS-level proxy settings.
+  - **Turns things off before anything else is imported**: `HF_HUB_OFFLINE=1` (so the embedding
+    model must already be in the cache — an `OFFLINE=1` first run on an empty cache fails at
+    startup instead of hanging) and all LangChain/LangSmith tracing variables. Slack is skipped;
+    CMMS pushes are refused at call time unless the host is in the allowlist.
+  - **Checked automatically in CI**: `backend/tests/test_offline_guard.py` (default CI path;
+    `-m offline_e2e` selects it alone) blocks real sockets with `pytest-socket` except to the
+    allowlist and drives diagnose → approve with a *stubbed LLM and stubbed diagnosis*; Slack is
+    skipped by the guard and CMMS is unconfigured in that scenario. The startup refusals, the
+    call-time CMMS check and the URL parsing are covered by unit tests, not by the socket test.
+  - **Not proven**: `pytest-socket` only sees TCP `connect()`, so proxy routing, DNS lookups
+    and HTTP redirects are outside it (proxies are refused at startup instead). The socket test
+    does not import `main.py`, so startup and RAG initialisation are not exercised in CI — they
+    were verified separately with sockets blocked. The frontend container used to look up its
+    public IP on every start; `browser.serverAddress` removes that (verified by emulating the
+    container's Streamlit config, not in a live container).
+- **Audit log (`backend/data/audit_log.py`)** — records every LLM-using step (routing, the three
+  perspective assessments, schedule/general answers, RAG answers, the local-model warm-up —
+  failures included), the parts-availability lookup, approvals/rejections, and Slack/CMMS pushes
+  with their real outcome (sent / failed / not configured / blocked by offline mode), each with a
+  timestamp, thread ID, event type, target, result and provider. **Not audited**: the diagnosis
+  data lookups (maintenance history, anomaly detection, risk model) and the background scan's
+  parts lookups; a retried call, and a RAG answer together with its faithfulness judge, each show
+  as one row. Free text is PII-masked before it is stored (national ID, card, mobile,
+  international and landline numbers, e-mail); names and addresses can't be detected by pattern
+  and are not masked. Queryable via `GET /audit_log` (`event_type`, `thread_id`, `since`,
+  `until`, `limit` 1–1000) and the Streamlit app's fifth tab. Filtering by thread ID reconstructs
+  one scenario — routing → parts check → the three perspective assessments → approval → pushes.
 
 ## Folder Structure
 
@@ -73,12 +100,14 @@ uptime-copilot/
 ├── archive/               Azure PdM raw CSVs (download required - see "Data Setup" below)
 ├── backend/                FastAPI backend
 │   ├── main.py               Entry point (uvicorn main:app)
-│   ├── core/                  Harness (input/output validation) + system prompt
+│   ├── core/                  Harness (input/output validation), LLM provider adapter, offline guard
 │   ├── rag/                    RAG pipeline (hybrid BM25+dense search) + docs/
 │   │                             (`pump_manual.py` is a static lookup dict the agent reads
 │   │                             directly — not retrieved via RAG; see Architecture Principles)
 │   ├── agent/                  LangGraph multi-agent graph (routing + HITL + event scanner)
-│   ├── data/                    PdM data ingestion/query layer + event store (SQLite)
+│   ├── ml/                      Failure-risk model: feature pipeline, training, prediction
+│   ├── data/                    PdM data ingestion/query layer + event store, parts master,
+│   │                             demand forecast, audit log (SQLite)
 │   │                             (`sim_*.py`: automated runtime degradation simulator —
 │   │                             see "Architecture Principles" and `docs/design/SIMULATOR_PLAN.md`)
 │   ├── store/                    Generated state (pdm_telemetry.db, checkpoints.db,
@@ -91,13 +120,13 @@ uptime-copilot/
 │   └── Dockerfile
 ├── frontend/                Streamlit chat UI
 │   └── Dockerfile
-├── .github/workflows/       CI: ruff + mypy + pytest on every push/PR
+├── .github/workflows/       CI: ruff + mypy + pytest on pushes to main and on every PR
 └── docker-compose.yml       See "Running with Docker Compose" below
 ```
 
 ## Prerequisites
 
-- Python ≥3.10 (developed and tested on 3.12; the codebase uses `X | None` union syntax throughout)
+- Python 3.12 (what CI and the Docker image use; dependencies are unpinned, and the current resolution pulls numpy 2.x / scipy releases that require ≥3.12 — older Python versions have not been tested)
 - Docker + Docker Compose, if you'd rather skip the manual venv setup below (see
   "Running with Docker Compose")
 
@@ -111,8 +140,9 @@ inside the image — so "Data Setup" below applies regardless of which path you 
 
 # 2) Configure
 cp backend/.env.example backend/.env
-# fill in backend/.env (OPENAI_API_KEY is required; everything else optional —
-# see Environment Variables below)
+# fill in backend/.env (an OpenAI key is NOT needed for the Docker path — compose defaults to a
+# local Ollama; it is only required if you switch to LLM_PROVIDER=openai. See Environment
+# Variables below)
 
 # 3) Build and start both services
 docker compose up -d --build
@@ -137,7 +167,9 @@ docker compose up -d --build
   named volume, not baked into the image, so a fresh container has no trained model either.
   Without this, `_diagnose_machine()` silently falls back to the (much weaker) Z-score
   threshold and logs `위험도 모델 파일이 없어 Z-score만으로 판정합니다` — that log line is
-  expected until you run this once, not a sign anything is broken:
+  expected until you run this once, not a sign anything is broken. The **inventory-risk tab
+  needs it too**: the demand forecast loads the trained models (and the raw CSVs), so without
+  them `GET /parts/inventory_risk` answers `503` with the missing file and these commands:
   ```bash
   docker compose exec backend python -m ml.build_features
   docker compose exec backend python -m ml.train
@@ -147,8 +179,9 @@ docker compose up -d --build
   `docker compose down -v` wipes it (you'd need to re-run the ingestion step above
   afterward — and re-download the embedding model, since `down -v` also drops the
   `hf_cache` volume mentioned above).
-- Both services bind to `127.0.0.1` only, same as the manual setup below — nothing is
-  exposed on your LAN.
+- Both services bind to `127.0.0.1` only, same as the manual setup below — this stack exposes
+  nothing on your LAN. (Starting Ollama with `OLLAMA_HOST=0.0.0.0`, as suggested below, is the
+  exception — see the warning there.)
 - `docker compose down` to stop.
 - **`docker-compose.yml` defaults the backend to `LLM_PROVIDER=ollama`** (the plain code
   default, e.g. when running the backend directly without Docker, is `openai` — this override
@@ -156,7 +189,13 @@ docker compose up -d --build
   `backend/.env`; see Evaluation Baseline below for what that trade-off actually costs). For
   the container to reach it, start Ollama on the host with `OLLAMA_HOST=0.0.0.0 ollama serve`
   (its default, loopback-only, isn't reachable from inside the container) — `docker-compose.yml`
-  already points `OLLAMA_BASE_URL` at `host.docker.internal` for you. Pull the model once
+  already points `OLLAMA_BASE_URL` at `host.docker.internal` for you (and, for Linux Docker
+  Engine, maps that name to the host gateway via `extra_hosts`; not verified on a Linux host).
+  **Security note:** binding Ollama to `0.0.0.0` exposes its unauthenticated API on every network
+  interface of the host — anyone on your LAN can run inference or make it pull models from the
+  internet, which defeats an "offline" deployment. Restrict it with a firewall (allow only the
+  Docker bridge / loopback), or bind it to a specific interface. Whether Docker Desktop can
+  reach an Ollama bound only to loopback has not been verified here. Pull the model once
   with `ollama pull qwen3:8b`. Set `LLM_PROVIDER: openai` in `docker-compose.yml` instead if
   you'd rather the containers use the cloud model.
 - **Recommended**: run Ollama on the host with `OLLAMA_KEEP_ALIVE=30m ollama serve` so the
@@ -245,9 +284,12 @@ pytest tests/eval/test_golden.py -m eval -v -s
 
 | Metric | Accuracy | Measured |
 |---|---|---|
-| Router (category) | 90.0% | 2026-09-23 |
-| Machine-ID extraction | 100.0% | 2026-09-23 |
-| Re-ask on missing ID | 100.0% | 2026-09-23 |
+| Router (category) | 90.0% | 2026-09-27 |
+| Machine-ID extraction | 100.0% | 2026-09-27 |
+| Re-ask on missing ID | 100.0% | 2026-09-27 |
+
+(Cloud model `gpt-5.6-luna`, one run over the 40 golden questions. Earlier runs on 2026-09-23/25
+did not record which provider produced them and are not cited.)
 
 Each run writes a full per-case breakdown to `backend/tests/eval/results/<timestamp>.json`
 (gitignored — regenerate rather than version-control). Expected severity is intentionally
@@ -275,8 +317,11 @@ safety net — an external review caught this as an apples-to-oranges comparison
 its own failure cases. The numbers above are from a clean rerun: cloud measured once with
 current code, local measured 5 times, both split into the 40 questions used to build the
 safety net and a separate 10-question holdout that was never looked at while building it.
-Every eval result file now records which provider/model produced it
-(`tests/eval/results/*.json`), so this is independently re-checkable.
+Eval result files from 2026-09-27 on record which provider/model produced them
+(`llm_provider`/`llm_model` in `tests/eval/results/*.json`). Those files are **gitignored, so they
+exist only on the machine that ran them** — to re-check a number, re-run `pytest -m eval` (needs an
+OpenAI key or a running Ollama). Latency figures (~1.2 s / ~13 s / ~40 s) have no stored artifact
+at all.
 
 Extraction and re-ask held up identically locally from the start — those are narrow,
 closed-form tasks. Routing initially trailed the cloud model by double digits and every
@@ -314,7 +359,7 @@ accuracy/latency trade for going fully local.
 | Variable | Required | Effect if unset |
 |---|---|---|
 | `LLM_PROVIDER` | No | Code default is `openai`; set to `ollama` to run entirely against a local Ollama server instead (`backend/core/llm_provider.py`) — no API key or internet needed, at a real accuracy/latency cost (see Evaluation Baseline below). **`docker-compose.yml` overrides this to `ollama`** for the containerized path regardless of what's in `.env` — see "Running with Docker Compose" above. |
-| `OFFLINE` | No | Set to `1` to enforce the destination-based offline guard (`backend/core/offline_guard.py`, see MRO Extension above) — LangSmith/Slack become no-ops, Ollama/CMMS at `host.docker.internal` keep working. `OFFLINE=1` + `LLM_PROVIDER=openai` refuses to start. |
+| `OFFLINE` | No | `1`/`true`/`yes`/`on` enables the destination-based offline guard (`backend/core/offline_guard.py`, see MRO Extension above); `0`/`false`/`no`/`off`/empty disables it; any other value refuses to start. Enabled: LangSmith tracing off, Slack skipped, `HF_HUB_OFFLINE=1` forced (the embedding model must already be cached), CMMS pushes refused outside the allowlist. Refuses to start with `LLM_PROVIDER=openai` or an unknown provider, with `OLLAMA_BASE_URL`/`CMMS_MCP_URL` outside the allowlist, or with proxy variables set unless `NO_PROXY` covers `localhost,127.0.0.1,host.docker.internal`. |
 | `OPENAI_API_KEY` | **Yes, unless `LLM_PROVIDER=ollama`** | Backend refuses to start. Not needed for the Docker path by default, since compose sets `LLM_PROVIDER=ollama`. |
 | `OPENAI_MODEL` | No | Defaults to `gpt-5.6-luna`. Only used when `LLM_PROVIDER=openai` |
 | `OLLAMA_BASE_URL` | No | Defaults to `http://localhost:11434/v1`. Only used when `LLM_PROVIDER=ollama` |
@@ -349,6 +394,7 @@ accuracy/latency trade for going fully local.
 | POST | `/rag/query` | RAG-based document Q&A |
 | POST | `/agent/query` | Multi-agent query — returns `pending_approval` on urgent findings |
 | POST | `/agent/resume` | Resume the graph after an HITL approval/rejection decision |
+| GET | `/agent/status/{thread_id}` | Recover a request after a client timeout without re-running it: `pending_approval` (with the work order), `done`, `running` (the graph is still executing — normal for ~3 minutes on a local model), `failed` (a node raised; only the error type is returned), or `not_found` |
 | POST | `/scan` | Sweep all 100 machines (no LLM), saving 긴급/주의 findings to the event store |
 | GET | `/events` | List pending detected events |
 | POST | `/events/complete` | Mark events completed — archived, and only re-surfaces on genuinely new evidence |
@@ -359,7 +405,7 @@ accuracy/latency trade for going fully local.
 | POST | `/simulator/inject` | Force a specific machine into a strong degradation, for demos (`{"machine_id": 12}`, optional `"signal"`: one of `volt`/`rotate`/`pressure`/`vibration`, random if omitted) |
 | POST | `/simulator/reset` | Wipe simulator state/data **and** the detected/completed event tables — call this before a fresh run; nothing is cleared automatically. See `docs/design/SIMULATOR_PLAN.md` |
 | GET | `/parts/inventory_risk` | 30/90-day demand vs. on-hand stock per part, with a coverability flag per horizon (see MRO Extension above) |
-| GET | `/audit_log` | Query the audit log (optional `limit`, `event_type` filter) — LLM calls, tool calls, approvals/rejections, external pushes, offline-blocked calls |
+| GET | `/audit_log` | Query the audit log — filters `event_type`, `thread_id`, `since`, `until`; `limit` 1–1000 (default 100). LLM-using steps, the parts lookup, approvals/rejections, external pushes, offline-blocked calls |
 
 Example `/agent/query` request:
 ```json
@@ -379,8 +425,9 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
   corpus is small enough that they added no measurable value (see `docs/decisions.md`).
 - **Agent**: Built on LangGraph's `StateGraph`. Routes each question into
   diagnosis / maintenance-schedule / general-inquiry branches. Diagnoses use a
-  three-tier severity model: 일반(normal) / 주의(caution — a Z-score telemetry
-  anomaly, no confirmed failure) / 긴급(urgent — an actual logged failure record).
+  three-tier severity model: 일반(normal) / 주의(caution — a failure-risk-model alarm, no
+  confirmed failure; a Z-score telemetry anomaly is used only as the fallback when no trained
+  model exists) / 긴급(urgent — an actual logged failure record).
   Only 긴급 cases run three parallel perspective evaluations (safety / production /
   maintenance) and pause for Human-in-the-Loop (HITL) approval; 주의 cases skip
   straight to a work order. HITL approval state is checkpointed to SQLite

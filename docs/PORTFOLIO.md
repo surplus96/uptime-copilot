@@ -4,17 +4,22 @@
 [![한국어](https://img.shields.io/badge/한국어-switch-555555?style=for-the-badge)](PORTFOLIO_KOR.md)
 
 > A RAG + multi-agent copilot for manufacturing predictive maintenance. It diagnoses
-> equipment anomalies from real sensor, error, and maintenance-history data, and routes
+> equipment anomalies from sensor, error, and maintenance-history data (the public Azure PdM
+> benchmark, itself simulated), and routes
 > urgent cases through Human-in-the-Loop approval into Slack alerts and CMMS work orders —
 > an end-to-end pipeline I designed and built myself. Extended with an MRO layer (parts,
 > demand forecast, procurement) and closed-network security operations (offline mode,
 > audit log) — §11.
 
+> **Independent project inspired by Hanwha's public materials on TOMMS/HUMS — not affiliated with,
+> endorsed by, or built for Hanwha.** Part numbers, stock levels, lead times, costs and end-of-life
+> dates are synthetic.
+
 `FastAPI` · `LangGraph` · `Streamlit` · `RAG (Chroma)` · `SQLite` · `Model Context Protocol` · `Docker Compose` · `pytest`
 
 | | | | | |
 |---|---|---|---|---|
-| **100** monitored machines | **100%** failure event recall on held-out data (synthetic benchmark — see caveats) | **97–100%** detection precision (vs **6–18%** for the existing Z-score threshold) | **139** regression tests (CI-enforced, 144 total) | **0** disallowed network calls under `OFFLINE=1` (enforced at runtime + proven in CI on every push — §11) |
+| **100** monitored machines | **100%** failure event recall on held-out data (synthetic benchmark — see caveats) | **97–100%** detection precision (vs **6–18%** for the existing Z-score threshold) | **222** regression tests (CI-enforced, 227 total) | **0** non-allowlisted TCP connections in the socket-blocked approve-path test (stubbed LLM); startup refuses unsafe endpoints — exact scope and what is *not* proven in §11 |
 
 ---
 
@@ -37,8 +42,8 @@ approval into the tools a plant actually uses (Slack, a CMMS).
 A Streamlit frontend calls the FastAPI backend. The backend passes every model input/output
 through a Harness (a deterministic validation layer) before delegating to the LangGraph
 supervisor and the RAG service. State (telemetry, events, HITL checkpoints) lives in SQLite,
-document embeddings in Chroma, and only approved urgent cases propagate — deterministically —
-to Slack and Atlas CMMS (via MCP).
+document embeddings in Chroma, and approved urgent cases propagate — deterministically — to Slack and
+Atlas CMMS (via MCP); the background scan also posts newly detected anomalies to Slack.
 
 ```mermaid
 flowchart LR
@@ -80,7 +85,7 @@ Every diagnosis resolves to one of three levels, and the level changes the path 
 | Level | Basis | What happens next |
 |---|---|---|
 | 🟢 **일반** (normal) | No anomaly | Answer directly, no further action |
-| 🟡 **주의** (caution) | Telemetry Z-score anomaly — not yet a confirmed failure | Generate a work order and finalize immediately (no approval) |
+| 🟡 **주의** (caution) | Failure-risk-model alarm (Z-score anomaly only as the fallback when no model is trained) — not yet a confirmed failure | Generate a work order and finalize immediately (no approval) |
 | 🔴 **긴급** (urgent) | An actual failure record exists in `PdM_failures.csv` | Three parallel perspective assessments (safety / production / maintenance) → **HITL approval wait** → on approval, propagate to Slack + CMMS |
 
 ### LangGraph multi-agent graph
@@ -96,7 +101,7 @@ flowchart TD
     route -- "diagnosis" --> diagnosis["diagnosis"]
     route -- "schedule" --> schedule["schedule"] --> ENDs(("END"))
     route -- "general" --> general["general"] --> ENDg(("END"))
-    diagnosis -- "normal" --> general2["general"] --> ENDg2(("END"))
+    diagnosis -- "normal / unknown machine" --> finalize0["finalize"] --> ENDg2(("END"))
     diagnosis -- "caution / urgent" --> manual["manual_lookup"]
     manual --> parts["parts_check<br/>(MRO extension)"]
     parts -- "caution" --> wo["work_order"]
@@ -125,7 +130,7 @@ right after `manual_lookup`, before the urgent/caution branch, since both paths 
 |---|---|
 | RAG retrieval | Hybrid BM25 (sparse) + dense-embedding search. Embeddings: `intfloat/multilingual-e5-small`; vector store: Chroma. (Multi-Query rewriting and a Self-RAG retrieval-necessity check were both removed 2026-09-23 — this corpus is small enough that neither added measurable value; see `docs/decisions.md`.) |
 | Faithfulness scoring | After generation, an LLM judge automatically scores how faithful the answer is to the retrieved context (guards against RAG's "plausible but unsupported answer" failure mode). |
-| Harness | A deterministic validation layer on every model input/output — regex-based PII checks (computational) combined with LLM-judge quality/faithfulness checks (inferential). |
+| Harness | A deterministic validation layer — an input length check, regex-based PII checks on outputs (work orders and answers; computational), and an LLM-judge faithfulness check on RAG answers only (inferential). |
 
 ### Event scanner — evidence-based suppression
 
@@ -196,7 +201,7 @@ per-event.*
 
 **On event recall the baseline is already decent** — 73–100%, tied outright on comp3. The
 real gap is precision: the Z-score baseline's individual alerts are 82–94% false positives,
-against 0–3% for the model, at a mean lead time of 19.5–21.0h within the 24h prediction
+against 0–3.3% for the model, at a mean lead time of 19.5–21.0h within the 24h prediction
 window. That's the actual claim here — not "the baseline catches nothing," but "the
 baseline drowns a real signal in false alarms, and the model doesn't."
 
@@ -326,7 +331,7 @@ racing an inject against a tick.
 
 | Item | Details |
 |---|---|
-| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. 139 run automatically in CI (`pytest tests/ --ignore=tests/test_rag_dedup.py`) on every push, including the `pytest-socket` offline-network suite (§11) — an earlier version of this line excluded that suite from CI, citing a missing HF cache as the reason; a cross-review caught that the suite never actually touches the embedding path, so the real constraint was something else (a Docker-only hostname), verified not to break the suite on a bare CI runner before re-enabling it. 144 total, including a 40-case real-LLM golden-set eval kept opt-in (costs API tokens) and 2 tests needing the live embedding model, skipped only in CI's fast path via `--ignore`. |
+| Regression tests | For each bug found I add a pytest test, then **revert to the pre-fix code and confirm the test actually goes red** before restoring the fix — a fixed routine that proves the tests aren't just decorative. 222 run automatically in CI (`pytest tests/ --ignore=tests/test_rag_dedup.py`) on every push, including the `pytest-socket` offline-network suite (§11) — an earlier version of this line excluded that suite from CI, citing a missing HF cache as the reason; a cross-review caught that the suite never actually touches the embedding path, so the real constraint was something else (a Docker-only hostname), verified not to break the suite on a bare CI runner before re-enabling it. 227 total, including a 40-case real-LLM golden-set eval kept opt-in (costs API tokens) and 2 tests needing the live embedding model, skipped only in CI's fast path via `--ignore`. |
 | Static analysis + CI | ruff and mypy run in GitHub Actions on every push/PR, scoped to the modules under active development — adopted specifically because the "vanished function" bug above is exactly what a type checker catches instantly and a test suite might not. |
 | Review-agent process | During development, used nine single-lane review subagents (security / code quality / interface / pipeline & model operations / docs / debugging / build & packaging / performance / test validity) instead of one general reviewer — reviewing code in the same context that wrote it lets defects straight through. The agent definitions themselves are checked into `.claude/agents/` (2026-09-29 correction — an earlier version of this line claimed they weren't part of the shipped repo, which a cross-review caught as false by checking `git ls-files`). |
 | Cross-review checkpoints | For decisions where getting it wrong is expensive — the failure-risk model's suspiciously perfect first-pass metrics (§05), the priority-rule design that decides shutdown recommendations — I sent the exact code/data to an independent model for review before shipping, rather than self-certify. Both are logged in full in `docs/decisions.md`, including what the reviews actually found. |
@@ -392,11 +397,11 @@ separate extension rather than folded into the core numbers above.
 
 | Component | What it does |
 |---|---|
-| Parts master + demand forecast | 5 synthetic parts, 30/90-day replacement forecast split into a preventive term and a failure term (see below), backtested against real Nov–Dec 2015 replacement counts: -5.0% to +3.5% error |
+| Parts master + demand forecast | 5 synthetic parts, 30/90-day replacement forecast split into a preventive term and a failure term (see below), backtested against the Nov–Dec 2015 replacement counts in the Azure PdM dataset: -5.0% to +3.5% error (validates the base rates; the alarm term adds only 0–2 of ~120 units) |
 | Inventory-risk dashboard | `GET /parts/inventory_risk`, flags shortfalls and distinguishes a genuine risk (lead time exceeds the horizon) from a normal reorder signal (it doesn't) |
 | Procurement urgency, kept separate from priority | A missing part doesn't inflate how urgent a diagnosis is — it's its own line on the work order, decided by the same deterministic function the background scanner uses |
-| Offline mode | Destination-based allowlist enforced at runtime (not just in tests) — the app refuses to start on an unsafe provider/endpoint combination, and forces `HF_HUB_OFFLINE`/disables LangChain auto-tracing before anything downstream can read the old values. Proven with `pytest-socket` against the real `notify.py`/`cmms_client.py` code paths (not mocks), running in CI on every push, not just locally |
-| Audit log | Every LLM call, tool call, approval/rejection, external push, and offline-blocked call, correlated by thread ID, with a status accurately reflecting what actually happened (sent/skipped/blocked/failed) rather than "no exception raised" |
+| Offline mode | A configured-endpoint allowlist validated at startup and at CMMS call time: the app refuses to start on an unknown `OFFLINE` value, an unsafe provider, an endpoint outside the allowlist, an ambiguous URL, or proxy variables that would reroute allowlisted hosts; it forces `HF_HUB_OFFLINE`/disables LangChain tracing before anything else is imported (this holds for the `main.py` entry point only). CI runs a `pytest-socket` test over diagnose → approve with a *stubbed LLM and stubbed diagnosis* (Slack skipped by the guard, CMMS unconfigured there); the startup checks are unit-tested. **Not proven**: `pytest-socket` sees only TCP `connect()` — proxies, DNS and redirects are outside it — and CI does not exercise startup or RAG initialisation (verified separately with sockets blocked). The frontend container's public-IP lookup was removed via `browser.serverAddress`, checked by emulation only |
+| Audit log | Every LLM-using step (failures included), the parts lookup, approvals/rejections, and Slack/CMMS pushes and offline blocks, correlated by thread ID, with a status that reflects what actually happened (sent / not configured / blocked / failed) rather than "no exception raised". **Not audited**: diagnosis data lookups and the background scan's parts lookups; a retried call and a RAG answer plus its judge each show as one row. Free text is PII-masked before storage (patterns only — names and addresses are not detectable) |
 
 <details>
 <summary><strong>WAR STORY · A statistics bug that only showed up as the wrong kind of wrong, twice</strong></summary>
