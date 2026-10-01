@@ -314,7 +314,8 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 - **Agent**: A LangGraph `StateGraph` routes each question into diagnosis /
   maintenance-schedule / general-inquiry. Diagnoses use a three-tier severity model: 일반
   (normal) / 주의 (caution — a failure-risk-model alarm; Z-score is only the fallback when
-  no model is trained) / 긴급 (urgent — a logged failure record). Only 긴급 cases run three
+  no model is trained) / 긴급 (urgent — a logged failure record, so it is a *post-failure*
+  status; the advance warning is 주의). Only 긴급 cases run three
   parallel perspective evaluations and pause for HITL approval; 주의 goes straight to a work
   order. Approval state is checkpointed to SQLite (survives restarts). A separate `/scan`
   runs the same diagnosis logic (no LLM) across all 100 machines; a completed event only
@@ -322,6 +323,19 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 - **Automated simulator**: `backend/data/sim_engine.py` and friends drive a background
   degradation model per machine (HEALTHY → DEGRADING → FAULT → failure+repair), calibrated
   against measured statistics from the real dataset (see `docs/design/SIMULATOR_PLAN.md`).
+  Precursor errors and the per-signal drift direction follow the pre-failure signature
+  measured in the real data; in an offline replay (`python -m ml.sim_alarm_eval --episodes 150
+  --seed 2`, run from `backend/` or the backend container with trained models and the loaded
+  dataset; scans every 12 simulated hours) the risk score crosses the 주의 threshold before the failure in 83–99% of
+  episodes per signal (including the 1–5% of failures that, as in the real data, have no
+  precursor error), and always on the right component. Error rates, the 24-hour precursor
+  timing, per-component age floors and a maintenance-event process (components serviced
+  together, as in the real maintenance log) were all measured from the real data; the
+  remaining gap to the ~99% the model scores when real failures are replayed through it (99.2%
+  on the held-out Nov–Dec failures) is attributed to the real data's 15-day maintenance calendar
+  and finer telemetry structure, which the simulator does not reproduce — partly confirmed by
+  substituting real values, not fully closed. This shows the simulator is consistent
+  with the model — both come from the same dataset — not that the model alarms in the field.
   Writes to separate `sim_*` tables; fully optional (stopped by default).
 - **Data**: Path constants resolve relative to the file's own location, not the working
   directory. Generated state lives under `backend/store/`, separate from source, so a

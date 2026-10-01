@@ -34,3 +34,35 @@ def test_predict_failure_risk_returns_top3_per_component(monkeypatch):
         assert comp_result["probability"] == 0.9
         assert len(comp_result["top_features"]) == 3
         assert comp_result["top_features"][0]["feature"] == "volt_mean_3h"
+
+
+def test_build_feature_row_matches_training_window_definitions():
+    """라이브 피처 정의가 학습(ml/build_features.py)과 같아야 모델 점수가 의미 있다 - 오류 개수는
+    (T-w, T] 구간(경계: w시간 전 정각은 빼고 T 정각은 넣는다), 정비 경과시간은 부품별 '가장 최근'
+    정비 기준이고 기록이 없으면 NaN(학습 데이터도 NaN), 3h 평균은 마지막 3개 행만 본다.
+    build_feature_row는 DB 없이 부를 수 있어 경계값을 직접 넣어 확인한다."""
+    now = pd.Timestamp("2026-10-03 06:00:00")
+    times = [now - pd.Timedelta(hours=h) for h in range(29, -1, -1)]
+    tele = pd.DataFrame({"datetime": times})
+    for sig in predict.SIGNALS:
+        tele[sig] = [100.0] * 27 + [200.0] * 3  # 마지막 3시간만 다르다
+    err = pd.DataFrame([
+        (now, "error1"),                              # T 정각 - 24h·48h 모두 포함
+        (now - pd.Timedelta(hours=24), "error1"),     # 24h 경계 - 24h 제외, 48h 포함
+        (now - pd.Timedelta(hours=48), "error1"),     # 48h 경계 - 둘 다 제외
+        (now + pd.Timedelta(hours=1), "error1"),      # 미래 - 둘 다 제외
+        (now - pd.Timedelta(hours=1), "error2"),
+    ], columns=["datetime", "errorID"])
+    maint = pd.DataFrame([
+        (now - pd.Timedelta(hours=500), "comp1"),
+        (now - pd.Timedelta(hours=100), "comp1"),     # 가장 최근 것이 기준
+    ], columns=["datetime", "comp"])
+
+    row = predict.build_feature_row(now, tele, err, maint, {"model": "model3", "age": 7}).iloc[0]
+
+    assert row["error1_count_24h"] == 1 and row["error1_count_48h"] == 2
+    assert row["error2_count_24h"] == 1 and row["error3_count_48h"] == 0
+    assert row["volt_mean_3h"] == 200.0 and row["volt_mean_24h"] == (21 * 100.0 + 3 * 200.0) / 24
+    assert row["hours_since_maint_comp1"] == 100.0
+    assert np.isnan(row["hours_since_maint_comp2"])  # comp1 정비가 다른 부품에 새면 안 된다
+    assert (row["model"], row["age"]) == ("model3", 7)

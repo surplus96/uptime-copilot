@@ -293,12 +293,12 @@ with tab1:
                     st.success("✅ 승인됨 — 외부 전송(Slack/CMMS)이 실제로 일어났는지는 '감사 로그' 탭에서 확인하세요.")
                     thread_id = message.get("thread_id")
                     if thread_id:
+                        # 같은 안내를 두 번 쓰지 않는다 - 위 배너가 안내를 맡고, 여기는 조회 키와
+                        # 가능한 결과만 보탠다.
                         st.caption(
-                            f"실제 전송 결과(성공/실패/오프라인 차단/미설정 스킵)는 '감사 로그' 탭에서 "
-                            f"스레드 ID로 확인하세요: `{thread_id}`"
+                            f"스레드 ID `{thread_id}` — '감사 로그' 탭에서 이 ID로 조회하면 "
+                            "전송 결과(성공/실패/오프라인 차단/미설정 스킵)가 나옵니다"
                         )
-                    else:
-                        st.caption("실제 전송 결과는 '감사 로그' 탭에서 확인하세요.")
                 elif content.startswith("[긴급 반려됨]"):
                     st.warning("🚫 반려됨 — 별도 조치는 이루어지지 않았습니다.")
                 render_work_order(message["work_order"])
@@ -795,17 +795,79 @@ def _simulator_panel():
             except requests.exceptions.RequestException as e:
                 st.error(f"리셋하지 못했습니다: {_extract_error_message(e)}")
 
+        with st.expander("데모: 열화 강제 주입"):
+            st.caption(
+                "선택한 설비에 강한 열화를 새로 시작합니다(시뮬레이션 6시간에 걸쳐 최대 편차까지 오름). "
+                "이미 열화·전조 오류 상태인 설비는 진행률이 0%로 돌아가고 예정된 고장도 취소됩니다. "
+                "이미 기록된 오류와 감지 이벤트는 남습니다. 시뮬레이터가 실행 중일 때만 진행됩니다."
+            )
+            # 결과 메시지는 session_state에 둔다 - 이 패널은 10초마다 리런돼서, 클릭한 그 실행에서만
+            # 그리면 읽기도 전에 사라진다(interface-reviewer 지적, AppTest로 확인, 2026-10-01).
+            inject_feedback = st.session_state.get("sim_inject_feedback")
+            if inject_feedback:
+                (st.error if inject_feedback[0] == "error" else st.success)(inject_feedback[1])
+            inj_col1, inj_col2, inj_col3 = st.columns([1, 1, 1])
+            inject_machine = inj_col1.number_input("설비 번호", min_value=1, max_value=100, value=1, step=1, key="sim_inject_machine")
+            signal_options = ["자동"] + [_SIGNAL_LABELS[k] for k in _SIGNAL_LABELS]
+            inject_signal_label = inj_col2.selectbox("이상 신호", signal_options, key="sim_inject_signal")
+            if inj_col3.button("열화 주입", key="sim_inject"):
+                inject_signal = next((k for k, v in _SIGNAL_LABELS.items() if v == inject_signal_label), None)  # "자동"이면 None
+                try:
+                    r = requests.post(
+                        f"{BACKEND_URL}/simulator/inject",
+                        json={"machine_id": int(inject_machine), "signal": inject_signal},
+                        timeout=10,
+                    )
+                    r.raise_for_status()
+                    body = r.json()
+                except requests.exceptions.RequestException as e:
+                    st.session_state.sim_inject_feedback = ("error", f"열화를 주입하지 못했습니다: {_extract_error_message(e)}")
+                else:
+                    if body.get("error"):
+                        st.session_state.sim_inject_feedback = ("error", f"열화를 주입하지 못했습니다: {body['error']}")
+                    else:
+                        chosen = _SIGNAL_LABELS.get(body["signal"], body["signal"])
+                        signal_text = f"자동 선택: {chosen}" if inject_signal is None else chosen
+                        if status["running"]:
+                            pace = (
+                                f"진행률 0%에서 시작하며, 실제 {status['tick_seconds']}초마다 "
+                                f"시뮬레이션 {status['hours_per_tick']}시간씩 진행됩니다."
+                            )
+                        else:
+                            pace = "시뮬레이터가 정지 상태라 '시작'을 누르기 전에는 진행되지 않습니다."
+                        st.session_state.sim_inject_feedback = (
+                            "success", f"설비 #{body['machine_id']}에 이상 열화({signal_text})를 주입했습니다. {pace}"
+                        )
+                        st.session_state.sim_last_injected = body["machine_id"]
+                st.rerun()
+
         degrading = status["degrading"]
         if degrading:
             st.caption(
                 f"열화 진행 중인 설비 {len(degrading)}대 — 감지 기준에 도달하면 아래 이벤트 목록에 나타나고, "
                 "고장이 기록된 설비는 이 목록에서 사라집니다."
             )
-            for d in sorted(degrading, key=lambda x: -x["progress"])[:8]:
+            # 방금 주입한 설비는 진행률이 0%라 정렬하면 맨 뒤(8대 넘게 열화 중이면 "…외 N대")로 밀려서
+            # 주입 직후 확인할 방법이 없다 - 맨 앞에 고정한다.
+            last_injected = st.session_state.get("sim_last_injected")
+            if last_injected not in {d["machine_id"] for d in degrading}:
+                st.session_state.pop("sim_last_injected", None)  # 고장 처리 등으로 목록에서 빠졌으면 표시 해제
+                last_injected = None
+            ordered = sorted(degrading, key=lambda x: (x["machine_id"] != last_injected, -x["progress"]))
+            for d in ordered[:8]:
                 signal_label = _SIGNAL_LABELS.get(d["signal"], d["signal"] or "?")
                 state_label = _STATE_LABELS.get(d["state"], d["state"])
                 pct = round(d["progress"] * 100)
-                label = f"설비 #{d['machine_id']} · {signal_label} 이상 · {state_label} · 예상 고장 시점의 {pct}% 경과"
+                # 100%는 "고장이 날 수 있는 시점에 도달"이지 고장 시각이 아니다 - 시뮬레이터는 그 뒤
+                # 처음 오는 06시에 고장을 기록한다(최대 24시간 뒤). 100% 넘게 "경과"로만 쓰면
+                # 이미 고장났어야 하는데 안 난 것처럼 읽힌다(2026-10-01 브라우저 테스트).
+                if d["progress"] >= 1.0:
+                    progress_text = "고장 가능 시점 도달 — 시뮬레이션 시각 다음 06시에 고장 기록"
+                else:
+                    progress_text = f"고장 가능 시점의 {pct}% 경과"
+                label = f"설비 #{d['machine_id']} · {signal_label} 이상 · {state_label} · {progress_text}"
+                if d["machine_id"] == last_injected:
+                    label += " · 방금 주입"
                 if d["errors_emitted"]:
                     label += f" · 전조 오류 {d['errors_emitted']}건"
                 st.progress(min(d["progress"], 1.0), text=label)

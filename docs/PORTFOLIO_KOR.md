@@ -140,7 +140,6 @@ stateDiagram-v2
     [*] --> HEALTHY
     HEALTHY --> DEGRADING: 발생 (시간당 확률)
     DEGRADING --> FAULT: 전조 오류 발생
-    DEGRADING --> HEALTHY: 리드타임 경과, 오류 없이 종료
     FAULT --> HEALTHY: 리드타임 경과 — 고장 + 정비 기록 생성
 ```
 *그림 3 — `backend/data/sim_engine.py`가 구동하는 설비별 열화 생애주기*

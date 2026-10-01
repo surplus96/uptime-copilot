@@ -135,6 +135,37 @@ def status() -> dict:
 
 
 
+def _age_component_for_injection(machine_id: int, comp: str) -> None:
+    """주입한 열화가 모델에 보이려면 그 부품이 어리면 안 된다(START_MIN_AGE_H) - 마지막 정비가 더 최근이면
+    그 부품의 정비 기록을 같은 만큼 과거로 민다. **가장 최근 한 건만 옮기면 안 된다**: 하한보다 어린 정비가
+    둘 이상이면(부품당 연 약 7회라 흔하다) 다음으로 최근인 기록이 새로 마지막 정비가 돼서 여전히 어리다
+    (test-engineer가 임시 DB로 재현: now-10h와 now-300h 두 건 -> 주입 후에도 나이 300h). 그래서 하한보다 어린
+    기록을 전부 같은 만큼 민다(간격 유지). 데모 주입은 "이 부품은 노후했다"는 가정이고, 밀린 기록은 고장 기록의
+    시각과 어긋날 수 있다(화면에는 영향 없는 이력상의 불일치). 정비 기록이 아직 없으면(첫 틱 전) 첫 틱의 심기가
+    같은 하한을 지킨다."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            'SELECT rowid, datetime FROM sim_maint WHERE "machineID"=? AND comp=? ORDER BY datetime DESC', (machine_id, comp),
+        ).fetchall()
+        now_raw = sim_query.sim_only_now()
+        if not rows or now_raw is None:
+            return
+        now = pd.Timestamp(now_raw)
+        floor = sim_engine.START_MIN_AGE_H[comp]
+        newest_age = (now - pd.Timestamp(rows[0][1])).total_seconds() / 3600
+        if newest_age >= floor:
+            return
+        target = _draw_machine_ages(f"{SIM_SEED}:inject:{machine_id}:{now}", {comp: floor})[comp]
+        shift = pd.Timedelta(hours=target - newest_age)
+        for rowid, dt in rows:
+            if (now - pd.Timestamp(dt)).total_seconds() / 3600 < floor:
+                conn.execute("UPDATE sim_maint SET datetime=? WHERE rowid=?", (str((pd.Timestamp(dt) - shift).floor("h")), rowid))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def inject(machine_id: int, signal: str | None = None) -> dict:
     """데모용: 특정 설비를 강제로 강한 열화 상태로 만들어 곧 감지되게 한다."""
     with _LOCK:
@@ -145,13 +176,14 @@ def inject(machine_id: int, signal: str | None = None) -> dict:
             return {"error": f"machine_id {machine_id} 없음"}
         m.state = "DEGRADING"
         m.signal = signal or rng.choice(sim_engine.SIGNALS)
-        m.direction = 1
+        m.direction = sim_engine.SIGNAL_DIRECTION[m.signal]
         m.drift_sigma = sim_engine.STRONG_RANGE[1]
         m.lead_hours = rng.randint(*sim_engine.LEAD_HOURS)
         m.elapsed = 0
         m.errors_emitted = 0
         sim_store.save_states(states)
         _save_rng(rng)
+        _age_component_for_injection(machine_id, sim_engine.SIGNAL_TO_COMPONENT[m.signal])
         return {"machine_id": machine_id, "signal": m.signal, "drift_sigma": round(m.drift_sigma, 2)}
 
 
@@ -165,21 +197,108 @@ def _signal_values(machine_id: int, offsets: dict[str, float], rng: random.Rando
     return tuple(values)
 
 
-def _tick_once() -> None:
-    rng = _load_rng()
-    states = sim_store.load_states()
-    sim_last = sim_query.sim_only_now()
-    base_ts = pd.Timestamp(sim_last) if sim_last else pd.Timestamp.now().floor("h")
+def _draw_machine_ages(seed_key: str, floor: dict[str, float] | None = None) -> dict[str, float]:
+    """(seed, 설비)에서 재현 가능하게 뽑은 부품별 정비 후 경과시간(정비 사건 과정을 거슬러 올라가며 - 부품들이
+    같은 사건을 공유한다). floor(부품 -> 최소 나이)를 주면 그 조건을 만족할 때까지 같은 난수열로 다시 뽑는다
+    (최대 200번, 그래도 안 되면 만족하지 못하는 부품을 하한으로 올린다)."""
+    pick = random.Random(seed_key)
+    ages = sim_engine.draw_initial_ages(pick)
+    for _ in range(200):
+        if not floor or all(ages[c] >= f for c, f in floor.items()):
+            return ages
+        ages = sim_engine.draw_initial_ages(pick)
+    return {c: max(a, (floor or {}).get(c, 0.0)) for c, a in ages.items()}
 
+
+def _seed_maintenance_history(conn: sqlite3.Connection, base_ts: pd.Timestamp, machine_ids, states=None) -> None:
+    """시뮬레이션 정비 기록이 아직 없는 (설비, 부품)마다 "시작 전의 마지막 정비"를 한 건씩 심는다.
+    위험도 모델이 쓰는 "마지막 정비 후 경과시간" 피처가 학습 범위 안에 들어오게 하고, 부품들이 같은 정비
+    사건을 공유하는 실제 구조를 따른다(sim_engine.draw_initial_ages). 이미 정비 기록(고장 때 생긴 것 포함)이
+    있는 쌍은 건드리지 않으므로 몇 번을 불러도, 이미 진행 중인 DB에서 불러도 안전하다. 난수는 (seed, 설비)마다
+    따로 만들어서 재현 가능하고 틱의 난수열(rng)을 쓰지 않는다 - 이 기능을 켜고 꺼도 열화·오류의 난수열이
+    달라지지 않는다. states를 주면, 이미 열화 중인(주입된) 설비의 그 신호 부품은 부품별 시작 하한
+    (START_MIN_AGE_H) 이상으로만 심는다 - 어린 부품은 열화를 시작하지 않는다."""
+    have = {(row[0], row[1]) for row in conn.execute('SELECT DISTINCT "machineID", comp FROM sim_maint')}
+    for machine_id in machine_ids:
+        if all((machine_id, comp) in have for comp in sim_engine.COMPONENTS):
+            continue
+        floor = None
+        if states is not None and machine_id in states and states[machine_id].state != "HEALTHY":
+            comp = sim_engine.SIGNAL_TO_COMPONENT.get(states[machine_id].signal or "")
+            if comp:
+                floor = {comp: sim_engine.START_MIN_AGE_H[comp]}
+        ages = _draw_machine_ages(f"{SIM_SEED}:maint:{machine_id}", floor)
+        for comp in sim_engine.COMPONENTS:
+            if (machine_id, comp) in have:
+                continue
+            ts = (base_ts - pd.Timedelta(hours=ages[comp])).floor("h")
+            conn.execute('INSERT INTO sim_maint ("datetime", "machineID", "comp") VALUES (?, ?, ?)', (str(ts), machine_id, comp))
+
+
+def _load_last_maint(conn: sqlite3.Connection) -> dict[tuple[int, str], pd.Timestamp]:
+    rows = conn.execute('SELECT "machineID", comp, MAX(datetime) FROM sim_maint GROUP BY "machineID", comp').fetchall()
+    return {(machine_id, comp): pd.Timestamp(dt) for machine_id, comp, dt in rows}
+
+
+def _comp_ages(last_maint: dict[tuple[int, str], pd.Timestamp], machine_id: int, ts: pd.Timestamp) -> dict[str, float]:
+    """설비의 부품별 마지막 정비 후 경과시간(시간). 정비 기록이 없는 부품은 빠진다(= 제한 없음)."""
+    return {
+        comp: (ts - last_maint[(machine_id, comp)]).total_seconds() / 3600
+        for comp in sim_engine.COMPONENTS
+        if (machine_id, comp) in last_maint
+    }
+
+
+def _preventive_maintenance(
+    conn: sqlite3.Connection, ts: pd.Timestamp, states: dict, last_maint: dict[tuple[int, str], pd.Timestamp]
+) -> None:
+    """정상(HEALTHY) 설비에 정기 정비 사건을 일으킨다 - 실제 정비 기록의 순수 정기 정비(설비당 연 14.6회)이고,
+    사건 하나가 부품 1개(72%) 또는 2개(28%)를 함께 정비해 나이를 0으로 되돌린다. 안 하면 시뮬레이션이 길어질수록
+    모든 부품이 열화 가능한 나이가 돼서 고장률이 실제(연 7.6회)보다 계속 올라간다. 열화·전조 상태의 설비는
+    건너뛴다(정비하면 고장이 안 날 텐데 그 효과는 모델링하지 않는다). 난수는 틱의 rng를 쓰지 않고
+    (seed, 시각)마다 따로 만든다 - 재현 가능하고, 이 기능이 열화·오류의 난수열을 바꾸지 않는다. 설비마다 난수를
+    항상 같은 개수 쓴다(상태가 달라도 다른 설비의 결과가 안 흔들리게)."""
+    draws = random.Random(f"{SIM_SEED}:pm:{ts}")
+    for machine_id in sorted(states):
+        hit = draws.random() < sim_engine.P_PM_EVENT
+        comps = sim_engine.pick_event_comps(draws, sim_engine.PM_TWO_COMP_PROB)
+        if hit and states[machine_id].state == "HEALTHY":
+            for comp in comps:
+                conn.execute('INSERT INTO sim_maint ("datetime", "machineID", "comp") VALUES (?, ?, ?)', (str(ts), machine_id, comp))
+                last_maint[(machine_id, comp)] = ts
+
+
+def _failure_companion(machine_id: int, ts: pd.Timestamp, failed_comp: str) -> str | None:
+    """고장 사건이 고장난 부품 말고 함께 정비하는 다른 부품(없으면 None) - 실제 고장 사건의 46%가 그렇다.
+    (seed, 시각, 설비)에서 재현 가능하게 정한다."""
+    pick = random.Random(f"{SIM_SEED}:fx:{ts}:{machine_id}")
+    if pick.random() >= sim_engine.FAILURE_EXTRA_COMP_PROB:
+        return None
+    return sim_engine.pick_event_comps(pick, 0.0, exclude=failed_comp)[0]
+
+
+def _tick_once() -> None:
     changed: set[int] = set()
     with _LOCK:
+        # 상태·난수를 락 안에서 읽는다 - 락 밖에서 읽고 락을 잡으면, 그 사이에 들어온 inject()/reset()의
+        # 변경을 틱이 낡은 사본으로 덮어써서 화면은 "주입 성공"인데 설비가 열화하지 않는다
+        # (interface-reviewer가 지적, 2026-10-01).
+        rng = _load_rng()
+        states = sim_store.load_states()
+        sim_last = sim_query.sim_only_now()
+        base_ts = pd.Timestamp(sim_last) if sim_last else pd.Timestamp.now().floor("h")
         conn = sqlite3.connect(DB_PATH)
         try:
+            _seed_maintenance_history(conn, base_ts, states.keys(), states)
+            last_maint = _load_last_maint(conn)
             for h in range(1, SIM_HOURS_PER_TICK + 1):
                 ts = base_ts + pd.Timedelta(hours=h)
+                _preventive_maintenance(conn, ts, states, last_maint)
                 for m in states.values():
                     was_state = m.state
-                    r = sim_engine.step(m, rng, ts.hour)
+                    # 열화를 시작할 수 있는 상태(HEALTHY)일 때만 부품 나이가 쓰인다
+                    ages = _comp_ages(last_maint, m.machine_id, ts) if m.state == "HEALTHY" else None
+                    r = sim_engine.step(m, rng, ts.hour, comp_ages=ages)
                     conn.execute(
                         'INSERT INTO sim_telemetry ("datetime", "machineID", volt, rotate, pressure, vibration) '
                         "VALUES (?, ?, ?, ?, ?, ?)",
@@ -199,6 +318,14 @@ def _tick_once() -> None:
                             'INSERT INTO sim_maint ("datetime", "machineID", "comp") VALUES (?, ?, ?)',
                             (str(ts), m.machine_id, r["maint"]),
                         )
+                        last_maint[(m.machine_id, r["maint"])] = ts
+                        companion = _failure_companion(m.machine_id, ts, r["maint"])
+                        if companion:
+                            conn.execute(
+                                'INSERT INTO sim_maint ("datetime", "machineID", "comp") VALUES (?, ?, ?)',
+                                (str(ts), m.machine_id, companion),
+                            )
+                            last_maint[(m.machine_id, companion)] = ts
                     if r["errors"] or r["failure"] or m.state != was_state:
                         changed.add(m.machine_id)
 

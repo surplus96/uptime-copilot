@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from data import sim_query, sim_store
+from data import pdm_operations, sim_query, sim_store
 
 BACKEND_DIR = Path(__file__).parent.parent
 
@@ -295,28 +295,69 @@ def test_sim_only_rows_missing_table_returns_empty(orig_only_db):
 
 
 # --------------------------------------------------------------------------
-# 6. machine_has_sim_failure - '지금 시뮬레이터가 추적 중인 설비'인가
+# 6. get_recent_errors - 진단 '증상'에 보이는 오류 이력(고장 여부와 무관한 고정 기간)
+#
+# 2026-10-01 브라우저 테스트에서 실제로 보인 불일치: 시뮬레이터가 열화시키는 #73의 주의 화면에는
+# 10년 전(2015-12-30) 원본 오류가 증상으로 섞여 나왔고, 고장이 기록된 뒤의 긴급 화면에서는
+# 빠졌다. 예전 구현은 "시뮬레이션 고장이 있는 설비만 시뮬레이션 데이터로 한정"해서, 같은
+# 설비의 같은 시점인데도 고장 기록 유무에 따라 증상 목록이 달라졌다.
 # --------------------------------------------------------------------------
 
-def test_machine_has_sim_failure_true_after_sim_failure(sim_db):
-    sim_db.insert("sim_failures", [("2016-01-02 06:00:00", 1, "comp1")])
-
-    assert sim_query.machine_has_sim_failure(1) is True
-
-
-def test_machine_has_sim_failure_ignores_original_failures(sim_db):
-    """원본 고장 기록이 있다고 시뮬레이터가 추적 중인 설비가 되는 건 아니다."""
-    sim_db.insert("failures", [("2015-12-31 06:00:00", 1, "comp4")])
-
-    assert sim_query.machine_has_sim_failure(1) is False
+def _seed_sim_machine(sim_db):
+    """원본은 2016-01-01에 끝나고, 시뮬레이터는 2026-10-04까지 진행된 설비 1번."""
+    sim_db.insert("telemetry", [("2016-01-01 06:00:00", 1, 170.0, 450.0, 100.0, 40.0)])
+    sim_db.insert("sim_telemetry", [("2026-10-04 14:00:00", 1, 170.0, 450.0, 100.0, 40.0)])
+    sim_db.insert("errors", [("2015-12-30 02:00:00", 1, "error1")])  # 10년 전 원본 오류
+    sim_db.insert("sim_errors", [
+        ("2026-10-02 14:00:00", 1, "error1"),
+        ("2026-10-03 16:00:00", 1, "error1"),
+    ])
 
 
-def test_machine_has_sim_failure_is_per_machine(sim_db):
-    sim_db.insert("sim_failures", [("2016-01-02 06:00:00", 2, "comp1")])
+def test_recent_errors_exclude_decade_old_original_when_simulation_is_ahead(sim_db):
+    _seed_sim_machine(sim_db)
 
-    assert sim_query.machine_has_sim_failure(2) is True
-    assert sim_query.machine_has_sim_failure(1) is False
+    shown = [e["datetime"] for e in pdm_operations.get_recent_errors(1, limit=3)]
+
+    assert shown == ["2026-10-03 16:00:00", "2026-10-02 14:00:00"]  # 최신순
 
 
-def test_machine_has_sim_failure_false_when_table_missing(orig_only_db):
-    assert sim_query.machine_has_sim_failure(1) is False
+def test_recent_errors_do_not_change_when_a_sim_failure_is_recorded(sim_db):
+    """고장 기록 전후로 증상 목록이 달라지면 안 된다 - 조회 범위가 고장 유무에 의존하지 않는다."""
+    _seed_sim_machine(sim_db)
+    before = pdm_operations.get_recent_errors(1, limit=3)
+    sim_db.insert("sim_failures", [("2026-10-04 06:00:00", 1, "comp1")])
+
+    assert pdm_operations.get_recent_errors(1, limit=3) == before
+
+
+def test_recent_errors_keep_original_history_in_original_only_mode(orig_only_db):
+    """시뮬레이터를 켠 적 없으면 기준 시각이 원본 말미(2016-01-01)라 원본 오류가 그대로 보인다."""
+    orig_only_db.insert("telemetry", [("2016-01-01 06:00:00", 1, 170.0, 450.0, 100.0, 40.0)])
+    orig_only_db.insert("errors", [
+        ("2015-12-26 18:00:00", 1, "error4"),   # 6일 전 - 보인다
+        ("2015-11-18 06:00:00", 1, "error3"),   # 44일 전 - 고정 기간(30일) 밖
+    ])
+
+    shown = [e["datetime"] for e in pdm_operations.get_recent_errors(1, limit=3)]
+
+    assert shown == ["2015-12-26 18:00:00"]
+
+
+def test_recent_errors_window_is_inclusive_of_the_boundary_day(orig_only_db):
+    """check_recent_failure와 같은 기준(경과 일수 > within_days면 제외) - 경계일은 포함."""
+    orig_only_db.insert("telemetry", [("2016-01-01 06:00:00", 1, 170.0, 450.0, 100.0, 40.0)])
+    orig_only_db.insert("errors", [
+        ("2015-12-02 06:00:00", 1, "error1"),   # 정확히 30일 전
+        ("2015-12-01 06:00:00", 1, "error2"),   # 31일 전
+    ])
+
+    shown = [e["datetime"] for e in pdm_operations.get_recent_errors(1, limit=3)]
+
+    assert shown == ["2015-12-02 06:00:00"]
+
+
+def test_recent_errors_without_any_telemetry_returns_empty_not_crash(orig_only_db):
+    orig_only_db.insert("errors", [("2015-12-26 18:00:00", 1, "error4")])
+
+    assert pdm_operations.get_recent_errors(1, limit=3) == []

@@ -26,6 +26,37 @@ def _load_model_bundle(comp: str) -> dict:
     return joblib.load(path)
 
 
+def build_feature_row(
+    now: pd.Timestamp, tele: pd.DataFrame, err: pd.DataFrame, maint: pd.DataFrame, info: dict
+) -> pd.DataFrame:
+    """DB 조회와 분리한 순수 계산부 - 실제 서비스(_build_live_feature_row)와 시뮬레이터
+    보정 측정(ml/sim_alarm_eval.py)이 같은 피처 정의를 쓰게 한다. tele/err/maint의
+    datetime 열은 이미 Timestamp여야 한다."""
+    feats: dict = {}
+    for sig in SIGNALS:
+        feats[f"{sig}_mean_3h"] = tele[sig].iloc[-3:].mean()
+        feats[f"{sig}_std_3h"] = tele[sig].iloc[-3:].std()
+        feats[f"{sig}_mean_24h"] = tele[sig].iloc[-24:].mean()
+        feats[f"{sig}_std_24h"] = tele[sig].iloc[-24:].std()
+
+    for eid in ERROR_IDS:
+        for w in ERROR_WINDOWS_H:
+            cutoff = now - pd.Timedelta(hours=w)
+            feats[f"{eid}_count_{w}h"] = (
+                0 if err.empty else int(((err["errorID"] == eid) & (err["datetime"] > cutoff) & (err["datetime"] <= now)).sum())
+            )
+
+    for c in COMPONENTS:
+        comp_maint = maint[maint["comp"] == c] if not maint.empty else maint
+        feats[f"hours_since_maint_{c}"] = (
+            np.nan if comp_maint.empty else (now - comp_maint["datetime"].max()).total_seconds() / 3600
+        )
+
+    feats["model"] = info.get("model")
+    feats["age"] = info.get("age")
+    return pd.DataFrame([feats])
+
+
 def _build_live_feature_row(machine_id: int) -> pd.DataFrame:
     now = pd.Timestamp(sim_query.dataset_now())
 
@@ -35,25 +66,12 @@ def _build_live_feature_row(machine_id: int) -> pd.DataFrame:
     )
     tele["datetime"] = pd.to_datetime(tele["datetime"])
 
-    feats: dict = {}
-    for sig in SIGNALS:
-        feats[f"{sig}_mean_3h"] = tele[sig].iloc[-3:].mean()
-        feats[f"{sig}_std_3h"] = tele[sig].iloc[-3:].std()
-        feats[f"{sig}_mean_24h"] = tele[sig].iloc[-24:].mean()
-        feats[f"{sig}_std_24h"] = tele[sig].iloc[-24:].std()
-
     err = pd.DataFrame(
         sim_query.all_rows("errors", "sim_errors", ["datetime", "errorID"], machine_id),
         columns=["datetime", "errorID"],
     )
     if not err.empty:
         err["datetime"] = pd.to_datetime(err["datetime"])
-    for eid in ERROR_IDS:
-        for w in ERROR_WINDOWS_H:
-            cutoff = now - pd.Timedelta(hours=w)
-            feats[f"{eid}_count_{w}h"] = (
-                0 if err.empty else int(((err["errorID"] == eid) & (err["datetime"] > cutoff) & (err["datetime"] <= now)).sum())
-            )
 
     maint = pd.DataFrame(
         sim_query.all_rows("maint", "sim_maint", ["datetime", "comp"], machine_id),
@@ -61,16 +79,8 @@ def _build_live_feature_row(machine_id: int) -> pd.DataFrame:
     )
     if not maint.empty:
         maint["datetime"] = pd.to_datetime(maint["datetime"])
-    for c in COMPONENTS:
-        comp_maint = maint[maint["comp"] == c] if not maint.empty else maint
-        feats[f"hours_since_maint_{c}"] = (
-            np.nan if comp_maint.empty else (now - comp_maint["datetime"].max()).total_seconds() / 3600
-        )
 
-    info = pdm_operations.get_machine_info(machine_id)
-    feats["model"] = info.get("model")
-    feats["age"] = info.get("age")
-    return pd.DataFrame([feats])
+    return build_feature_row(now, tele, err, maint, pdm_operations.get_machine_info(machine_id))
 
 
 def predict_failure_risk(machine_id: int) -> dict:

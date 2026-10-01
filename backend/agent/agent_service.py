@@ -156,6 +156,10 @@ def route_node(state: SupervisorState) -> dict:
     return {"category": category, "machine_id": decision.machine_id}
 
 
+# 진단 문구 끝에 붙는 "기종 전체 통계" 참고 줄의 머리말 - 화면에는 보이지만 3관점 평가 입력에서는
+# 뺀다(_incident_only). 같은 상수로 붙이고 자르므로 문구를 바꿔도 어긋나지 않는다.
+MODEL_NOTE_PREFIX = " / 참고: "
+
 RISK_THRESHOLD = 0.5  # docs/model_card.md 7절: 이 값에서 이미 오경보 <=0.001/설비/일
 
 _risk_model_warned = False
@@ -223,7 +227,7 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
         if vulnerable:
             top = vulnerable[0]
             diagnosis_text += (
-                f" / 참고: {model} 기종은 설비당 평균 {top['failures_per_machine']}회로 "
+                f"{MODEL_NOTE_PREFIX}{model} 기종은 설비당 평균 {top['failures_per_machine']}회로 "
                 f"{top['component']}({top['component_description']}) 고장이 가장 잦음"
             )
 
@@ -487,6 +491,13 @@ _DEFAULT_ASSESSMENT = {
 }
 
 
+def _incident_only(diagnosis: str) -> str:
+    """기종 전체 통계 참고 줄을 뺀 사고 사실만 돌려준다. 이 줄은 이번 사고와 무관한 배경 통계인데
+    3관점 프롬프트에 그대로 넣으면 세 의견이 모두 같은 참고 문구(예: 다른 부품의 고장 빈도)를
+    되풀이했다."""
+    return diagnosis.split(MODEL_NOTE_PREFIX, 1)[0]
+
+
 def _assess_perspective(label: str, system_prompt: str, diagnosis: str, thread_id: str | None = None) -> dict:
     """세 관점 노드(안전/생산/정비)가 공유하는 평가 로직. 구조화 출력이 거부되거나
     예외가 나면 '위험도 중간·24시간 이내 조치'라는 보수적 기본값으로 대체한다 - 관점이
@@ -498,7 +509,7 @@ def _assess_perspective(label: str, system_prompt: str, diagnosis: str, thread_i
             reasoning_effort="none",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": diagnosis},
+                {"role": "user", "content": _incident_only(diagnosis)},
             ],
             response_format=PerspectiveAssessment,
         )

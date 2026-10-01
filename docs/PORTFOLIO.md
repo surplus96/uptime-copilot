@@ -143,7 +143,6 @@ stateDiagram-v2
     [*] --> HEALTHY
     HEALTHY --> DEGRADING: onset (per-hour probability)
     DEGRADING --> FAULT: precursor error fires
-    DEGRADING --> HEALTHY: lead time elapses, no error ever fired
     FAULT --> HEALTHY: lead time elapses — failure + maintenance recorded
 ```
 *Figure 3 — Per-machine lifecycle, driven by `backend/data/sim_engine.py`*

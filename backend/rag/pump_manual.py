@@ -68,4 +68,9 @@ ERROR_TO_COMPONENT = {
     "error2": "comp2",
     "error3": "comp3",
     "error4": "comp4",
+    # error5는 가상 매뉴얼에선 "복합 이상(단일 부품 아님)"이지만 실제 데이터에서는 comp4 고장 직전에
+    # 179/179건 나온다(2026-10-01 집계) - 위험 모델의 첫 근거(error5_count_24h)가 작업지시서 증상에서
+    # 빠지지 않게 comp4에 연결한다. error3/error4는 데이터와 어긋나지만(comp2<-error3, comp3<-error4)
+    # 가상 시나리오 가정을 그대로 둔다 - docs/decisions.md 2026-10-01 "알려진 한계".
+    "error5": "comp4",
 }

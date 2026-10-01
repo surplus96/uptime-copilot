@@ -184,3 +184,32 @@ def test_set_controls_writes_both_keys_atomically_to_real_sqlite(tmp_path, monke
         sim_loop._set_controls({"last_error": "NEW", "consecutive_failures": {"지원하지 않는 값": 1}})
     rows = dict(sqlite3.connect(db).execute("SELECT key, value FROM sim_control").fetchall())
     assert rows == {"last_error": "E", "consecutive_failures": "3"}, "도중 실패인데 앞의 키가 갱신됨(원자적이지 않음)"
+
+
+def test_tick_reads_state_and_rng_while_holding_the_lock(monkeypatch):
+    """상태를 락 밖에서 읽으면 그 사이에 들어온 inject()를 틱이 낡은 사본으로 덮어쓴다(화면은
+    '주입 성공'인데 설비가 열화하지 않음). 읽는 시점에 락이 잡혀 있어야 한다."""
+    from data import sim_loop, sim_store
+
+    class _Stop(BaseException):
+        pass
+
+    seen = {}
+
+    def fake_rng():
+        seen["rng_locked"] = sim_loop._LOCK.locked()
+        return None
+
+    def fake_states():
+        seen["states_locked"] = sim_loop._LOCK.locked()
+        raise _Stop
+
+    monkeypatch.setattr(sim_loop, "_load_rng", fake_rng)
+    monkeypatch.setattr(sim_store, "load_states", fake_states)
+
+    try:
+        sim_loop._tick_once()
+    except _Stop:
+        pass
+
+    assert seen == {"rng_locked": True, "states_locked": True}

@@ -121,6 +121,40 @@ def test_diagnose_machine_uses_risk_model_for_caution(monkeypatch):
     assert "error3_count_24h" in result["component_evidence"]["comp2"]  # 3-7: 주요 근거 포함
 
 
+def test_error5_is_attributed_to_comp4_in_the_symptoms(monkeypatch):
+    """모델이 학습한 실제 고장 직전 서명은 comp4<-error5인데(2026-10-01 원본 집계, 179/179), 오류-부품
+    매핑에 error5가 없어서 위험 모델의 첫 번째 근거(error5_count_24h)가 작업지시서 증상에서 통째로
+    빠졌다 - 브라우저 테스트에서 comp4 주의 건의 [증상]에 오류 이력이 없었다."""
+    import agent.agent_service as svc
+
+    monkeypatch.setattr(svc.pdm_operations, "get_machine_info", lambda mid: {"model": "model1", "age": 5})
+    monkeypatch.setattr(svc.pdm_operations, "get_recent_errors", lambda mid, limit=3: [
+        {"datetime": "2026-10-01 22:00:00", "errorID": "error5", "description": "복합 이상 경고"},
+    ])
+    monkeypatch.setattr(svc.pdm_operations, "check_recent_failure", lambda mid, within_days=30: None)
+    monkeypatch.setattr(svc.pdm_operations, "get_component_failure_stats", lambda model: [])
+    monkeypatch.setattr(svc.pdm_telemetry, "detect_anomaly", lambda mid: {"has_anomaly": False})
+    monkeypatch.setattr(svc.sim_query, "dataset_now", lambda: "2026-10-02T00:00:00")
+    monkeypatch.setattr(svc, "_predict_risk_safe", lambda mid: {
+        c: {"probability": 0.0, "top_features": []} for c in ("comp1", "comp2", "comp3", "comp4")
+    })
+
+    result = svc._diagnose_machine(33)
+
+    assert "comp4" in result["component_evidence"]
+    assert "error5" in result["component_evidence"]["comp4"]
+
+
+def test_error_to_component_matches_the_signature_the_model_learned():
+    """error1~4는 앱의 가상 매뉴얼 가정(같은 번호 부품) 그대로이고, error5만 데이터 기준으로 comp4에 연결한다.
+    comp2<-error3, comp3<-error4(데이터 기준)와의 어긋남은 알려진 한계로 남긴다(docs/decisions.md 2026-10-01)."""
+    from rag.pump_manual import ERROR_TO_COMPONENT
+
+    assert ERROR_TO_COMPONENT == {
+        "error1": "comp1", "error2": "comp2", "error3": "comp3", "error4": "comp4", "error5": "comp4",
+    }
+
+
 def test_diagnose_machine_falls_back_to_zscore_when_model_missing(monkeypatch):
     import agent.agent_service as svc
 
@@ -180,6 +214,49 @@ def test_assess_perspective_returns_structured_fields(monkeypatch):
     assert result["perspectives"] == ["[안전] 테스트 근거"]
     assert result["perspective_assessments"][0]["risk_level"] == "높음"
     assert result["perspective_assessments"][0]["requires_shutdown"] is True
+
+
+def test_assess_perspective_prompt_excludes_the_model_wide_failure_note(monkeypatch):
+    """"참고: modelN 기종은 ... 고장이 가장 잦음"은 기종 전체 통계라 이번 사고와 무관한데, 3관점 프롬프트에
+    그대로 들어가서 세 의견이 모두 이 참고 문구를 되풀이했다(2026-10-01 브라우저 테스트).
+    화면의 진단 문구에는 남기되 관점 평가 입력에서만 뺀다."""
+    seen = {}
+
+    class _Capture:
+        def parse(self, *, response_format, messages, **kwargs):
+            seen["user"] = messages[-1]["content"]
+            parsed = agent_service.PerspectiveAssessment(
+                risk_level="높음", recommended_window="즉시", rationale="테스트 근거",
+            )
+            msg = type("M", (), {"parsed": parsed, "refusal": None})()
+            return type("C", (), {"choices": [type("Ch", (), {"message": msg})()]})()
+
+    fake_client = type("Client", (), {"chat": type("Chat", (), {"completions": _Capture()})()})()
+    monkeypatch.setattr(agent_service, "client", fake_client)
+    diagnosis = (
+        "최근 오류 이력: 2026-10-03 16:00:00 error1(전압 이상 경고) / 실제 고장 이력: 2026-10-05 06:00:00 comp1"
+        + agent_service.MODEL_NOTE_PREFIX + "model2 기종은 설비당 평균 3.706회로 comp3 고장이 가장 잦음"
+    )
+
+    agent_service._assess_perspective("안전", "프롬프트", diagnosis)
+
+    assert "model2" not in seen["user"] and "가장 잦음" not in seen["user"]
+    assert "실제 고장 이력: 2026-10-05 06:00:00 comp1" in seen["user"]  # 사고 사실은 그대로
+
+
+def test_diagnosis_text_still_carries_the_model_wide_failure_note(monkeypatch):
+    """관점 입력에서만 빼는 것이지 화면 진단 문구에서 지우는 게 아니다."""
+    svc = agent_service
+    monkeypatch.setattr(svc.pdm_operations, "get_machine_info", lambda mid: {"machine_id": mid, "model": "model2", "age": 5})
+    monkeypatch.setattr(svc.pdm_operations, "get_recent_errors", lambda mid, limit=3: [])
+    monkeypatch.setattr(svc.pdm_operations, "check_recent_failure", lambda mid, within_days=30: None)
+    monkeypatch.setattr(svc.pdm_operations, "get_component_failure_stats", lambda model: [{
+        "failures_per_machine": 3.7, "component": "comp3", "component_description": "유압/공압",
+    }])
+    monkeypatch.setattr(svc.pdm_telemetry, "detect_anomaly", lambda mid: {"has_anomaly": False})
+    monkeypatch.setattr(svc, "_predict_risk_safe", lambda mid: None)
+
+    assert svc.MODEL_NOTE_PREFIX in svc._diagnose_machine(1)["diagnosis"]
 
 
 def test_assess_perspective_cannot_produce_contradictory_shutdown(monkeypatch):

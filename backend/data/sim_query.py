@@ -85,17 +85,3 @@ def sim_only_rows(sim_table: str, columns: list[str], machine_id: int, limit: in
     conn.close()
     rows.sort(key=lambda r: r[0])
     return rows[-limit:] if limit else rows
-
-
-def machine_has_sim_failure(machine_id: int) -> bool:
-    """이 설비가 시뮬레이션으로 고장 처리된 적이 있는지 - '지금 시뮬레이터가 추적 중인
-    설비'인지 판단하는 기준. 참이면 증상 텍스트도 시뮬레이션 데이터만(없으면 빈 채로)
-    보여주고 원본 옛날 데이터로 채우지 않는다."""
-    conn = sqlite3.connect(DB_PATH)
-    has = False
-    if _table_exists(conn, "sim_failures"):
-        has = conn.execute(
-            'SELECT 1 FROM sim_failures WHERE "machineID"=? LIMIT 1', (machine_id,)
-        ).fetchone() is not None
-    conn.close()
-    return has

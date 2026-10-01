@@ -37,7 +37,7 @@ ERROR_DESCRIPTIONS = {
     "error2": "회전속도 이상 경고 - 회전자 계통 이상 가능성",
     "error3": "압력 이상 경고 - 유압/공압 계통 이상 가능성",
     "error4": "진동 이상 경고 - 기계적 불균형 또는 베어링 마모 가능성",
-    "error5": "복합 이상 경고 - 여러 센서값의 복합적 이상 패턴",
+    "error5": "복합 이상 경고 - 여러 센서값의 복합적 이상 패턴(이 데이터에서는 진동 저감 장치 고장 전조로 가장 자주 관측)",
 }
 
 
@@ -52,12 +52,23 @@ def get_machine_info(machine_id: int) -> dict:
     row = _machines()[_machines()["machineID"] == machine_id]
     return row.iloc[0].to_dict() if not row.empty else {"error": f"machineID {machine_id} 없음"}
 
-def get_recent_errors(machine_id: int, limit: int = 3) -> list[dict]:
-    """이 설비의 최근 오류(가동 지속되는 경고성) 이력 + 의미를 함께 반환한다."""
-    if sim_query.machine_has_sim_failure(machine_id):
-        rows = sim_query.sim_only_rows("sim_errors", ["datetime", "errorID"], machine_id, limit)
-    else:
-        rows = sim_query.recent_rows("errors", "sim_errors", ["datetime", "errorID"], machine_id, limit)
+RECENT_ERROR_DAYS = 30  # check_recent_failure의 within_days 기본값과 같은 기준
+
+
+def get_recent_errors(machine_id: int, limit: int = 3, within_days: int = RECENT_ERROR_DAYS) -> list[dict]:
+    """이 설비의 최근 오류(가동 지속되는 경고성) 이력 + 의미를 함께 반환한다.
+
+    기준 시각(원본+시뮬레이션 전체의 최신 텔레메트리) 대비 within_days일 이내의 것만 보여준다.
+    예전엔 "시뮬레이션 고장이 기록된 설비만 시뮬레이션 데이터로 한정"했는데, 그러면 같은
+    설비·같은 시점이어도 고장 기록 전(주의)에는 10년 전 원본 오류가 증상에 섞이고 기록
+    후(긴급)에는 빠졌다(2026-10-01 브라우저 테스트). 이제 고장 여부와 무관하게 기간으로만
+    거른다. 기준 시각을 알 수 없으면(텔레메트리가 없으면) '최근'을 판단할 수 없으므로 비운다."""
+    now = sim_query.dataset_now()
+    if now is None:
+        return []
+    rows = sim_query.recent_rows("errors", "sim_errors", ["datetime", "errorID"], machine_id, limit)
+    now_ts = pd.Timestamp(now)
+    rows = [(dt, eid) for dt, eid in rows if (now_ts - pd.Timestamp(dt)).days <= within_days]
     return [
         {"datetime": str(dt), "errorID": eid, "description": ERROR_DESCRIPTIONS.get(eid, "알 수 없음")}
         for dt, eid in reversed(rows)
