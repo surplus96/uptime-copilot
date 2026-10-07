@@ -361,3 +361,74 @@ def test_recent_errors_without_any_telemetry_returns_empty_not_crash(orig_only_d
     orig_only_db.insert("errors", [("2015-12-26 18:00:00", 1, "error4")])
 
     assert pdm_operations.get_recent_errors(1, limit=3) == []
+
+
+# --------------------------------------------------------------------------
+# 7. estimate_next_maintenance - 기록이 끊긴 구간(원본 2016년 <-> 시뮬레이션 2026년)이 평균 주기를 부풀리지 않는다
+# --------------------------------------------------------------------------
+
+def _maint_dates(days_from, count, step_days=15):
+    import pandas as pd
+
+    start = pd.Timestamp(days_from)
+    return [(str(start + pd.Timedelta(days=step_days * i)), 1, f"comp{1 + i % 4}") for i in range(count)]
+
+
+def test_estimate_next_maintenance_ignores_the_decade_long_gap_between_original_and_simulation(sim_db):
+    """예전엔 평균 간격 = (마지막-처음)/(n-1)이라 10년 빈 구간이 그대로 들어갔다."""
+    sim_db.insert("maint", _maint_dates("2015-10-01", 6))                          # 15일 간격
+    sim_db.insert("sim_maint", _maint_dates("2026-10-01", 4))                       # 10년 뒤, 다시 15일 간격
+
+    result = pdm_operations.estimate_next_maintenance(1)
+
+    assert result["average_interval_days"] == 15.0
+    assert result["last_maintenance"] == "2026-11-15 00:00:00"  # 2026-10-01 + 45일
+    assert result["next_due_estimate"] == "2026-11-30 00:00:00"  # 마지막 정비 + 15일
+
+
+def test_estimate_next_maintenance_counts_simultaneous_components_as_one_event(sim_db):
+    """한 사건에서 부품 두 개를 같이 정비해도 간격 0이 끼어 평균을 끌어내리면 안 된다."""
+    sim_db.insert("maint", [
+        ("2015-10-01 06:00:00", 1, "comp1"), ("2015-10-01 06:00:00", 1, "comp2"),
+        ("2015-10-16 06:00:00", 1, "comp3"), ("2015-10-31 06:00:00", 1, "comp4"),
+    ])
+
+    assert pdm_operations.estimate_next_maintenance(1)["average_interval_days"] == 15.0
+
+
+def test_estimate_next_maintenance_keeps_ordinary_irregular_intervals(sim_db):
+    """이상치 규칙이 정상적인 들쭉날쭉한 간격까지 빼면 안 된다 - 10배 이내의 간격은 평균에 들어간다."""
+    sim_db.insert("maint", [
+        ("2015-10-01 06:00:00", 1, "comp1"), ("2015-10-11 06:00:00", 1, "comp2"),
+        ("2015-12-10 06:00:00", 1, "comp3"),  # 60일 간격 - 10일의 6배
+    ])
+
+    assert pdm_operations.estimate_next_maintenance(1)["average_interval_days"] == 35.0  # (10 + 60) / 2
+
+
+def test_estimate_next_maintenance_reports_insufficient_history(sim_db):
+    sim_db.insert("maint", [("2015-10-01 06:00:00", 1, "comp1"), ("2015-10-01 06:00:00", 1, "comp2")])  # 같은 시각 = 사건 하나
+
+    assert pdm_operations.estimate_next_maintenance(1) == {"next_due_estimate": "이력 부족으로 추정 불가"}
+
+
+def test_estimate_next_maintenance_merges_records_stamped_minutes_apart(sim_db):
+    """시스템에 따라 같은 정비 사건의 부품 기록이 몇 분씩 다른 시각으로 찍힌다 - 그 짧은 간격이 중앙값을 끌어내려
+    정상 간격(15일)이 '이상 간격'으로 잘리면 안 된다(docs-reviewer가 지적한 반례: [5분,5분,5분,15일,15일])."""
+    sim_db.insert("maint", [
+        ("2015-10-01 06:00:00", 1, "comp1"), ("2015-10-01 06:05:00", 1, "comp2"), ("2015-10-01 06:10:00", 1, "comp3"),
+        ("2015-10-16 06:00:00", 1, "comp1"), ("2015-10-16 06:05:00", 1, "comp2"),
+        ("2015-10-31 06:00:00", 1, "comp4"),
+    ])
+
+    assert pdm_operations.estimate_next_maintenance(1)["average_interval_days"] == 15.0
+
+
+def test_estimate_next_maintenance_outlier_rule_needs_three_intervals(sim_db):
+    """간격이 2개뿐이면 중앙값이 두 값의 평균이라 큰 쪽이 항상 10배 이내다 - 규칙이 작동하지 않는다(알려진 한계)."""
+    sim_db.insert("maint", [
+        ("2015-10-01 06:00:00", 1, "comp1"), ("2015-10-16 06:00:00", 1, "comp2"),
+        ("2026-10-16 06:00:00", 1, "comp3"),
+    ])
+
+    assert pdm_operations.estimate_next_maintenance(1)["average_interval_days"] > 1000  # 10년 간격이 그대로 평균에 들어감

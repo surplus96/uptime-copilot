@@ -279,7 +279,7 @@ with tab1:
                     st.session_state.pending_example = q
                     st.rerun()
 
-    for message in st.session_state.agent_messages:
+    for message_index, message in enumerate(st.session_state.agent_messages):
         with st.chat_message(message["role"], avatar=CHAT_AVATARS.get(message["role"])):
             if message["role"] == "assistant" and message.get("work_order"):
                 content = message["content"]
@@ -306,6 +306,22 @@ with tab1:
                     st.text(content)
             else:
                 st.markdown(message["content"])
+            delivery = message.get("cmms_delivery") or {}
+            if delivery.get("display_id"):
+                st.caption(f"CMMS 작업지시서: {delivery['display_id']}")
+            if delivery.get("status") == "partial_tasks" and message.get("thread_id"):
+                st.warning("작업지시서는 생성됐지만 점검 항목 등록이 완료되지 않았습니다.")
+                if st.button("점검 항목 등록 재시도", key=f"cmms_retry_{message_index}"):
+                    try:
+                        res = requests.post(f"{BACKEND_URL}/agent/cmms/retry",
+                                            json={"thread_id": message["thread_id"]}, timeout=60)
+                        res.raise_for_status()
+                        message["cmms_delivery"] = res.json().get("cmms_delivery", {})
+                        st.rerun()
+                    except requests.exceptions.RequestException as exc:
+                        st.error(f"점검 항목 등록을 완료하지 못했습니다: {_extract_error_message(exc)}")
+            elif delivery.get("status") == "sent":
+                st.caption("CMMS 점검 항목 등록 완료")
 
     if st.session_state.pending_approval:
         # 다른 assistant 메시지는 전부 아바타가 붙는데 이 블록만 chat_message 밖이라
@@ -420,6 +436,7 @@ with tab1:
                 st.session_state.agent_messages.append({
                     "role": "assistant", "content": data["result"], "work_order": data.get("work_order"),
                     "thread_id": thread_id,
+                    "cmms_delivery": data.get("cmms_delivery", {}),
                 })
                 st.session_state.pending_approval = None
                 st.rerun()
@@ -441,6 +458,7 @@ with tab1:
                                 "role": "assistant", "content": check["result"],
                                 "work_order": check.get("work_order"),
                                 "thread_id": st.session_state.agent_thread_id,
+                                "cmms_delivery": check.get("cmms_delivery", {}),
                             })
                             st.session_state.pending_approval = None
                             st.session_state.resume_error = None
@@ -529,6 +547,8 @@ with tab1:
                         "role": "assistant",
                         "content": check["result"],
                         "work_order": check.get("work_order"),
+                        "thread_id": recovery["thread_id"],
+                        "cmms_delivery": check.get("cmms_delivery", {}),
                     })
                     st.session_state.timeout_recovery = None
                     st.rerun()
@@ -1113,6 +1133,9 @@ RESULT_LABELS = {
     "skipped_unconfigured": "미설정 — 전송 안 함",
     "blocked_insecure_url": "차단 — 평문 HTTP 주소",
     "blocked_offline": "차단 — 오프라인 모드",
+    "partial_tasks": "부분 완료 — 점검 항목 등록 재시도 필요",
+    "creation_unknown": "생성 결과 미확인 — Atlas 확인 필요",
+    "blocked_missing_tasks": "차단 — 점검 절차 없음",
 }
 AUDIT_COLUMNS = {
     "ts": "시각", "thread_id": "스레드 ID", "event_type": "유형", "target": "대상",
@@ -1169,4 +1192,3 @@ with tab5:
             if len(rows) >= AUDIT_LIMIT:
                 st.caption(f"최근 {AUDIT_LIMIT}건만 표시합니다 — 유형이나 스레드 ID로 좁혀 보세요.")
             st.dataframe(display_rows, use_container_width=True)
-

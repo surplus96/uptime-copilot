@@ -7,10 +7,13 @@ CMMS 장애가 승인 흐름을 막으면 안 되므로 예외는 호출부(fina
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import re
 from datetime import timedelta
+from typing import Any
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -18,6 +21,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from core import offline_guard
+from data import cmms_delivery
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -28,26 +32,47 @@ CMMS_MCP_TOKEN = os.getenv("CMMS_MCP_TOKEN")
 # 프로토타입 단계 - 설비 번호 -> Atlas assetId 매핑이 지금은 테스트 자산 하나뿐이다.
 # 실제 벤더 연동 시 Atlas의 자산 규칙에 맞춰 조회하거나 매핑 테이블로 교체해야 한다.
 MACHINE_ID_TO_ASSET_ID = {84: 1}
+if os.getenv("CMMS_ASSET_MAP"):
+    configured = json.loads(os.environ["CMMS_ASSET_MAP"])
+    if not isinstance(configured, dict) or any(
+        not str(machine).isdigit() or int(machine) <= 0 or type(asset) is not int or asset <= 0
+        for machine, asset in configured.items()
+    ):
+        raise ValueError("CMMS_ASSET_MAP은 양의 설비 번호와 Atlas asset ID의 JSON 객체여야 합니다.")
+    MACHINE_ID_TO_ASSET_ID = {int(machine): asset for machine, asset in configured.items()}
 
 
-async def _create_work_order(title: str, description: str, asset_id: int | None) -> None:
+def _decode_result(result, tool: str) -> dict[str, Any]:
+    if result.isError:
+        raise RuntimeError(f"CMMS {tool} 실패: {result.content}")
+    for item in result.content:
+        if getattr(item, "type", None) == "text":
+            value = json.loads(item.text)
+            if isinstance(value, dict):
+                return value
+    raise RuntimeError(f"CMMS {tool}: JSON 결과 없음")
+
+
+async def _call_tool(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    assert CMMS_MCP_URL is not None
+    headers = {"Authorization": f"Bearer {CMMS_MCP_TOKEN}"}
+    async with streamablehttp_client(CMMS_MCP_URL, headers=headers, timeout=10, sse_read_timeout=30) as (read, write, _):
+        async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=30)) as session:
+            await session.initialize()
+            return _decode_result(await session.call_tool(tool, arguments), tool)
+
+
+async def _create_work_order(title: str, description: str, asset_id: int | None) -> dict[str, Any]:
     # 호출부(push_work_order)가 CMMS_MCP_URL/TOKEN 둘 다 설정돼 있을 때만 이 함수를 부른다 -
     # 그 전제를 mypy에도 알려준다(2026-09-22 타입체커 도입 중 발견: 예전엔 이 전제가
     # 코드로 보장 안 되고 눈으로만 확인해야 했다).
-    assert CMMS_MCP_URL is not None
-    headers = {"Authorization": f"Bearer {CMMS_MCP_TOKEN}"}
-    # 명시적 타임아웃 없으면 SSE 기본값(300초)까지 걸릴 수 있음 - 프론트 /agent/resume
-    # 타임아웃(60초)보다 훨씬 짧게 잡아서, CMMS가 응답만 느려도 전체 승인 흐름이
-    # 오래 안 걸리게 한다 (pipeline-optimizer 지적, 2026-09-18).
-    async with streamablehttp_client(CMMS_MCP_URL, headers=headers, timeout=10, sse_read_timeout=15) as (read, write, _):
-        async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=10)) as session:
-            await session.initialize()
-            arguments: dict[str, str | int] = {"title": title, "description": description, "priority": "HIGH"}
-            if asset_id is not None:
-                arguments["assetId"] = asset_id
-            result = await session.call_tool("create-work-order", arguments)
-            if result.isError:
-                raise RuntimeError(f"CMMS create-work-order 실패: {result.content}")
+    arguments: dict[str, Any] = {"title": title, "description": description, "priority": "HIGH"}
+    if asset_id is not None:
+        arguments["assetId"] = asset_id
+    created = await _call_tool("create-work-order", arguments)
+    if type(created.get("workOrderId")) is not int or created["workOrderId"] <= 0:
+        raise RuntimeError("CMMS create-work-order: 유효한 workOrderId 없음")
+    return created
 
 
 def _format_for_cmms(text: str) -> str:
@@ -70,7 +95,17 @@ def _is_loopback_url(url: str) -> bool:
     return offline_guard.is_allowed_url(url)
 
 
-def push_work_order(machine_id: int, work_order_text: str) -> str:
+def delivery_record(machine_id: int, work_order_text: str, delivery_key: str | None = None) -> dict:
+    return cmms_delivery.get(_delivery_key(machine_id, work_order_text, delivery_key))
+
+
+def _delivery_key(machine_id: int, text: str, key: str | None) -> str:
+    # Scope persisted IDs to the configured CMMS and the approved content.
+    return hashlib.sha256(json.dumps([CMMS_MCP_URL, machine_id, key, text], ensure_ascii=False).encode()).hexdigest()
+
+
+def push_work_order(machine_id: int, work_order_text: str, *,
+                    payload: dict | None = None, delivery_key: str | None = None) -> str:
     """항상 긴급+승인된 work_order에서만 호출된다(finalize_node 참고) - priority가
     HIGH로 고정인 이유.
 
@@ -101,7 +136,32 @@ def push_work_order(machine_id: int, work_order_text: str) -> str:
     if offline_guard.is_offline() and not _is_loopback_url(CMMS_MCP_URL):
         logger.warning(f"[CMMS push 차단] OFFLINE=1인데 CMMS_MCP_URL이 허용 목록 밖: {CMMS_MCP_URL}")
         return "blocked_offline"
-    title = f"설비 #{machine_id} 긴급 정비"
-    asset_id = MACHINE_ID_TO_ASSET_ID.get(machine_id)
-    asyncio.run(_create_work_order(title, _format_for_cmms(work_order_text), asset_id))
+    if not payload or not payload.get("tasks"):
+        return "blocked_missing_tasks"
+    key = _delivery_key(machine_id, work_order_text, delivery_key)
+    saved = cmms_delivery.claim(key, json.dumps({**payload, "original": work_order_text}, ensure_ascii=False))
+    if saved["status"] == "sent":
+        return "sent"
+    if saved["status"] in ("creating", "creation_unknown"):
+        # A lost creation response may still have created an order; do not blindly recreate.
+        return "creation_unknown"
+    if saved["status"] == "new":
+        try:
+            created = asyncio.run(_create_work_order(payload["title"], payload["description"],
+                                                     MACHINE_ID_TO_ASSET_ID.get(machine_id)))
+            cmms_delivery.record(key, "created", created["workOrderId"], created.get("id"))
+            saved = cmms_delivery.get(key)
+        except Exception:
+            cmms_delivery.record(key, "creation_unknown", error="생성 응답 미확인; Atlas 확인 후 복구 필요")
+            raise
+    try:
+        registered = asyncio.run(_call_tool("add-work-order-tasks", {
+            "workOrderId": saved["work_order_id"], "tasks": payload["tasks"]}))
+        if registered.get("verified") is not True:
+            raise RuntimeError("CMMS Tasks 저장 검증 실패")
+    except Exception:
+        cmms_delivery.record(key, "partial_tasks", error="작업지시서 생성됨; Tasks 등록 재시도 필요")
+        logger.exception("[CMMS] 작업지시서 %s의 Tasks 등록 실패", saved["display_id"])
+        return "partial_tasks"
+    cmms_delivery.record(key, "sent")
     return "sent"

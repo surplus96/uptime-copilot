@@ -232,6 +232,10 @@ class AgentResumeRequest(BaseModel):
     approved: bool
 
 
+class CMMSRetryRequest(BaseModel):
+    thread_id: str
+
+
 # ---------- 라우트 ----------
 
 @app.get("/health")
@@ -300,6 +304,14 @@ def agent_query(req: AgentQueryRequest):
 def agent_resume(req: AgentResumeRequest):
     """승인 대기 중인 요청에 사람의 결정을 전달해서 재개한다."""
     return agent_service.resume_agent(req.thread_id, req.approved)
+
+
+@app.post("/agent/cmms/retry")
+def cmms_retry(req: CMMSRetryRequest):
+    try:
+        return agent_service.retry_cmms_delivery(req.thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 @app.get("/agent/status/{thread_id}")
 def agent_status(thread_id: str):
@@ -418,4 +430,3 @@ def complete_events(req: EventIdsRequest):
 def delete_events(req: EventIdsRequest):
     count = event_store.delete_events(req.machine_ids)
     return {"deleted_count": count}
-

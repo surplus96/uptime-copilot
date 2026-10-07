@@ -83,7 +83,9 @@ def test_cmms_host_is_reachable_through_the_allowlist_when_offline(monkeypatch):
     monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "dummy-token")
 
     with pytest.raises(Exception) as exc_info:
-        cmms_client.push_work_order(84, "테스트 작업지시서")
+        cmms_client.push_work_order(84, "테스트 작업지시서", payload={
+            "title": "설비 #84", "description": "점검", "tasks": [{"label": "점검"}]
+        })
 
     assert not isinstance(exc_info.value, SocketConnectBlockedError), (
         f"CMMS(host.docker.internal)가 오프라인 허용 목록에서 막혔다 - "

@@ -6,6 +6,7 @@ predict_failure_risk(machine_id) - 학습된 부품별 모델로 "지금" 기준
 라이브 피처 행은 build_features.py의 학습용 피처와 정의를 그대로 따르되,
 원본 CSV 대신 sim_query(원본+시뮬레이션 합쳐 조회)로 "지금" 시점 값을 계산한다.
 """
+import logging
 from pathlib import Path
 
 import joblib
@@ -16,6 +17,7 @@ from data import pdm_operations, sim_query
 from data.pdm_telemetry import TELEMETRY_COLUMNS
 from ml.build_features import COMPONENTS, ERROR_IDS, ERROR_WINDOWS_H, SIGNALS
 
+logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).parent.parent / "store" / "ml_models"
 
 
@@ -85,6 +87,19 @@ def _build_live_feature_row(machine_id: int) -> pd.DataFrame:
 
 def predict_failure_risk(machine_id: int) -> dict:
     row = _build_live_feature_row(machine_id)
+    # 정비 기록이 없는 부품의 "마지막 정비 후 경과시간"은 결측(NaN)인데, 학습 데이터에는 이 피처의 결측이 한 건도
+    # 없어서(모든 설비·부품이 2015-01-03 이전에 정비 기록이 있다) 모델은 NaN을 0("방금 정비함")처럼 다룬다.
+    # 실제 고장 121건(시험 구간)을 재생하면 경보율이 99.2% -> 43%로 떨어졌고 0으로 넣은 것과 같았다(2026-10-02).
+    # 조용히 점수가 낮아지므로 반드시 로그로 알린다 - docs/INTEGRATION_CONTRACT.md 2절.
+    missing = [
+        c for c in COMPONENTS
+        if f"hours_since_maint_{c}" in row.columns and pd.isna(row[f"hours_since_maint_{c}"].iloc[0])
+    ]
+    if missing:
+        logger.warning(
+            "설비 #%s: %s의 정비 기록이 없어 '마지막 정비 후 경과시간'이 결측입니다 - 모델은 이를 '방금 정비함'으로 "
+            "다뤄 위험 점수가 크게 낮아질 수 있습니다(정비 기록 입력 필요)", machine_id, ", ".join(missing),
+        )
     result = {}
     for comp in COMPONENTS:
         bundle = _load_model_bundle(comp)

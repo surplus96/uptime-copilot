@@ -66,3 +66,39 @@ def test_build_feature_row_matches_training_window_definitions():
     assert row["hours_since_maint_comp1"] == 100.0
     assert np.isnan(row["hours_since_maint_comp2"])  # comp1 정비가 다른 부품에 새면 안 된다
     assert (row["model"], row["age"]) == ("model3", 7)
+
+
+def test_missing_maintenance_record_is_logged_because_the_model_treats_it_as_just_maintained(monkeypatch, caplog):
+    """학습 데이터에 이 피처의 결측이 한 건도 없어서 NaN이 0(방금 정비함)처럼 다뤄진다 - 실제 고장 재생에서 경보율이
+    99.2% -> 43%. 점수가 조용히 낮아지므로 로그로 알려야 한다."""
+    import logging
+
+    feature_cols = ["volt_mean_3h", "hours_since_maint_comp1", "model", "age"]
+    fake_bundle = {"model": _FakeModel(), "feature_cols": feature_cols, "model_categories": ["model1"]}
+    monkeypatch.setattr(predict, "_load_model_bundle", lambda comp: fake_bundle)
+    row = pd.DataFrame([{
+        "volt_mean_3h": 170.0, "model": "model1", "age": 5,
+        "hours_since_maint_comp1": 100.0, "hours_since_maint_comp2": np.nan,
+        "hours_since_maint_comp3": 50.0, "hours_since_maint_comp4": np.nan,
+    }])
+    monkeypatch.setattr(predict, "_build_live_feature_row", lambda machine_id: row)
+
+    with caplog.at_level(logging.WARNING, logger=predict.logger.name):
+        predict.predict_failure_risk(7)
+
+    assert "설비 #7" in caplog.text and "comp2, comp4" in caplog.text and "comp1" not in caplog.text.split("정비 기록이 없어")[0]
+
+
+def test_no_warning_when_every_component_has_a_maintenance_record(monkeypatch, caplog):
+    import logging
+
+    feature_cols = ["volt_mean_3h", "model", "age"]
+    fake_bundle = {"model": _FakeModel(), "feature_cols": feature_cols, "model_categories": ["model1"]}
+    monkeypatch.setattr(predict, "_load_model_bundle", lambda comp: fake_bundle)
+    row = pd.DataFrame([{"volt_mean_3h": 170.0, "model": "model1", "age": 5, **{f"hours_since_maint_comp{i}": 100.0 for i in range(1, 5)}}])
+    monkeypatch.setattr(predict, "_build_live_feature_row", lambda machine_id: row)
+
+    with caplog.at_level(logging.WARNING, logger=predict.logger.name):
+        predict.predict_failure_risk(7)
+
+    assert "정비 기록이 없어" not in caplog.text

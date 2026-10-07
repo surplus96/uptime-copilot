@@ -6,6 +6,12 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _isolated_cmms_delivery_db(tmp_path, monkeypatch):
+    from data import cmms_delivery
+    monkeypatch.setattr(cmms_delivery, "DB_PATH", str(tmp_path / "cmms_delivery.db"))
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 

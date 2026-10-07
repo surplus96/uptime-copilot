@@ -92,14 +92,31 @@ def check_recent_failure(machine_id: int, within_days: int = 30) -> dict | None:
     }
 
 
+OUTLIER_GAP_FACTOR = 10  # 중앙값 간격의 이 배수보다 긴 간격은 평균에서 뺀다(estimate_next_maintenance)
+SAME_EVENT_WINDOW = pd.Timedelta(hours=6)  # 이 안에 찍힌 정비 기록은 같은 사건으로 센다(부품마다 시각이 몇 분씩 다르게 찍히는 시스템 대비)
+
+
 def estimate_next_maintenance(machine_id: int) -> dict:
-    """정비 이력의 평균 주기를 계산해서 다음 예상 점검일을 산출한다."""
+    """정비 이력의 평균 주기를 계산해서 다음 예상 점검일을 산출한다.
+
+    SAME_EVENT_WINDOW(6시간) 안의 정비(한 사건에서 부품 여러 개, 시스템에 따라 시각이 몇 분씩 다름)는 하나로 센다.
+    이상 간격 제거는 간격이 3개 이상일 때만 작동한다(2개이면 중앙값이 두 값의 평균이라 큰 쪽이 항상 10배 이내).
+    간격이 중앙값의 OUTLIER_GAP_FACTOR배를 넘는 것은
+    평균에서 뺀다 - 원본(2016년)과 시뮬레이션(2026년)의 기록을 합치면 약 10년의 빈 구간이 간격 하나로 들어가
+    평균 주기가 수 배로 부풀었다(평균 간격 = (마지막-처음)/(n-1)이라 기록이 적을수록 심했다). 실제 연동에서도 기록이
+    끊긴 구간(센서·시스템 교체 등)이 같은 식으로 평균을 왜곡한다."""
     rows = sim_query.all_rows("maint", "sim_maint", ["datetime"], machine_id)
-    if len(rows) < 2:
+    raw = sorted(pd.to_datetime([r[0] for r in rows]))
+    dates: list[pd.Timestamp] = []
+    for d in raw:  # 직전 사건의 첫 기록에서 SAME_EVENT_WINDOW 안이면 같은 사건
+        if not dates or d - dates[-1] > SAME_EVENT_WINDOW:
+            dates.append(d)
+    if len(dates) < 2:
         return {"next_due_estimate": "이력 부족으로 추정 불가"}
-    dates = pd.to_datetime([r[0] for r in rows])
     intervals = pd.Series(dates).diff().dropna()
-    avg_interval = intervals.mean()
+    median = intervals.median()
+    kept = intervals[intervals <= OUTLIER_GAP_FACTOR * median]
+    avg_interval = kept.mean()
     last_date = dates[-1]
     return {
         "last_maintenance": str(last_date),

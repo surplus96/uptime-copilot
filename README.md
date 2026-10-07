@@ -347,6 +347,7 @@ If the response is `{"status": "pending_approval", "message": "..."}`, send
 
 - `docs/PORTFOLIO.md` — architecture/design case study (diagrams, key decisions, war stories)
 - `docs/design/SIMULATOR_PLAN.md` — simulator design record: calibration data, state machine
+- `docs/INTEGRATION_CONTRACT.md` (Korean) — what a real plant integration must supply (inputs, maintenance records, error-code mapping, time basis) and what the model can/cannot claim
 - `docs/design/PHASE_7_PLAN.md` — **optional, not required to run this project.** Slack +
   CMMS integration design. With `SLACK_WEBHOOK_URL` / `CMMS_MCP_URL` unset, both no-op.
 - `docs/design/UI_UPGRADE_PLAN.md` — frontend upgrade history, fully closed out

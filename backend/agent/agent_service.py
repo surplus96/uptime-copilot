@@ -52,6 +52,7 @@ class SupervisorState(BaseModel):
     component_manuals: dict[str, str] = {}   # 부품별 매뉴얼 증상 설명
     parts_status: dict[str, dict] = {}   # component -> check_parts() 결과
     component_actions: dict[str, str] = {}   # 부품별 표준 조치사항
+    component_steps: dict[str, list[str]] = {}
     perspectives: Annotated[list[str], operator.add] = []
     perspective_assessments: Annotated[list[dict], operator.add] = []
     risk_probability: float | None = None
@@ -61,6 +62,8 @@ class SupervisorState(BaseModel):
     priority_reasons: list[str] = []
     approved: bool | None = None
     work_order: str | None = None
+    cmms_payload: dict = {}
+    cmms_delivery: dict = {}
     result: str | None = None
 
 
@@ -400,12 +403,15 @@ def manual_lookup_node(state: SupervisorState) -> dict:
     (PUMP_MAINTENANCE_PROCEDURES)를 직접 사용한다."""
     component_manuals = {}
     component_actions = {}
+    component_steps = {}
     for comp in state.involved_components:
         procedure = PUMP_MAINTENANCE_PROCEDURES.get(comp, {})
         component_manuals[comp] = procedure.get("symptom", "")
         steps = procedure.get("steps", [])
+        component_steps[comp] = steps
         component_actions[comp] = " ".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
-    return {"component_manuals": component_manuals, "component_actions": component_actions}
+    return {"component_manuals": component_manuals, "component_actions": component_actions,
+            "component_steps": component_steps}
 
 def parts_check_node(state: SupervisorState) -> dict:
     """관련 부품의 재고·리드타임·단종 여부를 조회한다. manual_lookup 직후, 긴급/주의
@@ -481,7 +487,44 @@ def work_order_node(state: SupervisorState) -> dict:
         header += f"\n[조달 긴급도] ⚠️ {'·'.join(procurement_urgent)} 부품 조달 필요 (우선순위와 별개 - 아래 부품별 [부품 조달] 참고)"
 
     blocks = [build_section(comp) for comp in state.involved_components]
-    return {"work_order": f"{header}\n\n" + "\n\n".join(blocks)}
+    work_order = f"{header}\n\n" + "\n\n".join(blocks)
+    return {"work_order": work_order, "cmms_payload": _cmms_payload(state)}
+
+
+def _cmms_payload(state: SupervisorState) -> dict:
+    """Use the approved structured facts; never flatten procedures into description."""
+    tasks = []
+    for comp in state.involved_components:
+        steps = state.component_steps.get(comp)
+        if steps is None:
+            # Checkpoints created before this field existed keep their approved action text.
+            steps = [s.strip() for s in re.split(r"(?:^|\s)\d+\.\s+", state.component_actions.get(comp, "")) if s.strip()]
+        notes = (f"[증상] {state.component_evidence.get(comp, '')}\n"
+                 f"[매뉴얼 근거] {state.component_manuals.get(comp, '')}\n"
+                 "[출처] rag/pump_manual.py — 교육용 가상 원심펌프 시나리오")
+        part = state.parts_status.get(comp, {})
+        if part and "error" not in part:
+            notes += (f"\n[합성 부품 정보] {part.get('part_no', comp)}; "
+                      f"재고 {part.get('on_hand')}/{part.get('min_stock')}; "
+                      f"리드타임 {part.get('lead_time_days')}일; "
+                      f"조달 필요: {'예' if part.get('needs_procurement') else '아니오'}")
+            if part.get("eol_date"):
+                notes += f"; 단종일 {part['eol_date']}; 대체품 {part.get('alternate_part_no') or '없음'}"
+            if part.get("alternate_info"):
+                alt = part["alternate_info"]
+                notes += f"; 대체품 재고 {alt.get('on_hand')}/{alt.get('min_stock')}, 리드타임 {alt.get('lead_time_days')}일"
+        if state.priority_reasons:
+            notes += "\n[판정 근거] " + "; ".join(state.priority_reasons)
+        for i, step in enumerate(steps, 1):
+            tasks.append({"label": f"[{comp}] {i:02d} {step}", "taskType": "SUBTASK",
+                          "options": [], "notes": notes})
+    components = "·".join(state.involved_components)
+    summary = (f"{components} {state.severity} 점검. 우선순위 {state.priority or '미지정'}. "
+               f"정지 권고: {'예' if state.recommend_shutdown else '아니오'}. 상세 절차와 근거는 Tasks 참조.")
+    if any(p.get("needs_procurement") for p in state.parts_status.values()):
+        summary += " 부품 조달 검토 필요."
+    return {"title": f"설비 #{state.machine_id} {components} {state.severity} 정비",
+            "description": summary, "priority": "HIGH", "tasks": tasks}
 
 _DEFAULT_ASSESSMENT = {
     "risk_level": "중간",
@@ -632,6 +675,7 @@ def approval_node(state: SupervisorState) -> dict:
 
 
 def finalize_node(state: SupervisorState) -> dict:
+    delivery = {}
     if state.severity == "긴급":
         target = f"설비#{state.machine_id}"
         if state.approved:
@@ -644,10 +688,19 @@ def finalize_node(state: SupervisorState) -> dict:
             # 스스로 스킵한 경우까지 거짓으로 성공 처리됐다. 이제 반환된 상태 문자열을
             # 그대로 감사 로그의 result에 남긴다("sent"만 진짜 성공).
             try:
-                cmms_status = cmms_client.push_work_order(state.machine_id, state.work_order)
+                cmms_status = cmms_client.push_work_order(
+                    state.machine_id, state.work_order,
+                    payload=state.cmms_payload or _cmms_payload(state), delivery_key=state.thread_id)
             except Exception as e:
                 logger.error(f"[CMMS push 실패] {e}")
                 cmms_status = "실패"
+            delivery = cmms_client.delivery_record(state.machine_id, state.work_order, state.thread_id)
+            if delivery.get("display_id"):
+                result += f"\n\nCMMS 작업지시서: {delivery['display_id']}"
+            if cmms_status == "partial_tasks":
+                result += "\n작업지시서는 생성됐지만 점검 항목 등록이 완료되지 않았습니다. 같은 전송을 재시도하면 기존 작업지시서에 등록합니다."
+            elif cmms_status in ("실패", "creation_unknown", "blocked_missing_tasks"):
+                result += "\nCMMS 전송이 완료되지 않았습니다. 감사 로그와 전송 기록을 확인해 주세요."
             # 감사 기록은 try 밖 - 안에 있으면 성공한 push 뒤의 감사 예외가 "실패"로 한 번 더
             # 기록됐을 것이다(2026-09-30 code-quality-reviewer 지적).
             if cmms_status == "blocked_offline":
@@ -666,7 +719,7 @@ def finalize_node(state: SupervisorState) -> dict:
         result = f"[사전 경보 - 예방 조치 권장]\n{state.work_order}"
     else:
         result = state.diagnosis if state.machine_id is None else f"설비 #{state.machine_id}: {state.diagnosis}"
-    return {"result": result}
+    return {"result": result, "cmms_delivery": delivery}
 
 
 def route_condition(state: SupervisorState) -> str:
@@ -768,7 +821,32 @@ def resume_agent(thread_id: str, approved: bool) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
     result = app.invoke(Command(resume=approved), config=config)
     _validate_output(result)
-    return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}
+    return {"status": "done", "result": result["result"], "work_order": result.get("work_order"),
+            "cmms_delivery": _public_delivery(result.get("cmms_delivery", {}))}
+
+
+def _public_delivery(delivery: dict) -> dict:
+    return {key: delivery[key] for key in ("status", "display_id", "work_order_id", "error") if key in delivery}
+
+
+def retry_cmms_delivery(thread_id: str) -> dict:
+    """Retry only a completed, approved order with a known Atlas ID; no new approval or Slack push."""
+    snapshot = app.get_state({"configurable": {"thread_id": thread_id}})
+    values = snapshot.values
+    if snapshot.next or not values or values.get("approved") is not True or values.get("severity") != "긴급":
+        raise ValueError("완료된 긴급 승인 건만 CMMS 등록을 재시도할 수 있습니다.")
+    state = SupervisorState(**values)
+    saved = cmms_client.delivery_record(state.machine_id, state.work_order, thread_id)
+    if saved.get("status") not in ("partial_tasks", "created", "sent"):
+        raise ValueError("생성이 확인된 CMMS 작업지시서가 없습니다. Atlas에서 먼저 확인해야 합니다.")
+    _validate_output(values)
+    status = cmms_client.push_work_order(state.machine_id, state.work_order,
+                                       payload=state.cmms_payload or _cmms_payload(state), delivery_key=thread_id)
+    delivery = cmms_client.delivery_record(state.machine_id, state.work_order, thread_id)
+    audit_log.log_event("external_push", thread_id=thread_id, target=f"설비#{state.machine_id}",
+                        summary="CMMS Tasks 등록 재시도", result=status)
+    app.update_state({"configurable": {"thread_id": thread_id}}, {"cmms_delivery": delivery}, as_node="finalize")
+    return {"status": status, "cmms_delivery": _public_delivery(delivery)}
 
 _ERROR_REPR_RE = re.compile(r"^\s*([^\W\d][\w.]*)\(")
 
@@ -807,7 +885,8 @@ def check_pending(thread_id: str) -> dict | None:
         # 반환 직전에 _validate_output()으로 PII/금지어를 검사해 걸리면 400으로
         # 막는데, 이 done 분기는 그 검사를 빼먹고 있었다 - 타임아웃으로 이 복구
         # 경로를 타면 원래는 차단됐어야 할 응답이 검증 없이 그대로 나갈 수 있었다.
-        payload = {"status": "done", "result": result, "work_order": state.values.get("work_order")}
+        payload = {"status": "done", "result": result, "work_order": state.values.get("work_order"),
+                   "cmms_delivery": _public_delivery(state.values.get("cmms_delivery", {}))}
         _validate_output(payload)
         return payload
     for task in state.tasks:

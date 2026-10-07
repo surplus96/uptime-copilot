@@ -324,6 +324,7 @@ pytest tests/eval/test_golden.py -m eval -v -s
 
 - `docs/PORTFOLIO_KOR.md` — 아키텍처/설계 케이스 스터디 (다이어그램, 주요 결정, 사례)
 - `docs/design/SIMULATOR_PLAN.md` — 시뮬레이터 설계 기록: 보정 데이터, 상태 머신
+- `docs/INTEGRATION_CONTRACT.md` — 실연동 시 공급해야 할 입력(정비 기록, 오류 코드 매핑, 시간 기준 등)과 모델이 말할 수 있는 것/없는 것
 - `docs/design/PHASE_7_PLAN.md` — **선택 사항, 실행에 필수 아님.** Slack + CMMS 연동 설계.
   `SLACK_WEBHOOK_URL` / `CMMS_MCP_URL`을 비워두면 둘 다 no-op.
 - `docs/design/UI_UPGRADE_PLAN.md` — 프론트엔드 개선 이력, 완전히 종료됨

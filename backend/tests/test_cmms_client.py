@@ -5,6 +5,8 @@
 assetId로 Atlas-MCP를 호출해 isError: true를 재현한 뒤 고쳤음(docs/design/PHASE_7_PLAN.md 참고) -
 여기서는 그 실제 재현을 네트워크 없이 mock으로 반복 가능하게 만든다.
 """
+from types import SimpleNamespace
+
 import pytest
 
 import cmms_client
@@ -13,7 +15,7 @@ import cmms_client
 class _FakeCallToolResult:
     def __init__(self, is_error: bool, content="상세 내용"):
         self.isError = is_error
-        self.content = content
+        self.content = [SimpleNamespace(type="text", text=content if is_error else '{"workOrderId": 10, "id": "WO000010", "verified": true}')]
 
 
 class _FakeSession:
@@ -123,7 +125,9 @@ def test_push_work_order_allows_allowlisted_host_when_offline(monkeypatch):
     monkeypatch.setattr(cmms_client, "streamablehttp_client", lambda *a, **kw: _FakeStreams())
     monkeypatch.setattr(cmms_client, "ClientSession", lambda *a, **kw: _FakeSession(_FakeCallToolResult(is_error=False)))
 
-    assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "sent"
+    assert cmms_client.push_work_order(84, "작업지시서 텍스트", payload={
+        "title": "설비 #84", "description": "점검", "tasks": [{"label": "점검", "taskType": "SUBTASK", "options": []}]
+    }) == "sent"
 
 
 @pytest.mark.parametrize("url", ["HTTP://evil.example/mcp", "Http://evil.example/mcp"])
@@ -150,3 +154,54 @@ def test_push_work_order_is_unconfigured_when_only_the_token_is_missing(monkeypa
     monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://localhost:3100/mcp")
     monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", None)
     assert cmms_client.push_work_order(84, "작업지시서 텍스트") == "skipped_unconfigured"
+
+
+def test_partial_tasks_retry_reuses_created_id(monkeypatch):
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://localhost:3100/mcp")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "token")
+    creates = []
+    calls = []
+
+    async def create(title, description, asset_id):
+        creates.append((title, description, asset_id))
+        return {"workOrderId": 123, "id": "WO000123"}
+
+    async def tasks(tool, arguments):
+        calls.append(arguments)
+        if len(calls) == 1:
+            raise RuntimeError("temporarily unavailable")
+        return {"verified": True}
+
+    monkeypatch.setattr(cmms_client, "_create_work_order", create)
+    monkeypatch.setattr(cmms_client, "_call_tool", tasks)
+    payload = {"title": "짧은 제목", "description": "짧은 요약", "tasks": [{"label": "점검"}]}
+    assert cmms_client.push_work_order(90, "승인된 원문", payload=payload, delivery_key="thread") == "partial_tasks"
+    assert cmms_client.delivery_record(90, "승인된 원문", "thread")["work_order_id"] == 123
+    assert cmms_client.push_work_order(90, "승인된 원문", payload=payload, delivery_key="thread") == "sent"
+    assert cmms_client.push_work_order(90, "승인된 원문", payload=payload, delivery_key="thread") == "sent"
+    assert len(creates) == 1
+    assert len(calls) == 2
+    assert all(call["workOrderId"] == 123 for call in calls)
+
+
+def test_lost_creation_response_does_not_recreate(monkeypatch):
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://localhost:3100/mcp")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "token")
+    calls = []
+
+    async def create(*args):
+        calls.append(args)
+        raise TimeoutError("lost response")
+
+    monkeypatch.setattr(cmms_client, "_create_work_order", create)
+    payload = {"title": "제목", "description": "요약", "tasks": [{"label": "점검"}]}
+    with pytest.raises(TimeoutError):
+        cmms_client.push_work_order(90, "승인된 원문", payload=payload)
+    assert cmms_client.push_work_order(90, "승인된 원문", payload=payload) == "creation_unknown"
+    assert len(calls) == 1
+
+
+def test_missing_procedures_never_sends_flattened_manual(monkeypatch):
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_URL", "http://localhost:3100/mcp")
+    monkeypatch.setattr(cmms_client, "CMMS_MCP_TOKEN", "token")
+    assert cmms_client.push_work_order(90, "전체 매뉴얼") == "blocked_missing_tasks"
