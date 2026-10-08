@@ -5,6 +5,7 @@
 assetId로 Atlas-MCP를 호출해 isError: true를 재현한 뒤 고쳤음(docs/design/PHASE_7_PLAN.md 참고) -
 여기서는 그 실제 재현을 네트워크 없이 mock으로 반복 가능하게 만든다.
 """
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -177,11 +178,22 @@ def test_partial_tasks_retry_reuses_created_id(monkeypatch):
     payload = {"title": "짧은 제목", "description": "짧은 요약", "tasks": [{"label": "점검"}]}
     assert cmms_client.push_work_order(90, "승인된 원문", payload=payload, delivery_key="thread") == "partial_tasks"
     assert cmms_client.delivery_record(90, "승인된 원문", "thread")["work_order_id"] == 123
+    payload["tasks"][0]["notes"] = "복구된 상세 절차와 근거\n" * 100
     assert cmms_client.push_work_order(90, "승인된 원문", payload=payload, delivery_key="thread") == "sent"
+    recorded = json.loads(cmms_client.delivery_record(90, "승인된 원문", "thread")["payload_json"])
+    assert recorded["tasks"][0]["notes"] == payload["tasks"][0]["notes"]
+    assert recorded["original"] == "승인된 원문"
     assert cmms_client.push_work_order(90, "승인된 원문", payload=payload, delivery_key="thread") == "sent"
     assert len(creates) == 1
     assert len(calls) == 2
     assert all(call["workOrderId"] == 123 for call in calls)
+    # Explicit repair also upgrades details on a previously successful delivery.
+    payload["tasks"][0]["notes"] += "추가 상세 표현"
+    assert cmms_client.push_work_order(90, "승인된 원문", payload=payload, delivery_key="thread",
+                                       refresh_tasks=True) == "sent"
+    assert len(creates) == 1
+    assert len(calls) == 3
+    assert calls[-1]["workOrderId"] == 123
 
 
 def test_lost_creation_response_does_not_recreate(monkeypatch):

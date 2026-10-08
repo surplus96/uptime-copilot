@@ -41,7 +41,7 @@ from core.harness import (
     judge_faithfulness,
     validate_input,
 )
-from data import audit_log, event_store, sim_loop, sim_store
+from data import audit_log, event_store, runtime_dataset, sim_loop, sim_store
 from rag import rag_service
 
 logging.basicConfig(
@@ -116,6 +116,7 @@ async def lifespan(app: FastAPI):
     rag_service.initialize_rag(llm_provider.get_api_key(), DEFAULT_MODEL, langsmith_client, base_url=llm_provider.get_base_url())
     event_store.init_event_table()
     sim_store.init_sim_tables()
+    await asyncio.to_thread(runtime_dataset.ensure_ready)
     # 2026-09-28 교차 검토 지적: 이게 없으면 새 볼륨(CI, 첫 배포)에서 parts_master
     # 테이블이 아예 없어 긴급/주의 대화가 500 에러, 백그라운드 스캔은 매 tick마다
     # 조용히 실패한다. 합성 데이터라 크기가 작고 외부 파일도 안 필요해서(pdm_dataloader

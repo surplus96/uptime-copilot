@@ -68,7 +68,10 @@ def get_recent_errors(machine_id: int, limit: int = 3, within_days: int = RECENT
         return []
     rows = sim_query.recent_rows("errors", "sim_errors", ["datetime", "errorID"], machine_id, limit)
     now_ts = pd.Timestamp(now)
-    rows = [(dt, eid) for dt, eid in rows if (now_ts - pd.Timestamp(dt)).days <= within_days]
+    incident_start = sim_query.incident_start()
+    rows = [(dt, eid) for dt, eid in rows
+            if pd.Timedelta(0) <= now_ts - pd.Timestamp(dt) <= pd.Timedelta(days=within_days)
+            and (incident_start is None or pd.Timestamp(dt) > pd.Timestamp(incident_start))]
     return [
         {"datetime": str(dt), "errorID": eid, "description": ERROR_DESCRIPTIONS.get(eid, "알 수 없음")}
         for dt, eid in reversed(rows)
@@ -82,8 +85,13 @@ def check_recent_failure(machine_id: int, within_days: int = 30) -> dict | None:
         return None
     latest_dt, latest_failure = rows[-1]
     dataset_now = sim_query.dataset_now()
-    days_ago = (pd.Timestamp(dataset_now) - pd.Timestamp(latest_dt)).days
-    if days_ago > within_days:
+    if dataset_now is None:
+        return None
+    age = pd.Timestamp(dataset_now) - pd.Timestamp(latest_dt)
+    incident_start = sim_query.incident_start()
+    if not pd.Timedelta(0) <= age <= pd.Timedelta(days=within_days) or (
+        incident_start is not None and pd.Timestamp(latest_dt) <= pd.Timestamp(incident_start)
+    ):
         return None
     return {
         "datetime": str(latest_dt),

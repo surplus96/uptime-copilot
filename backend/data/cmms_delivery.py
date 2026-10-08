@@ -32,11 +32,13 @@ def claim(key: str, payload_json: str) -> dict:
 
 
 def record(key: str, status: str, work_order_id: int | None = None,
-           display_id: str | None = None, error: str | None = None) -> None:
+           display_id: str | None = None, error: str | None = None,
+           payload_json: str | None = None) -> None:
     with _connect() as conn:
         conn.execute("""UPDATE cmms_deliveries SET status=?,
-            work_order_id=COALESCE(?, work_order_id), display_id=COALESCE(?, display_id), error=?
-            WHERE delivery_key=?""", (status, work_order_id, display_id, error, key))
+            work_order_id=COALESCE(?, work_order_id), display_id=COALESCE(?, display_id), error=?,
+            payload_json=COALESCE(?, payload_json)
+            WHERE delivery_key=?""", (status, work_order_id, display_id, error, payload_json, key))
 
 
 def get(key: str) -> dict:

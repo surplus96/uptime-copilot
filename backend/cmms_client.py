@@ -105,7 +105,8 @@ def _delivery_key(machine_id: int, text: str, key: str | None) -> str:
 
 
 def push_work_order(machine_id: int, work_order_text: str, *,
-                    payload: dict | None = None, delivery_key: str | None = None) -> str:
+                    payload: dict | None = None, delivery_key: str | None = None,
+                    refresh_tasks: bool = False) -> str:
     """항상 긴급+승인된 work_order에서만 호출된다(finalize_node 참고) - priority가
     HIGH로 고정인 이유.
 
@@ -140,7 +141,7 @@ def push_work_order(machine_id: int, work_order_text: str, *,
         return "blocked_missing_tasks"
     key = _delivery_key(machine_id, work_order_text, delivery_key)
     saved = cmms_delivery.claim(key, json.dumps({**payload, "original": work_order_text}, ensure_ascii=False))
-    if saved["status"] == "sent":
+    if saved["status"] == "sent" and not refresh_tasks:
         return "sent"
     if saved["status"] in ("creating", "creation_unknown"):
         # A lost creation response may still have created an order; do not blindly recreate.
@@ -154,6 +155,9 @@ def push_work_order(machine_id: int, work_order_text: str, *,
         except Exception:
             cmms_delivery.record(key, "creation_unknown", error="생성 응답 미확인; Atlas 확인 후 복구 필요")
             raise
+    # Keep the actual retry payload, including upgraded details, for later recovery.
+    cmms_delivery.record(key, "created", payload_json=json.dumps(
+        {**payload, "original": work_order_text}, ensure_ascii=False))
     try:
         registered = asyncio.run(_call_tool("add-work-order-tasks", {
             "workOrderId": saved["work_order_id"], "tasks": payload["tasks"]}))

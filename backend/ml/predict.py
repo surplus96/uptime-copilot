@@ -13,7 +13,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from data import pdm_operations, sim_query
+from data import event_store, pdm_operations, sim_query
 from data.pdm_telemetry import TELEMETRY_COLUMNS
 from ml.build_features import COMPONENTS, ERROR_IDS, ERROR_WINDOWS_H, SIGNALS
 
@@ -74,6 +74,9 @@ def _build_live_feature_row(machine_id: int) -> pd.DataFrame:
     )
     if not err.empty:
         err["datetime"] = pd.to_datetime(err["datetime"])
+        cutoffs = [t for t in (sim_query.incident_start(), event_store.completed_evidence_at(machine_id)) if t]
+        if cutoffs:
+            err = err[err["datetime"] > max(pd.Timestamp(t) for t in cutoffs)]
 
     maint = pd.DataFrame(
         sim_query.all_rows("maint", "sim_maint", ["datetime", "comp"], machine_id),
@@ -81,6 +84,12 @@ def _build_live_feature_row(machine_id: int) -> pd.DataFrame:
     )
     if not maint.empty:
         maint["datetime"] = pd.to_datetime(maint["datetime"])
+    if sim_query.runtime_year():
+        simulated = pd.DataFrame(sim_query.latest_sim_maintenance(machine_id), columns=["datetime", "comp"])
+        if not simulated.empty:
+            simulated["datetime"] = pd.to_datetime(simulated["datetime"])
+            # Shifted bootstrap maintenance must not override injected simulation ages.
+            maint = pd.concat([maint[~maint["comp"].isin(simulated["comp"])], simulated], ignore_index=True)
 
     return build_feature_row(now, tele, err, maint, pdm_operations.get_machine_info(machine_id))
 

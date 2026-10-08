@@ -760,7 +760,11 @@ def _simulator_panel():
     with st.container(border=True):
         col1, col2, col3 = st.columns([2, 2, 1])
         running = status["running"]
-        col1.markdown(f"{'▶️ 실행 중' if running else '⏸️ 정지'} · 시뮬레이션 시각: `{status['sim_now'] or '없음'}`")
+        clock_label = "시뮬레이션 시각" if status["sim_now"] else "데이터 기준 시각"
+        clock_value = status["sim_now"] or status.get("dataset_now") or "없음"
+        col1.markdown(f"{'▶️ 실행 중' if running else '⏸️ 정지'} · {clock_label}: `{clock_value}`")
+        if status.get("runtime_year"):
+            col1.caption(f"{status['runtime_year']}년 테스트 데이터 · 한국시간(Asia/Seoul)")
 
         speed = f"속도: 실제 {status['tick_seconds']}초 = 시뮬레이션 {status['hours_per_tick']}시간"
         if running and status["elapsed_seconds"] is not None:

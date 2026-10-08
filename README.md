@@ -112,9 +112,15 @@ docker compose up -d --build
   backend downloads the ~470MB embedding model inside the container. `docker compose logs -f
   backend` to watch; it's cached in the `hf_cache` volume afterward, so later builds are
   healthy in seconds.
-- **One-time data ingestion, inside the container** (the image ships with no data baked in):
+- **Runtime data is initialized on first startup** from the mounted `archive/` CSVs.
+  The newest source timestamp is shifted to the current Asia/Seoul hour; operational
+  records are restricted to that calendar year (2026 for this deployment). Historical
+  incidents are reference data; new incident detection starts after the stored anchor.
+  Existing databases are backed up before the one-time migration. Training CSVs remain
+  unchanged. See [runtime dataset plan](docs/design/RUNTIME_2026_DATASET_PLAN.md).
+  To explicitly reload the source using the same stored date mapping:
   ```bash
-  docker compose exec backend python data/pdm_dataloader.py
+  docker compose exec backend python -m data.pdm_dataloader
   ```
 - **The failure-risk model needs the same one-time step** — without it, diagnosis silently
   falls back to a weaker Z-score threshold, and `/parts/inventory_risk` answers `503`:
@@ -164,7 +170,7 @@ cp .env.example .env             # Windows: copy .env.example .env
 2. Place the files under `uptime-copilot/archive/`.
 3. Run the one-time SQLite ingestion (from `backend/`, venv active):
    ```bash
-   python data/pdm_dataloader.py
+   python -m data.pdm_dataloader
    ```
 4. Build and train the failure-risk model (also one-time; without it, diagnosis falls back
    to the weaker Z-score threshold and logs a warning):

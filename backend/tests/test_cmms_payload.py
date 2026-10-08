@@ -23,6 +23,16 @@ def test_two_component_manual_becomes_eight_tasks_with_separate_evidence():
     assert "회전속도 오류" not in payload["tasks"][0]["notes"]
     assert "합성 부품 정보" in payload["tasks"][0]["notes"]
     assert "회전속도 오류" in payload["tasks"][4]["notes"]
+    first = payload["tasks"][0]["notes"]
+    second = payload["tasks"][1]["notes"]
+    assert len(first) > 255
+    assert first.startswith("[조치사항] comp1 / 01\n" + state.component_steps["comp1"][0])
+    assert second.startswith("[조치사항] comp1 / 02\n" + state.component_steps["comp1"][1])
+    assert "[상세 절차 — comp1]" in first
+    for i, step in enumerate(state.component_steps["comp1"], 1):
+        assert f"{i}. {step}" in first
+    assert state.component_steps["comp2"][0] not in first
+    assert "[관측 근거] 전압 오류" in first
 
 
 def test_old_approval_checkpoint_uses_approved_steps():
@@ -60,3 +70,31 @@ def test_retry_uses_original_approved_order_without_replaying_graph(monkeypatch)
     assert calls[0][1]["delivery_key"] == "thread"
     assert calls[0][1]["payload"] == state["cmms_payload"]
     assert updates[0][1]["as_node"] == "finalize"
+
+
+def test_retry_enriches_details_only_for_the_same_approved_task_labels(monkeypatch):
+    state = agent_service.SupervisorState(
+        user_message="점검", approved=True, severity="긴급", machine_id=90,
+        work_order="승인된 원문", involved_components=["comp1"],
+        component_steps={"comp1": ["승인된 점검", "승인된 측정"]},
+        component_evidence={"comp1": "승인된 관측 근거"},
+    )
+    old_payload = agent_service._cmms_payload(state)
+    for task in old_payload["tasks"]:
+        task["notes"] = "이전 형식의 메모"
+    values = {**state.model_dump(), "cmms_payload": old_payload}
+    calls, updates = [], []
+    app = SimpleNamespace(get_state=lambda config: SimpleNamespace(next=(), values=values),
+                          update_state=lambda *args, **kwargs: updates.append((args, kwargs)))
+    monkeypatch.setattr(agent_service, "app", app)
+    monkeypatch.setattr(agent_service.cmms_client, "delivery_record", lambda *args: {
+        "status": "partial_tasks", "work_order_id": 54})
+    monkeypatch.setattr(agent_service.cmms_client, "push_work_order",
+                        lambda *args, **kwargs: calls.append(kwargs) or "sent")
+    agent_service.retry_cmms_delivery("thread")
+    assert "[상세 절차" in calls[0]["payload"]["tasks"][0]["notes"]
+    assert updates[0][0][1]["cmms_payload"] == calls[0]["payload"]
+    # Changed procedures must not silently replace the previously approved task list.
+    values["component_steps"] = {"comp1": ["승인되지 않은 다른 점검"]}
+    agent_service.retry_cmms_delivery("thread")
+    assert calls[1]["payload"] == old_payload

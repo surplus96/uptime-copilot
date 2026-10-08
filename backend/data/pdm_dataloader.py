@@ -3,9 +3,15 @@
 """
 
 import sqlite3
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from data import runtime_dataset  # noqa: E402
 
 DATA_DIR = str(Path(__file__).parent.parent.parent / "archive")
 DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
@@ -16,6 +22,7 @@ def load_telemetry_to_sqlite():
     """87만 행짜리 telemetry.csv를 SQLite로 1회 적재한다."""
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_csv(f"{DATA_DIR}/PdM_telemetry.csv", parse_dates=["datetime"])
+    df = runtime_dataset.project_frame(df, conn)
     df.to_sql("telemetry", conn, if_exists="replace", index=False)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_machine ON telemetry(machineID)")
     conn.commit()
@@ -29,6 +36,7 @@ def load_small_tables_to_sqlite():
     conn = sqlite3.connect(DB_PATH)
     for table, filename in [("errors", "PdM_errors.csv"), ("maint", "PdM_maint.csv"), ("failures", "PdM_failures.csv")]:
         df = pd.read_csv(f"{DATA_DIR}/{filename}", parse_dates=["datetime"])
+        df = runtime_dataset.project_frame(df, conn)
         df.to_sql(table, conn, if_exists="replace", index=False)
         conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_machine ON {table}(machineID)")
     conn.commit()
@@ -38,6 +46,10 @@ def load_small_tables_to_sqlite():
 
 def load_small_tables():
     machines = pd.read_csv(f"{DATA_DIR}/PdM_machines.csv")
+    with sqlite3.connect(DB_PATH) as conn:
+        if runtime_dataset.policy(conn):
+            return (machines, *(pd.read_sql_query(f"SELECT * FROM {table}", conn, parse_dates=["datetime"])
+                                for table in ("errors", "maint", "failures")))
     errors = pd.read_csv(f"{DATA_DIR}/PdM_errors.csv", parse_dates=["datetime"])
     maint = pd.read_csv(f"{DATA_DIR}/PdM_maint.csv", parse_dates=["datetime"])
     failures = pd.read_csv(f"{DATA_DIR}/PdM_failures.csv", parse_dates=["datetime"])
@@ -47,6 +59,7 @@ def load_small_tables():
 if __name__ == "__main__":
     load_telemetry_to_sqlite()
     load_small_tables_to_sqlite()
+    runtime_dataset.activate(DB_PATH)
     machines, errors, maint, failures = load_small_tables()
     print(f"machines: {len(machines)}, errors: {len(errors)}, maint: {len(maint)}, failures: {len(failures)}")
 

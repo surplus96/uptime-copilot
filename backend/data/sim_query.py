@@ -6,7 +6,26 @@ sim_* 테이블이 아직 없어도(시뮬레이터를 한 번도 안 켰을 때
 import sqlite3
 from pathlib import Path
 
+from data import runtime_dataset
+
 DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
+
+
+def _scope(conn: sqlite3.Connection) -> tuple[str, tuple]:
+    bounds = runtime_dataset.window(conn)
+    return (" AND datetime >= ? AND datetime < ?", bounds) if bounds else ("", ())
+
+
+def incident_start() -> str | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        active = runtime_dataset.policy(conn)
+    return active["incident_start"] if active else None
+
+
+def runtime_year() -> int | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        active = runtime_dataset.policy(conn)
+    return active["year"] if active else None
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -18,15 +37,16 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 def recent_rows(table: str, sim_table: str, columns: list[str], machine_id: int, limit: int) -> list[tuple]:
     """설비 하나의 최근 `limit`개 행을 원본+시뮬레이션 합쳐 오래된→최신 순으로 반환한다."""
     conn = sqlite3.connect(DB_PATH)
+    scope, params = _scope(conn)
     cols = ", ".join(columns)
     rows = conn.execute(
-        f'SELECT {cols} FROM {table} WHERE "machineID"=? ORDER BY datetime DESC LIMIT ?',
-        (machine_id, limit),
+        f'SELECT {cols} FROM {table} WHERE "machineID"=?{scope} ORDER BY datetime DESC LIMIT ?',
+        (machine_id, *params, limit),
     ).fetchall()
     if _table_exists(conn, sim_table):
         rows += conn.execute(
-            f'SELECT {cols} FROM {sim_table} WHERE "machineID"=? ORDER BY datetime DESC LIMIT ?',
-            (machine_id, limit),
+            f'SELECT {cols} FROM {sim_table} WHERE "machineID"=?{scope} ORDER BY datetime DESC LIMIT ?',
+            (machine_id, *params, limit),
         ).fetchall()
     conn.close()
     rows.sort(key=lambda r: r[0])
@@ -37,10 +57,11 @@ def all_rows(table: str, sim_table: str, columns: list[str], machine_id: int) ->
     """설비 하나의 전체 이력을 원본+시뮬레이션 합쳐 오래된→최신 순으로 반환한다.
     정비 기록처럼 설비당 행 수가 원래 적은 테이블 전용이다 - telemetry에는 쓰지 않는다."""
     conn = sqlite3.connect(DB_PATH)
+    scope, params = _scope(conn)
     cols = ", ".join(columns)
-    rows = conn.execute(f'SELECT {cols} FROM {table} WHERE "machineID"=? ORDER BY datetime', (machine_id,)).fetchall()
+    rows = conn.execute(f'SELECT {cols} FROM {table} WHERE "machineID"=?{scope} ORDER BY datetime', (machine_id, *params)).fetchall()
     if _table_exists(conn, sim_table):
-        rows += conn.execute(f'SELECT {cols} FROM {sim_table} WHERE "machineID"=? ORDER BY datetime', (machine_id,)).fetchall()
+        rows += conn.execute(f'SELECT {cols} FROM {sim_table} WHERE "machineID"=?{scope} ORDER BY datetime', (machine_id, *params)).fetchall()
     conn.close()
     rows.sort(key=lambda r: r[0])
     return rows
@@ -49,9 +70,10 @@ def all_rows(table: str, sim_table: str, columns: list[str], machine_id: int) ->
 def dataset_now() -> str | None:
     """원본+시뮬레이션 전체에서 가장 최신 telemetry 시각. event_store._dataset_now()가 위임한다."""
     conn = sqlite3.connect(DB_PATH)
-    values = [conn.execute("SELECT MAX(datetime) FROM telemetry").fetchone()[0]]
+    scope, params = _scope(conn)
+    values = [conn.execute(f"SELECT MAX(datetime) FROM telemetry WHERE 1=1{scope}", params).fetchone()[0]]
     if _table_exists(conn, "sim_telemetry"):
-        values.append(conn.execute("SELECT MAX(datetime) FROM sim_telemetry").fetchone()[0])
+        values.append(conn.execute(f"SELECT MAX(datetime) FROM sim_telemetry WHERE 1=1{scope}", params).fetchone()[0])
     conn.close()
     values = [v for v in values if v]
     return max(values) if values else None
@@ -65,9 +87,10 @@ def sim_only_now() -> str | None:
     (2026-09-22 실제 재현·확인 - #15/#64/#90/#95가 2015-12-31 원본 고장 기록인데
     '긴급'으로 재등장)."""
     conn = sqlite3.connect(DB_PATH)
+    scope, params = _scope(conn)
     value = None
     if _table_exists(conn, "sim_telemetry"):
-        value = conn.execute("SELECT MAX(datetime) FROM sim_telemetry").fetchone()[0]
+        value = conn.execute(f"SELECT MAX(datetime) FROM sim_telemetry WHERE 1=1{scope}", params).fetchone()[0]
     conn.close()
     return value
 
@@ -75,13 +98,26 @@ def sim_only_now() -> str | None:
 def sim_only_rows(sim_table: str, columns: list[str], machine_id: int, limit: int) -> list[tuple]:
     """원본과 절대 안 섞고 sim_table에서만 조회한다."""
     conn = sqlite3.connect(DB_PATH)
+    scope, params = _scope(conn)
     rows = []
     cols = ", ".join(columns)
     if _table_exists(conn, sim_table):
         rows = conn.execute(
-            f'SELECT {cols} FROM {sim_table} WHERE "machineID"=? ORDER BY datetime DESC LIMIT ?',
-            (machine_id, limit),
+            f'SELECT {cols} FROM {sim_table} WHERE "machineID"=?{scope} ORDER BY datetime DESC LIMIT ?',
+            (machine_id, *params, limit),
         ).fetchall()
     conn.close()
     rows.sort(key=lambda r: r[0])
     return rows[-limit:] if limit else rows
+
+
+def latest_sim_maintenance(machine_id: int) -> list[tuple]:
+    """Simulation owns a component's current maintenance age once it has initialized it."""
+    with sqlite3.connect(DB_PATH) as conn:
+        if not _table_exists(conn, "sim_maint"):
+            return []
+        scope, params = _scope(conn)
+        return conn.execute(
+            f'SELECT MAX(datetime), comp FROM sim_maint WHERE "machineID"=?{scope} GROUP BY comp',
+            (machine_id, *params),
+        ).fetchall()

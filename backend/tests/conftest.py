@@ -8,6 +8,20 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _isolated_event_db(tmp_path, monkeypatch):
+    import sqlite3
+
+    from data import event_store, sim_query
+    monkeypatch.setattr(event_store, "DB_PATH", str(tmp_path / "default_events.db"))
+    event_store.init_event_table()
+    # Tests must never read a developer's migrated timeline.
+    query_path = str(tmp_path / "default_query.db")
+    monkeypatch.setattr(sim_query, "DB_PATH", query_path)
+    with sqlite3.connect(query_path) as conn:
+        conn.execute("CREATE TABLE telemetry (datetime TEXT, machineID INTEGER)")
+
+
+@pytest.fixture(autouse=True)
 def _isolated_cmms_delivery_db(tmp_path, monkeypatch):
     from data import cmms_delivery
     monkeypatch.setattr(cmms_delivery, "DB_PATH", str(tmp_path / "cmms_delivery.db"))

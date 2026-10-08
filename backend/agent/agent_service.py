@@ -8,6 +8,7 @@ import logging
 import operator
 import re
 import time
+from datetime import datetime
 from typing import Annotated, Literal
 
 from dotenv import load_dotenv
@@ -19,7 +20,7 @@ import cmms_client
 import notify
 from core import llm_provider, offline_guard
 from core.harness import check_output_forbidden_words
-from data import audit_log, pdm_operations, pdm_telemetry, sim_query
+from data import audit_log, event_store, pdm_operations, pdm_telemetry, sim_query
 from ml.predict import predict_failure_risk
 from rag.pump_manual import ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES, SIGNAL_TO_COMPONENT
 
@@ -197,6 +198,17 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     failure = pdm_operations.check_recent_failure(machine_id, within_days=within_days)
     anomaly = pdm_telemetry.detect_anomaly(machine_id)
     risk = _predict_risk_safe(machine_id)
+    cutoffs = [v for v in (event_store.completed_evidence_at(machine_id), sim_query.incident_start()) if v]
+    if cutoffs:
+        cutoff = max(datetime.fromisoformat(v) for v in cutoffs)
+        recent_errors = [e for e in recent_errors if datetime.fromisoformat(e["datetime"]) > cutoff]
+        if failure and datetime.fromisoformat(failure["datetime"]) <= cutoff:
+            failure = None
+        # Re-querying unchanged telemetry must not turn a closed incident into a new warning.
+        telemetry_at = anomaly.get("as_of")
+        if telemetry_at and datetime.fromisoformat(telemetry_at) <= cutoff:
+            anomaly = {**anomaly, "has_anomaly": False}
+            risk = None
     top_risk_comp, top_risk_proba = (None, None)
     if risk:
         top_risk_comp = max(risk, key=lambda c: risk[c]["probability"])
@@ -276,7 +288,8 @@ def _diagnose_machine(machine_id: int, within_days: int = 30) -> dict:
     if risk_alarm:
         evidence_times.append(sim_query.dataset_now())
 
-    evidence_at = max(evidence_times) if evidence_times else None
+    evidence_times = [t for t in evidence_times if t]
+    evidence_at = max(evidence_times, key=datetime.fromisoformat) if evidence_times else None
 
     return {
         "machine_id": machine_id,
@@ -323,7 +336,9 @@ def scan_machines(machine_ids) -> tuple[list[dict], list[str]]:
             result["diagnosis"] += " / " + " / ".join(procurement_notes)
 
         completed_evidence_at = completed_evidence_map.get(machine_id)
-        if completed_evidence_at and result["evidence_at"] and result["evidence_at"] <= completed_evidence_at:
+        if completed_evidence_at and result["evidence_at"] and (
+            datetime.fromisoformat(result["evidence_at"]) <= datetime.fromisoformat(completed_evidence_at)
+        ):
             continue
         is_genuinely_new = already_detected_map.get(machine_id) != result["evidence_at"]
         event_store.save_event(machine_id, result["severity"], result["diagnosis"], result["evidence_at"])
@@ -427,6 +442,8 @@ def validate_work_order_node(state: SupervisorState) -> dict:
     관문. 그래프 노드로 만들어서, 검증 실패 시 예외가 여기서 그래프 실행을 멈추므로
     approval_node/finalize_node는 구조적으로 절대 도달할 수 없다."""
     check_output_forbidden_words(state.work_order)
+    for task in state.cmms_payload.get("tasks", []):
+        check_output_forbidden_words(task.get("notes", ""))
     return {}
 
 
@@ -499,7 +516,8 @@ def _cmms_payload(state: SupervisorState) -> dict:
         if steps is None:
             # Checkpoints created before this field existed keep their approved action text.
             steps = [s.strip() for s in re.split(r"(?:^|\s)\d+\.\s+", state.component_actions.get(comp, "")) if s.strip()]
-        notes = (f"[증상] {state.component_evidence.get(comp, '')}\n"
+        procedure = "\n".join(f"{i}. {step}" for i, step in enumerate(steps, 1))
+        notes = (f"[관측 근거] {state.component_evidence.get(comp, '')}\n"
                  f"[매뉴얼 근거] {state.component_manuals.get(comp, '')}\n"
                  "[출처] rag/pump_manual.py — 교육용 가상 원심펌프 시나리오")
         part = state.parts_status.get(comp, {})
@@ -516,8 +534,10 @@ def _cmms_payload(state: SupervisorState) -> dict:
         if state.priority_reasons:
             notes += "\n[판정 근거] " + "; ".join(state.priority_reasons)
         for i, step in enumerate(steps, 1):
+            details = (f"[조치사항] {comp} / {i:02d}\n{step}\n\n"
+                       f"[상세 절차 — {comp}]\n{procedure}\n\n{notes}")
             tasks.append({"label": f"[{comp}] {i:02d} {step}", "taskType": "SUBTASK",
-                          "options": [], "notes": notes})
+                          "options": [], "notes": details})
     components = "·".join(state.involved_components)
     summary = (f"{components} {state.severity} 점검. 우선순위 {state.priority or '미지정'}. "
                f"정지 권고: {'예' if state.recommend_shutdown else '아니오'}. 상세 절차와 근거는 Tasks 참조.")
@@ -840,12 +860,21 @@ def retry_cmms_delivery(thread_id: str) -> dict:
     if saved.get("status") not in ("partial_tasks", "created", "sent"):
         raise ValueError("생성이 확인된 CMMS 작업지시서가 없습니다. Atlas에서 먼저 확인해야 합니다.")
     _validate_output(values)
+    payload = state.cmms_payload or _cmms_payload(state)
+    rebuilt = _cmms_payload(state)
+    # Upgrade the presentation only when the stored approved task list is identical.
+    # Older checkpoints without structured facts must retain their saved payload.
+    if rebuilt["tasks"] and [t["label"] for t in rebuilt["tasks"]] == [t["label"] for t in payload["tasks"]]:
+        payload = {**payload, "tasks": rebuilt["tasks"]}
+    for task in payload["tasks"]:
+        check_output_forbidden_words(task.get("notes", ""))
     status = cmms_client.push_work_order(state.machine_id, state.work_order,
-                                       payload=state.cmms_payload or _cmms_payload(state), delivery_key=thread_id)
+                                       payload=payload, delivery_key=thread_id, refresh_tasks=True)
     delivery = cmms_client.delivery_record(state.machine_id, state.work_order, thread_id)
     audit_log.log_event("external_push", thread_id=thread_id, target=f"설비#{state.machine_id}",
                         summary="CMMS Tasks 등록 재시도", result=status)
-    app.update_state({"configurable": {"thread_id": thread_id}}, {"cmms_delivery": delivery}, as_node="finalize")
+    app.update_state({"configurable": {"thread_id": thread_id}},
+                     {"cmms_delivery": delivery, "cmms_payload": payload}, as_node="finalize")
     return {"status": status, "cmms_delivery": _public_delivery(delivery)}
 
 _ERROR_REPR_RE = re.compile(r"^\s*([^\W\d][\w.]*)\(")

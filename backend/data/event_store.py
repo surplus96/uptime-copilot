@@ -3,8 +3,9 @@
 찾아낸 이벤트를 사용자가 사이드바에서 확인하고 직접 처리(삭제)할 수 있게 한다.
 """
 import sqlite3
-from datetime import datetime
 from pathlib import Path
+
+from data import runtime_dataset
 
 DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
 
@@ -53,7 +54,7 @@ def save_event(machine_id: int, severity: str, diagnosis: str, evidence_at: str 
     conn.execute(
         "INSERT OR REPLACE INTO detected_events (machine_id, severity, diagnosis, detected_at, evidence_at) "
         "VALUES (?, ?, ?, ?, ?)",
-        (machine_id, severity, diagnosis, datetime.now().isoformat(timespec="seconds"), evidence_at),
+        (machine_id, severity, diagnosis, runtime_dataset.local_now().isoformat(timespec="seconds"), evidence_at),
     )
     conn.commit()
     conn.close()
@@ -96,7 +97,7 @@ def complete_events(machine_ids: list[int]) -> int:
     rows = conn.execute(
         f"SELECT * FROM detected_events WHERE machine_id IN ({placeholders})", machine_ids
     ).fetchall()
-    completed_at = _dataset_now()
+    completed_at = runtime_dataset.local_now().isoformat(timespec="seconds")
     for r in rows:
         conn.execute(
             "INSERT INTO completed_events (machine_id, severity, diagnosis, detected_at, completed_at, evidence_at) "
@@ -129,6 +130,14 @@ def get_completed_evidence_map() -> dict[int, str]:
     ).fetchall()
     conn.close()
     return {r[0]: r[1] for r in rows}
+
+
+def completed_evidence_at(machine_id: int) -> str | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='completed_events'").fetchone():
+            return None
+        row = conn.execute("SELECT MAX(evidence_at) FROM completed_events WHERE machine_id=?", (machine_id,)).fetchone()
+    return row[0] if row else None
 
 
 def delete_events(machine_ids: list[int]) -> int:

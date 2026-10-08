@@ -17,7 +17,7 @@ import pandas as pd
 
 import notify
 from agent import agent_service
-from data import sim_engine, sim_query, sim_store
+from data import runtime_dataset, sim_engine, sim_query, sim_store
 from data.pdm_telemetry import _baseline
 
 DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
@@ -123,6 +123,9 @@ def status() -> dict:
     return {
         "running": running,
         "sim_now": sim_query.sim_only_now(),
+        "dataset_now": sim_query.dataset_now(),
+        "runtime_year": sim_query.runtime_year(),
+        "timezone": "Asia/Seoul",
         "hours_per_tick": SIM_HOURS_PER_TICK,
         "tick_seconds": SIM_TICK_SECONDS,
         "degrading": degrading,
@@ -158,9 +161,13 @@ def _age_component_for_injection(machine_id: int, comp: str) -> None:
             return
         target = _draw_machine_ages(f"{SIM_SEED}:inject:{machine_id}:{now}", {comp: floor})[comp]
         shift = pd.Timedelta(hours=target - newest_age)
+        bounds = runtime_dataset.window(conn)
         for rowid, dt in rows:
             if (now - pd.Timestamp(dt)).total_seconds() / 3600 < floor:
-                conn.execute("UPDATE sim_maint SET datetime=? WHERE rowid=?", (str((pd.Timestamp(dt) - shift).floor("h")), rowid))
+                shifted = (pd.Timestamp(dt) - shift).floor("h")
+                if bounds:
+                    shifted = max(shifted, pd.Timestamp(bounds[0]))
+                conn.execute("UPDATE sim_maint SET datetime=? WHERE rowid=?", (str(shifted), rowid))
         conn.commit()
     finally:
         conn.close()
@@ -219,6 +226,7 @@ def _seed_maintenance_history(conn: sqlite3.Connection, base_ts: pd.Timestamp, m
     달라지지 않는다. states를 주면, 이미 열화 중인(주입된) 설비의 그 신호 부품은 부품별 시작 하한
     (START_MIN_AGE_H) 이상으로만 심는다 - 어린 부품은 열화를 시작하지 않는다."""
     have = {(row[0], row[1]) for row in conn.execute('SELECT DISTINCT "machineID", comp FROM sim_maint')}
+    bounds = runtime_dataset.window(conn)
     for machine_id in machine_ids:
         if all((machine_id, comp) in have for comp in sim_engine.COMPONENTS):
             continue
@@ -232,6 +240,8 @@ def _seed_maintenance_history(conn: sqlite3.Connection, base_ts: pd.Timestamp, m
             if (machine_id, comp) in have:
                 continue
             ts = (base_ts - pd.Timedelta(hours=ages[comp])).floor("h")
+            if bounds:
+                ts = max(ts, pd.Timestamp(bounds[0]))
             conn.execute('INSERT INTO sim_maint ("datetime", "machineID", "comp") VALUES (?, ?, ?)', (str(ts), machine_id, comp))
 
 
@@ -286,7 +296,15 @@ def _tick_once() -> None:
         rng = _load_rng()
         states = sim_store.load_states()
         sim_last = sim_query.sim_only_now()
-        base_ts = pd.Timestamp(sim_last) if sim_last else pd.Timestamp.now().floor("h")
+        base_ts = pd.Timestamp(sim_last) if sim_last else pd.Timestamp(runtime_dataset.local_now()).floor("h")
+        year = sim_query.runtime_year()
+        if year:
+            anchor = sim_query.incident_start()
+            if anchor:
+                base_ts = max(base_ts, pd.Timestamp(anchor))
+            if (base_ts + pd.Timedelta(hours=SIM_HOURS_PER_TICK)).year != year:
+                stop()
+                raise ValueError(f"{year}년 테스트 범위를 넘어 시뮬레이터를 정지했습니다.")
         conn = sqlite3.connect(DB_PATH)
         try:
             _seed_maintenance_history(conn, base_ts, states.keys(), states)

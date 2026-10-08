@@ -10,8 +10,9 @@ OperationalError만 조용히 삼키고 아무 경고도 안 남겼다 - 실제�
 import logging
 import re
 import sqlite3
-from datetime import datetime
 from pathlib import Path
+
+from data import runtime_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ def log_event(
         conn.execute(
             "INSERT INTO audit_log (ts, thread_id, event_type, target, summary, result, provider) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (datetime.now().isoformat(timespec="seconds"), thread_id, event_type, target, summary, result, provider),
+            (runtime_dataset.local_now().isoformat(timespec="seconds"), thread_id, event_type, target, summary, result, provider),
         )
         conn.commit()
         conn.close()

@@ -22,6 +22,12 @@ def _baseline(machine_id: int) -> dict[str, tuple[float, float]]:
     충분하고, 시뮬레이션이 만드는 열화 데이터가 기준선에 섞여 들어가는 걸 막는다."""
     if machine_id not in _BASELINE_CACHE:
         conn = sqlite3.connect(DB_PATH)
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='telemetry_baselines'").fetchone():
+            stored = conn.execute("SELECT signal, mean, std FROM telemetry_baselines WHERE machine_id=?", (machine_id,)).fetchall()
+            if len(stored) == 4:
+                conn.close()
+                _BASELINE_CACHE[machine_id] = {sig: (mean, std) for sig, mean, std in stored}
+                return _BASELINE_CACHE[machine_id]
         df = pd.read_sql_query(
             "SELECT volt, rotate, pressure, vibration FROM telemetry WHERE machineID = ?",
             conn, params=(machine_id,),
