@@ -795,3 +795,20 @@ def test_failed_perspective_assessment_is_audited_as_failure_not_success(monkeyp
     assert out["perspective_assessments"][0]["is_fallback"] is True
     rows = [r for r in isolated_audit.list_events() if r["thread_id"] == "t-persp-fail"]
     assert [(r["event_type"], r["target"], r["result"]) for r in rows] == [("llm_call", "안전", "실패")]
+
+
+def test_diagnosis_baseline_survives_pending_recovery_and_rejection(monkeypatch):
+    _patch_common(monkeypatch, "긴급", machine_id=2)
+    monkeypatch.setattr(agent_service.sim_query, "dataset_now", lambda: "2026-10-26 03:00:00")
+    started = agent_service.start_agent("2번 설비 상태 확인", "snapshot-baseline")
+    assert started["machine_id"] == 2
+    assert started["diagnosis_as_of"] == "2026-10-26 03:00:00"
+    assert started["diagnosed_at"]
+    monkeypatch.setattr(agent_service.sim_query, "dataset_now", lambda: "2026-10-26 15:00:00")
+    pending = agent_service.check_pending("snapshot-baseline")
+    assert pending["diagnosis_as_of"] == started["diagnosis_as_of"]
+    finished = agent_service.resume_agent("snapshot-baseline", approved=False)
+    assert finished["diagnosis_as_of"] == started["diagnosis_as_of"]
+    assert finished["diagnosed_at"] == started["diagnosed_at"]
+    assert finished["work_order"] == started["work_order"]
+    assert agent_service.check_pending("snapshot-baseline")["diagnosis_as_of"] == started["diagnosis_as_of"]

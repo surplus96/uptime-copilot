@@ -21,7 +21,7 @@ import cmms_client
 import notify
 from core import llm_provider, offline_guard
 from core.harness import check_output_forbidden_words
-from data import audit_log, event_store, pdm_operations, pdm_telemetry, sim_query, work_order_view
+from data import audit_log, event_store, pdm_operations, pdm_telemetry, runtime_dataset, sim_query, work_order_view
 from ml.predict import predict_failure_risk
 from rag.pump_manual import ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES, SIGNAL_TO_COMPONENT
 
@@ -49,6 +49,8 @@ class SupervisorState(BaseModel):
     machine_id: int | None = None
     severity: str | None = None
     diagnosis: str | None = None
+    diagnosis_as_of: str | None = None
+    diagnosed_at: str | None = None
     involved_components: list[str] = []
     component_evidence: dict[str, str] = {}
     component_manuals: dict[str, str] = {}   # 부품별 매뉴얼 증상 설명
@@ -309,7 +311,9 @@ def diagnosis_node(state: SupervisorState) -> dict:
     추출 호출을 하지 않는다(2026-09-25, 라우팅+추출 호출 병합으로 지연 절감)."""
     if state.machine_id is None:
         return {"severity": "일반", "diagnosis": "몇 번 설비인지 알려주시겠어요? 예: '3번 설비 상태가 이상해요'"}
+    baseline = sim_query.dataset_now()
     result = _diagnose_machine(state.machine_id)
+    result.update(diagnosis_as_of=baseline, diagnosed_at=runtime_dataset.local_now().isoformat(timespec="seconds"))
     logger.info(f"[진단] machine #{state.machine_id} -> {result['severity']}")
     return {k: v for k, v in result.items() if k != "evidence_at"}
 
@@ -825,6 +829,12 @@ def _validate_output(state_dict: dict) -> None:
         check_output_forbidden_words(json.dumps(state_dict["work_order_data"], ensure_ascii=False))
 
 
+def _diagnosis_metadata(values: dict) -> dict:
+    """Keep observation time stable through approval and recovery; old checkpoints stay unknown."""
+    return {"machine_id": values.get("machine_id"), "diagnosis_as_of": values.get("diagnosis_as_of"),
+            "diagnosed_at": values.get("diagnosed_at")}
+
+
 def start_agent(user_message: str, thread_id: str) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
     result = app.invoke(SupervisorState(user_message=user_message, thread_id=thread_id), config=config)
@@ -837,10 +847,11 @@ def start_agent(user_message: str, thread_id: str) -> dict:
             "work_order": payload.get("work_order"),
             "work_order_data": payload.get("work_order_data"),
             "perspectives": payload.get("perspectives", []),
+            **_diagnosis_metadata(result),
         }
     _validate_output(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order"),
-            "work_order_data": work_order_view.build(result)}
+            "work_order_data": work_order_view.build(result), **_diagnosis_metadata(result)}
 
 
 def resume_agent(thread_id: str, approved: bool) -> dict:
@@ -848,7 +859,7 @@ def resume_agent(thread_id: str, approved: bool) -> dict:
     result = app.invoke(Command(resume=approved), config=config)
     _validate_output(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order"),
-            "cmms_delivery": _public_delivery(result.get("cmms_delivery", {})), "work_order_data": work_order_view.build(result)}
+            "cmms_delivery": _public_delivery(result.get("cmms_delivery", {})), "work_order_data": work_order_view.build(result), **_diagnosis_metadata(result)}
 
 
 def _public_delivery(delivery: dict) -> dict:
@@ -922,7 +933,7 @@ def check_pending(thread_id: str) -> dict | None:
         # 경로를 타면 원래는 차단됐어야 할 응답이 검증 없이 그대로 나갈 수 있었다.
         payload = {"status": "done", "result": result, "work_order": state.values.get("work_order"),
                    "cmms_delivery": _public_delivery(state.values.get("cmms_delivery", {})),
-                   "work_order_data": work_order_view.build(state.values)}
+                   "work_order_data": work_order_view.build(state.values), **_diagnosis_metadata(state.values)}
         _validate_output(payload)
         return payload
     for task in state.tasks:
@@ -935,6 +946,7 @@ def check_pending(thread_id: str) -> dict | None:
                 "work_order": payload.get("work_order"),
                 "work_order_data": payload.get("work_order_data"),
                 "perspectives": payload.get("perspectives", []),
+                **_diagnosis_metadata(state.values),
             }
     # 2026-09-30 pipeline-optimizer 지적(실행으로 확인): 여기까지 왔다는 건 다음에 실행할 노드가
     # 남아 있는데 승인 대기(interrupt)는 아니라는 뜻이다 - 예전엔 이 경우 None(=not_found)을

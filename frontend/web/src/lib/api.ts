@@ -5,15 +5,18 @@ export interface Simulator {
   running: boolean; dataset_now: string | null; sim_now: string | null; timezone: string;
   hours_per_tick: number; tick_seconds: number; last_error: string | null;
   consecutive_failures: number; has_stale_events: boolean;
-  degrading: { machine_id: number; state: string; signal: string; drift_sigma: number; progress: number }[];
+  recent_failures?: { datetime: string; machine_id: number; component: string }[];
+  degrading: { machine_id: number; state: string; signal: string; drift_sigma: number; progress: number; hours_until_failure?: number | null; failure_due_at?: string | null }[];
 }
 export interface Delivery { status?: string; display_id?: string; work_order_id?: number; error?: string }
-export type AgentResult =
+export interface DiagnosisMetadata { machine_id?: number | null; diagnosis_as_of?: string | null; diagnosed_at?: string | null }
+export type AgentResult = DiagnosisMetadata & (
   | { status: 'pending_approval'; message: string; work_order?: string; work_order_data?: WorkOrderData | null; perspectives?: string[] }
   | { status: 'done'; result: string; work_order?: string; work_order_data?: WorkOrderData | null; cmms_delivery?: Delivery }
   | { status: 'running'; next?: string[] }
   | { status: 'failed'; error_type?: string }
   | { status: 'not_found' }
+)
 export interface InventoryRow {
   component: string; part_name: string; on_hand: number; lead_time_days: number;
   demand_30d: number; demand_90d: number; eol_status: string; eol_date: string | null;
@@ -87,7 +90,14 @@ export interface WorkOrderData {
   components: { component: string; evidence: string; manual: string; action: string; steps: string[];
     procurement: { part_no: string | null; on_hand: number | null; min_stock: number | null; lead_time_days: number | null; needs_procurement: boolean | null; eol_status: string | null; eol_date: string | null } | null }[];
 }
+export interface MachineStatus {
+  machine_id: number; dataset_now: string | null; latest_observation_at: string | null;
+  simulation_state: string | null; hours_until_failure: number | null; failure_due_at: string | null;
+  event: { severity: string; diagnosis: string; detected_at: string; evidence_at: string | null } | null;
+  latest_failure: { datetime: string; component: string } | null; queried_at: string; timezone: string;
+}
 export const operationsApi = {
+  currentStatus: (id: number) => request<MachineStatus>(`/machines/${id}/status`),
   machines: (params: URLSearchParams) => request<MachineList>(`/machines?${params}`),
   telemetry: (id: number, hours: number, bucket: number) => request<Telemetry>(`/machines/${id}/telemetry?hours=${hours}&bucket_hours=${bucket}`),
   approvals: (offset = 0, limit = 20) => request<Approvals>(`/agent/approvals?offset=${offset}&limit=${limit}`),

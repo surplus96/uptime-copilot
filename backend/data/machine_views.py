@@ -111,3 +111,50 @@ def telemetry(machine_id: int, hours: int = 24, bucket_hours: int = 1) -> dict:
             "hours": hours, "bucket_hours": bucket_hours, "aggregation": "mean", "unique_samples": len(merged),
             "expected_samples": hours if reference else 0, "duplicate_samples": duplicates,
             "window_start": str(start) if start else None, "window_end": str(end) if end else None, "points": points}
+
+
+def current_status(machine_id: int) -> dict:
+    """Read live observations and recorded events without invoking diagnosis or a graph."""
+    info = pdm_operations.get_machine_info(machine_id)
+    if "error" in info:
+        raise KeyError(machine_id)
+    reference = sim_query.dataset_now()
+    phase = None
+    latest = None
+    event = None
+    failure = None
+    timing = {"hours_until_failure": None, "failure_due_at": None}
+    with sim_query.readonly_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        scope, args = _bounds(conn)
+        for table in _tables(conn):
+            value = conn.execute(f'SELECT MAX(datetime) FROM {table} WHERE machineID=?{scope}', (machine_id, *args)).fetchone()[0]
+            if value and (latest is None or value > latest):
+                latest = value
+        if "sim_state" in present:
+            row = conn.execute("SELECT * FROM sim_state WHERE machine_id=?", (machine_id,)).fetchone()
+            if row:
+                from data.sim_engine import MachineSim
+                from data.sim_view import failure_timing
+                phase = row["state"]
+                timing = failure_timing(MachineSim(**dict(row)), reference)
+        if "detected_events" in present:
+            row = conn.execute("SELECT severity, diagnosis, detected_at, evidence_at FROM detected_events WHERE machine_id=?", (machine_id,)).fetchone()
+            if row:
+                event = dict(row)
+        active = runtime_dataset.policy(conn)
+        incident_start = active.get("incident_start") if active else None
+        for table in ("failures", "sim_failures"):
+            if table not in present:
+                continue
+            extra = " AND datetime>?" if incident_start else ""
+            values = (machine_id, *args, incident_start) if incident_start else (machine_id, *args)
+            row = conn.execute(
+                f'SELECT datetime, failure AS component FROM {table} WHERE machineID=?{scope}{extra} ORDER BY datetime DESC LIMIT 1', values,
+            ).fetchone()
+            if row and (failure is None or row["datetime"] >= failure["datetime"]):
+                failure = dict(row)
+    return {"machine_id": machine_id, "dataset_now": reference, "latest_observation_at": latest,
+            "simulation_state": phase, "event": event, "latest_failure": failure, **timing,
+            "queried_at": runtime_dataset.local_now().isoformat(timespec="seconds"), "timezone": "Asia/Seoul"}

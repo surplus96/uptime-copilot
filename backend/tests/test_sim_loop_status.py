@@ -213,3 +213,43 @@ def test_tick_reads_state_and_rng_while_holding_the_lock(monkeypatch):
         pass
 
     assert seen == {"rng_locked": True, "states_locked": True}
+
+
+def test_countdown_handles_precursor_after_nominal_lead_and_exact_failure_slot():
+    import random
+
+    from data.sim_engine import MachineSim, step
+    from data.sim_view import failure_timing
+
+    machine = MachineSim(2, state="FAULT", signal="volt", direction=1, drift_sigma=4.5,
+                         lead_hours=44, elapsed=60, errors_emitted=1)
+    timing = failure_timing(machine, "2026-10-26 03:00:00")
+    assert timing == {"hours_until_failure": 3, "failure_due_at": "2026-10-26 06:00:00"}
+    assert machine.elapsed == 60  # Reading the countdown does not advance it.
+    for hour in (4, 5):
+        assert step(machine, random.Random(42), hour)["failure"] is None
+    assert step(machine, random.Random(42), 6)["failure"] == "comp1"
+    assert machine.state == "HEALTHY"
+    assert failure_timing(machine, "2026-10-26 06:00:00")["hours_until_failure"] is None
+
+
+def test_simulator_status_exposes_countdown_and_actual_failure_history(tmp_path, monkeypatch):
+    import sqlite3
+
+    from data import event_store, sim_query, sim_store
+    from data.sim_engine import MachineSim
+
+    path = str(tmp_path / "sim_status.db")
+    for module in (sim_loop, sim_store, sim_query, event_store):
+        monkeypatch.setattr(module, "DB_PATH", path)
+    sim_store.init_sim_tables()
+    event_store.init_event_table()
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE telemetry (datetime TEXT, machineID INTEGER)")
+        conn.execute("INSERT INTO telemetry VALUES ('2026-10-26 03:00:00', 2)")
+        conn.execute("INSERT INTO sim_failures VALUES ('2026-10-25 06:00:00', 3, 'comp2')")
+    sim_store.save_states({2: MachineSim(2, state="FAULT", signal="volt", direction=1, lead_hours=44, elapsed=60)})
+    result = sim_loop.status()
+    assert result["degrading"][0]["hours_until_failure"] == 3
+    assert result["recent_failures"] == [{"datetime": "2026-10-25 06:00:00", "machine_id": 3, "component": "comp2"}]
+    assert result["running"] is False

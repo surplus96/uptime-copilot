@@ -147,3 +147,32 @@ def test_structured_order_preserves_original_and_refuses_pii():
     values["component_evidence"]["comp1"] = "010-1234-5678"
     with pytest.raises(HarnessRejectedError):
         work_order_view.build(values)
+
+
+def test_live_machine_status_separates_precursor_from_recorded_failure(ui_db):
+    with sqlite3.connect(ui_db) as conn:
+        conn.execute("CREATE TABLE sim_state (machine_id INTEGER, state TEXT, signal TEXT, direction INTEGER, drift_sigma REAL, lead_hours INTEGER, elapsed INTEGER, errors_emitted INTEGER)")
+        conn.execute("INSERT INTO sim_state VALUES (1, 'FAULT', 'volt', 1, 4.5, 44, 60, 1)")
+        conn.execute("CREATE TABLE sim_failures (datetime TEXT, machineID INTEGER, failure TEXT)")
+        conn.execute("CREATE TABLE detected_events (machine_id INTEGER, severity TEXT, diagnosis TEXT, detected_at TEXT, evidence_at TEXT)")
+        conn.execute("INSERT INTO detected_events VALUES (1, '주의', '전조 경보', '2026-10-19 12:00:00', '2026-10-19 12:00:00')")
+    status = machine_views.current_status(1)
+    assert status["simulation_state"] == "FAULT"
+    assert status["event"]["severity"] == "주의"
+    assert status["latest_failure"] is None
+    assert status["hours_until_failure"] == 18  # Reference is 12:00, next failure slot is 06:00.
+    with sqlite3.connect(ui_db) as conn:
+        conn.execute("INSERT INTO sim_failures VALUES ('2026-10-19 06:00:00', 1, 'comp1')")
+        conn.execute("UPDATE sim_state SET state='HEALTHY'")
+    status = machine_views.current_status(1)
+    assert status["simulation_state"] == "HEALTHY"
+    assert status["latest_failure"] == {"datetime": "2026-10-19 06:00:00", "component": "comp1"}
+    assert status["hours_until_failure"] is None
+    # Querying status must not write a simulator state or create another failure.
+    with sqlite3.connect(ui_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sim_failures").fetchone()[0] == 1
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        assert client.get("/machines/1/status").json()["latest_failure"]["component"] == "comp1"
+        assert client.get("/machines/4/status").status_code == 404

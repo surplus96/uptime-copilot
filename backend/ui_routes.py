@@ -34,6 +34,16 @@ def machine_telemetry(
         raise HTTPException(status_code=503, detail="설비 마스터 CSV가 준비되지 않았습니다.") from exc
 
 
+@router.get("/machines/{machine_id}/status")
+def machine_status(machine_id: Annotated[int, Path(ge=1, le=100)]):
+    try:
+        return machine_views.current_status(machine_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="설비를 찾지 못했습니다.") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="설비 마스터 CSV가 준비되지 않았습니다.") from exc
+
+
 @router.get("/agent/approvals")
 def pending_approvals(offset: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100)] = 20):
     from agent import agent_service

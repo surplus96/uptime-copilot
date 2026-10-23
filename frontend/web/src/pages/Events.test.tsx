@@ -9,7 +9,10 @@ function mount(page: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   return render(<QueryClientProvider client={client}><MemoryRouter>{page}</MemoryRouter></QueryClientProvider>)
 }
-beforeEach(() => { vi.unstubAllGlobals() })
+beforeEach(() => {
+  vi.spyOn(api, 'simulator').mockResolvedValue({ running: false, dataset_now: null, sim_now: null, timezone: 'Asia/Seoul', hours_per_tick: 12, tick_seconds: 15, last_error: null, consecutive_failures: 0, has_stale_events: false, degrading: [] })
+  vi.unstubAllGlobals()
+})
 describe('event workflow', () => {
   it('links the selected event to a diagnosis with the correct machine context', async () => {
     vi.spyOn(api, 'events').mockResolvedValue({ total: 1, events: [{ machine_id: 84, severity: '긴급', diagnosis: '진동 이상', detected_at: '2026-10-19 10:00:00', evidence_at: '2026-10-19 09:00:00' }] })

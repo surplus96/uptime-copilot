@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowRight, ClipboardCheck, RefreshCw, Send, ShieldCheck, Sparkles } from 'lucide-react'
 import { api, ApiError, deliveryLabels, type AgentResult, type WorkOrderData } from '../lib/api'
+import { DiagnosisContext } from '../components/DiagnosisContext'
 import { useHealth } from '../lib/queries'
 import { Badge, Button, Card, Confirm, Empty, ErrorNotice, Notice, PageTitle } from '../components/ui'
 
@@ -26,7 +27,7 @@ export function WorkOrder({ text, data }: { text: string; data?: WorkOrderData |
 }
 export default function AgentPage() {
   const [params, setParams] = useSearchParams()
-  const thread = params.get('thread') ?? '', machine = params.get('machine') ?? ''
+  const thread = params.get('thread') ?? '', machine = params.get('machine') ?? '', previous = params.get('previous') ?? ''
   const [message, setMessage] = useState(machine ? `${machine}번 설비 상태를 진단해줘` : '')
   const [feedback, setFeedback] = useState('')
   const [unconfirmedThreads, setUnconfirmedThreads] = useState<Record<string, boolean>>({})
@@ -76,13 +77,21 @@ export default function AgentPage() {
     if (!message.trim() || active || status.isFetching || status.isError) return
     const newThread = crypto.randomUUID()
     client.setQueryData(['agent', newThread], { status: 'running' })
-    setParams({ ...(machine ? { machine } : {}), thread: newThread })
+    setParams({ ...(machine ? { machine } : {}), ...(previous ? { previous } : {}), thread: newThread })
     operation.mutate({ kind: 'query', thread: newThread, message: message.trim() })
+  }
+  function prepareLatestDiagnosis(id: number) {
+    if (busy || unconfirmed || status.isFetching || status.isError) return
+    setMessage(`${id}번 설비의 최신 상태를 진단해줘`)
+    setFeedback('')
+    setParams({ machine: String(id), previous: thread })
   }
   const canDecide = !busy && !unconfirmed && !status.isFetching && !status.isError
   return <><PageTitle eyebrow="AI MAINTENANCE COPILOT" title="AI 설비 진단" actions={<Link className="button button-secondary" to="/events">이벤트 목록 <ArrowRight size={16} /></Link>}>설비 이력과 매뉴얼을 바탕으로 진단하고, 작업지시서를 검토하세요.</PageTitle>
     <div className="agent-grid"><Card className="conversation"><div className="card-heading"><h2><Sparkles size={19} />설비 에이전트</h2>{machine && <Badge>설비 #{machine}</Badge>}</div>
       <form onSubmit={submit} className="diagnosis-form"><label htmlFor="diagnosis-message">설비 번호와 증상</label><textarea id="diagnosis-message" value={message} onChange={e => setMessage(e.target.value)} rows={4} placeholder="예: 64번 설비에서 오류가 났는데 뭐가 문제야?" /><div className="form-bottom"><span className="caption">새 요청은 별도 진단 URL로 생성됩니다.</span><Button disabled={!message.trim() || active || status.isFetching || status.isError}><Send size={16} />진단 요청</Button></div></form>
+      {previous && previous !== thread && <Notice><Link className="text-link" to={`/agent?thread=${encodeURIComponent(previous)}${machine ? `&machine=${encodeURIComponent(machine)}` : ''}`}>이전 진단 보기</Link>{!thread && <p>기존 진단은 보존됩니다. 입력된 질문을 확인한 뒤 ‘진단 요청’을 누르면 별도의 진단이 생성됩니다.</p>}</Notice>}
+      {!!thread && result && (result.status === 'done' || result.status === 'pending_approval') && <DiagnosisContext result={result} machineHint={machine} canPrepare={!busy && !unconfirmed && !status.isFetching && !status.isError} onPrepare={prepareLatestDiagnosis} />}
       {!thread && <Empty><Sparkles size={30} /><h3>어떤 설비를 살펴볼까요?</h3><p>설비 번호와 증상을 입력하거나 예시로 시작하세요.</p><div className="example-questions">{['64번 설비에서 오류 났는데 뭐가 문제야?', '5번 설비 상태 확인해줘', '1번 설비 다음 점검은 언제야?'].map(q => <Button key={q} variant="secondary" onClick={() => setMessage(q)}>{q}<ArrowUpIcon /></Button>)}</div></Empty>}
       {thread && <><div className="thread-bar"><span>진단 ID <code>{thread}</code></span><Button variant="ghost" onClick={() => void checkStatus()} disabled={busy || status.isFetching}><RefreshCw size={15} />상태 확인</Button></div><p className="caption">현재 URL로 이 진단을 다시 열 수 있습니다. 화면 이동·닫기는 서버 요청을 취소하지 않습니다.</p></>}
       <ErrorNotice error={operation.variables?.thread === thread ? operation.error : null} /><ErrorNotice error={status.error} />{feedback && <Notice>{feedback}</Notice>}

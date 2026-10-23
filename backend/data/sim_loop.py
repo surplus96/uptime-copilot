@@ -17,7 +17,7 @@ import pandas as pd
 
 import notify
 from agent import agent_service
-from data import runtime_dataset, sim_engine, sim_query, sim_store
+from data import runtime_dataset, sim_engine, sim_query, sim_store, sim_view
 from data.pdm_telemetry import _baseline
 
 DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
@@ -103,17 +103,28 @@ def reset() -> None:
 
 def status() -> dict:
     states = sim_store.load_states()
+    reference = sim_query.dataset_now()
     degrading = [
         {
             "machine_id": m.machine_id, "state": m.state, "signal": m.signal,
             "direction": m.direction, "drift_sigma": round(m.drift_sigma, 2),
             "progress": round(m.elapsed / m.lead_hours, 2) if m.lead_hours else 0.0,
             "errors_emitted": m.errors_emitted,
+            **sim_view.failure_timing(m, reference),
         }
         for m in states.values() if m.state != "HEALTHY"
     ]
     conn = sqlite3.connect(DB_PATH)
     has_events = conn.execute("SELECT COUNT(*) FROM detected_events").fetchone()[0] > 0
+    scope = sim_query.runtime_year()
+    params: tuple = ()
+    where = ""
+    if scope:
+        where = " WHERE datetime>=? AND datetime<?"
+        params = (f"{scope}-01-01 00:00:00", f"{scope + 1}-01-01 00:00:00")
+    recent_failures = [dict(zip(("datetime", "machine_id", "component"), row)) for row in conn.execute(
+        f'SELECT datetime, machineID, failure FROM sim_failures{where} ORDER BY datetime DESC, machineID LIMIT 20', params,
+    ).fetchall()]
     conn.close()
 
     running = is_running()
@@ -123,7 +134,8 @@ def status() -> dict:
     return {
         "running": running,
         "sim_now": sim_query.sim_only_now(),
-        "dataset_now": sim_query.dataset_now(),
+        "dataset_now": reference,
+        "recent_failures": recent_failures,
         "runtime_year": sim_query.runtime_year(),
         "timezone": "Asia/Seoul",
         "hours_per_tick": SIM_HOURS_PER_TICK,

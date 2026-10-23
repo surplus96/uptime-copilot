@@ -14,6 +14,7 @@ function mount(page: React.ReactNode, path = '/') {
   return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}>{page}</MemoryRouter></QueryClientProvider>)
 }
 beforeEach(() => {
+  vi.spyOn(api, 'simulator').mockResolvedValue({ running: false, dataset_now: null, sim_now: null, timezone: 'Asia/Seoul', hours_per_tick: 12, tick_seconds: 15, last_error: null, consecutive_failures: 0, has_stale_events: false, degrading: [] })
   vi.spyOn(operationsApi, 'approvals').mockResolvedValue({ total: 0, approvals: [], offset: 0, limit: 20 })
 })
 describe('phase 2 operations views', () => {
