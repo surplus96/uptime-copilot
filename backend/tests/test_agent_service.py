@@ -599,6 +599,8 @@ def test_check_pending_recovers_pending_approval(monkeypatch):
     assert recovered is not None
     assert recovered["status"] == "pending_approval"
     assert recovered["work_order"] == started["work_order"]
+    assert recovered["work_order_data"] == started["work_order_data"]
+    assert recovered["work_order_data"]["components"][0]["component"] == "comp1"
 
 
 def test_check_pending_recovers_completed_non_urgent_request(monkeypatch):

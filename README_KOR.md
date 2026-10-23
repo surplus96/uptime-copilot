@@ -13,6 +13,10 @@ RAG + 멀티에이전트 백엔드(FastAPI/LangGraph)와 Streamlit 프론트엔�
 
 > 📄 **[포트폴리오 케이스 스터디 →](docs/PORTFOLIO_KOR.md)** — 아키텍처, 설계 결정, 엔지니어링 사례.
 
+React 운영 UI 전환을 시작했습니다. 기존 Streamlit과 병행 실행할 수 있으며,
+[실행 안내](frontend/web/README.md)와 [전환 계획](docs/design/REACT_UI_MIGRATION_PLAN.md)을 참고하세요.
+새 UI는 `frontend/web/`에 있으며 기본 Compose 진입점은 아직 Streamlit입니다.
+
 > **한화의 TOMMS/HUMS 공개 자료에서 착안한 독립 프로젝트**입니다 — 한화와 제휴·후원 관계가
 > 없으며 한화를 위해 만들어진 것도 아닙니다. 부품번호·재고·리드타임·단가·단종일은 모두
 > 합성값입니다. 수요 예측에 쓰는 교체 이력은 공개 Azure PdM 데이터셋의 것이며, 그 데이터셋

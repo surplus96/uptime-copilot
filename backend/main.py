@@ -43,6 +43,7 @@ from core.harness import (
 )
 from data import audit_log, event_store, runtime_dataset, sim_loop, sim_store
 from rag import rag_service
+from ui_routes import router as ui_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,6 +150,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=f"AI Agent RAG Backend ({llm_provider.get_provider_name()})", lifespan=lifespan)
+
+app.include_router(ui_router)
 
 # ---------- 커스텀 예외 ---------------
 
@@ -365,8 +368,11 @@ class EventIdsRequest(BaseModel):
 
 
 @app.get("/events")
-def get_events(limit: int = 10):
-    return event_store.list_events(limit=limit)
+def get_events(
+    limit: Annotated[int, Query(ge=1, le=1000)] = 10, offset: Annotated[int, Query(ge=0)] = 0,
+    severity: Literal["긴급", "주의"] | None = None, search: Annotated[str, Query(max_length=100)] = "",
+):
+    return event_store.list_events(limit=limit, offset=offset, severity=severity, search=search.strip())
 
 @app.get("/parts/inventory_risk")
 def parts_inventory_risk():

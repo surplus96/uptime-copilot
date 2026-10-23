@@ -60,15 +60,26 @@ def save_event(machine_id: int, severity: str, diagnosis: str, evidence_at: str 
     conn.close()
 
 
-def list_events(limit: int = 10) -> dict:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    total = conn.execute("SELECT COUNT(*) FROM detected_events").fetchone()[0]
-    rows = conn.execute(
-        "SELECT * FROM detected_events ORDER BY severity, detected_at DESC LIMIT ?", (limit,)
-    ).fetchall()
-    conn.close()
-    return {"total": total, "events": [dict(r) for r in rows]}
+def list_events(limit: int = 10, offset: int = 0, severity: str | None = None, search: str = "") -> dict:
+    limit, offset = max(1, min(limit, 1000)), max(0, offset)
+    clauses, params = [], []
+    if severity:
+        clauses.append("severity=?")
+        params.append(severity)
+    if search:
+        clauses.append("(instr(CAST(machine_id AS TEXT), ?) > 0 OR instr(diagnosis, ?) > 0)")
+        params.extend([search, search])
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        total = conn.execute(f"SELECT COUNT(*) FROM detected_events{where}", params).fetchone()[0]
+        counts = {row[0]: row[1] for row in conn.execute("SELECT severity, COUNT(*) FROM detected_events GROUP BY severity")}
+        rows = conn.execute(
+            f"SELECT * FROM detected_events{where} ORDER BY CASE severity WHEN '긴급' THEN 0 WHEN '주의' THEN 1 ELSE 2 END, detected_at DESC, machine_id LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+    return {"total": total, "events": [dict(r) for r in rows], "offset": offset, "limit": limit,
+            "summary": {"total": sum(counts.values()), "urgent": counts.get("긴급", 0), "warning": counts.get("주의", 0)}}
 
 def _dataset_now() -> str | None:
     """실제 벽시계가 아니라, 시뮬레이터가 매 틱 전진시키는 telemetry 자체의 최신 시각을

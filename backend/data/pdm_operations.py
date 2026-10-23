@@ -48,6 +48,11 @@ def _query_df(sql: str, params: tuple = ()) -> pd.DataFrame:
     return df
 
 
+def list_machine_info() -> list[dict]:
+    """Public machine catalog for read-only UI views."""
+    return _machines()[["machineID", "model", "age"]].to_dict(orient="records")
+
+
 def get_machine_info(machine_id: int) -> dict:
     row = _machines()[_machines()["machineID"] == machine_id]
     return row.iloc[0].to_dict() if not row.empty else {"error": f"machineID {machine_id} 없음"}

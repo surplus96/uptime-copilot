@@ -4,11 +4,23 @@
 sim_* 테이블이 아직 없어도(시뮬레이터를 한 번도 안 켰을 때) 원본만으로 조용히 동작한다.
 """
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from data import runtime_dataset
 
 DB_PATH = str(Path(__file__).parent.parent / "store" / "pdm_telemetry.db")
+
+
+@contextmanager
+def readonly_connection() -> Iterator[sqlite3.Connection]:
+    """UI queries share the configured database and cannot create or mutate it."""
+    conn = sqlite3.connect(Path(DB_PATH).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _scope(conn: sqlite3.Connection) -> tuple[str, tuple]:

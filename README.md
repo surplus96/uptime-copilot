@@ -1,5 +1,9 @@
 # Uptime Copilot
 
+The React operations UI is being introduced alongside Streamlit. See the
+[React UI guide](frontend/web/README.md) and [migration plan](docs/design/REACT_UI_MIGRATION_PLAN.md).
+The new app lives in `frontend/web/`; the default Compose entry point remains Streamlit.
+
 [![English](https://img.shields.io/badge/English-current-0c7c8c?style=for-the-badge)](README.md)
 [![한국어](https://img.shields.io/badge/한국어-switch-555555?style=for-the-badge)](README_KOR.md)
 

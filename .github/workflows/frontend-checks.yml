@@ -1,0 +1,23 @@
+name: React frontend checks
+on:
+  push:
+    branches: [main, workspace-mac, workspace-mac-2]
+    paths: ['frontend/web/**', '.github/workflows/frontend-checks.yml', 'docker-compose.web.yml']
+  pull_request:
+    paths: ['frontend/web/**', '.github/workflows/frontend-checks.yml', 'docker-compose.web.yml']
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

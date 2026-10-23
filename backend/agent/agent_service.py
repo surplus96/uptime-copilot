@@ -4,6 +4,7 @@
 HITL 체크포인트를 추가한다.
 """
 
+import json
 import logging
 import operator
 import re
@@ -20,7 +21,7 @@ import cmms_client
 import notify
 from core import llm_provider, offline_guard
 from core.harness import check_output_forbidden_words
-from data import audit_log, event_store, pdm_operations, pdm_telemetry, sim_query
+from data import audit_log, event_store, pdm_operations, pdm_telemetry, sim_query, work_order_view
 from ml.predict import predict_failure_risk
 from rag.pump_manual import ERROR_TO_COMPONENT, PUMP_MAINTENANCE_PROCEDURES, SIGNAL_TO_COMPONENT
 
@@ -687,6 +688,7 @@ def approval_node(state: SupervisorState) -> dict:
         "message": f"[승인 필요] 설비 #{state.machine_id}에서 긴급 상황 발생.\n\n{state.work_order}{extra}\n\n"
                 f"이 작업지시서로 현장 책임자에게 즉시 보고를 진행할까요?",
         "work_order": state.work_order,
+        "work_order_data": work_order_view.build(state.model_dump()),
         "perspectives": state.perspectives,
     })
 
@@ -819,6 +821,8 @@ def _validate_output(state_dict: dict) -> None:
     for text in (state_dict.get("work_order"), state_dict.get("result")):
         if text:
             check_output_forbidden_words(text)
+    if state_dict.get("work_order_data"):
+        check_output_forbidden_words(json.dumps(state_dict["work_order_data"], ensure_ascii=False))
 
 
 def start_agent(user_message: str, thread_id: str) -> dict:
@@ -831,10 +835,12 @@ def start_agent(user_message: str, thread_id: str) -> dict:
             "status": "pending_approval",
             "message": payload["message"],
             "work_order": payload.get("work_order"),
+            "work_order_data": payload.get("work_order_data"),
             "perspectives": payload.get("perspectives", []),
         }
     _validate_output(result)
-    return {"status": "done", "result": result["result"], "work_order": result.get("work_order")}
+    return {"status": "done", "result": result["result"], "work_order": result.get("work_order"),
+            "work_order_data": work_order_view.build(result)}
 
 
 def resume_agent(thread_id: str, approved: bool) -> dict:
@@ -842,7 +848,7 @@ def resume_agent(thread_id: str, approved: bool) -> dict:
     result = app.invoke(Command(resume=approved), config=config)
     _validate_output(result)
     return {"status": "done", "result": result["result"], "work_order": result.get("work_order"),
-            "cmms_delivery": _public_delivery(result.get("cmms_delivery", {}))}
+            "cmms_delivery": _public_delivery(result.get("cmms_delivery", {})), "work_order_data": work_order_view.build(result)}
 
 
 def _public_delivery(delivery: dict) -> dict:
@@ -915,7 +921,8 @@ def check_pending(thread_id: str) -> dict | None:
         # 막는데, 이 done 분기는 그 검사를 빼먹고 있었다 - 타임아웃으로 이 복구
         # 경로를 타면 원래는 차단됐어야 할 응답이 검증 없이 그대로 나갈 수 있었다.
         payload = {"status": "done", "result": result, "work_order": state.values.get("work_order"),
-                   "cmms_delivery": _public_delivery(state.values.get("cmms_delivery", {}))}
+                   "cmms_delivery": _public_delivery(state.values.get("cmms_delivery", {})),
+                   "work_order_data": work_order_view.build(state.values)}
         _validate_output(payload)
         return payload
     for task in state.tasks:
@@ -926,6 +933,7 @@ def check_pending(thread_id: str) -> dict | None:
                 "status": "pending_approval",
                 "message": payload["message"],
                 "work_order": payload.get("work_order"),
+                "work_order_data": payload.get("work_order_data"),
                 "perspectives": payload.get("perspectives", []),
             }
     # 2026-09-30 pipeline-optimizer 지적(실행으로 확인): 여기까지 왔다는 건 다음에 실행할 노드가
@@ -938,3 +946,22 @@ def check_pending(thread_id: str) -> dict | None:
         if task.error is not None:
             return {"status": "failed", "error_type": _error_type_name(task.error)}
     return {"status": "running", "next": list(state.next)}
+
+
+def list_pending_approvals(offset: int = 0, limit: int = 20) -> dict:
+    """Read the latest root checkpoint per thread. Never invoke or resume a graph."""
+    with app.checkpointer.cursor(transaction=False) as cursor:
+        thread_ids = [row[0] for row in cursor.execute(
+            "SELECT thread_id FROM checkpoints WHERE checkpoint_ns='' GROUP BY thread_id ORDER BY MAX(checkpoint_id) DESC",
+        ).fetchall()]
+    pending = []
+    for thread_id in thread_ids:
+        snapshot = app.get_state({"configurable": {"thread_id": thread_id}})
+        if not snapshot.next or not any(task.interrupts for task in snapshot.tasks):
+            continue
+        machine = snapshot.values.get("machine_id")
+        priority = snapshot.values.get("priority")
+        pending.append({"thread_id": thread_id, "machine_id": machine if type(machine) is int else None,
+                        "priority": priority if priority in ("P1", "P2", "P3") else None,
+                        "updated_at": snapshot.created_at})
+    return {"total": len(pending), "approvals": pending[offset:offset + limit], "offset": offset, "limit": limit}

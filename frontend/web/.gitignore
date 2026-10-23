@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.sites-runtime/
+# The repository's Python ignore rules exclude all lib/ directories.
+!src/lib/
+!src/lib/**
