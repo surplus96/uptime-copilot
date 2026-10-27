@@ -2,9 +2,9 @@ name: React frontend checks
 on:
   push:
     branches: [main, workspace-mac, workspace-mac-2]
-    paths: ['frontend/web/**', '.github/workflows/frontend-checks.yml', 'docker-compose.web.yml']
+    paths: ['frontend/web/**', '.github/workflows/frontend-checks.yml', 'docker-compose.yml']
   pull_request:
-    paths: ['frontend/web/**', '.github/workflows/frontend-checks.yml', 'docker-compose.web.yml']
+    paths: ['frontend/web/**', '.github/workflows/frontend-checks.yml', 'docker-compose.yml']
 jobs:
   checks:
     runs-on: ubuntu-latest

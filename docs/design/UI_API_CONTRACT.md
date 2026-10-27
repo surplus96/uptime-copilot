@@ -14,7 +14,7 @@
 
 `/events` 검색은 설비 번호·진단의 리터럴 부분 문자열이며 SQL 와일드카드나 쿼리로
 해석하지 않는다. 긴급 → 주의 → 그 외, 최신 스캔 → 설비 번호 순으로 정렬한다.
-기존 Streamlit이 사용하는 events/total 필드는 유지한다.
+events/total 필드는 기존 API 계약으로 유지한다.
 
 ## 센서 시계열
 
@@ -65,7 +65,7 @@ wall_clock_lag_hours는 실제 조회 시각과의 차이로, 음수면 시뮬�
 - `/simulator/status`의 degrading 각 행에 `hours_until_failure`, `failure_due_at`를 추가한다.
   엔진의 `hours_until_failure()`를 그대로 사용하므로 elapsed가 lead_hours를 넘었더라도
   다음 고장 시각까지의 남은 시간이 올바르게 계산된다. 실제 시계가 아닌 시뮬레이션 시간이다.
-- 기존 progress 필드는 Streamlit 호환을 위해 유지하지만 React는 이를 표시하지 않는다.
+- 기존 progress 필드는 API 응답 호환을 위해 유지하지만 React는 이를 표시하지 않는다.
 - `/simulator/status.recent_failures`는 활성 운영 연도 내 최근 시뮬레이션 고장 최대 20건이다.
   현재 단계·이벤트 완료·현장 수리 완료와 별개인 발생 기록이다.
 - `GET /machines/{id}/status`는 현재 데이터 기준 시각, 해당 설비의 관측 시각, 시뮬레이션 단계,

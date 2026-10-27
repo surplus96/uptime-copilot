@@ -14,7 +14,7 @@
 > with, endorsed by, or built for Hanwha.** Part numbers, stock levels, lead times, costs
 > and end-of-life dates are synthetic.
 
-`FastAPI` · `LangGraph` · `Streamlit` · `RAG (Chroma)` · `SQLite` · `Model Context Protocol` · `Docker Compose` · `pytest`
+`FastAPI` · `LangGraph` · `React / TypeScript` · `RAG (Chroma)` · `SQLite` · `Model Context Protocol` · `Docker Compose` · `pytest`
 
 | | | | | |
 |---|---|---|---|---|
@@ -37,14 +37,14 @@ into the tools a plant actually uses (Slack, a CMMS).
 
 ## 02 · Architecture
 
-A Streamlit frontend calls the FastAPI backend. Every model input/output passes through a
+A React frontend calls the FastAPI backend through the Nginx `/api` proxy. Every model input/output passes through a
 Harness (deterministic validation) before the LangGraph supervisor or RAG service. State
 lives in SQLite, document embeddings in Chroma; approved urgent cases propagate to Slack and
 Atlas CMMS (via MCP), and the background scan also posts new anomalies to Slack.
 
 ```mermaid
 flowchart LR
-    UI["Streamlit UI"]
+    UI["React UI"]
     subgraph BE["FastAPI Backend"]
         HN["Harness<br/>input / output validation"]
         SV["LangGraph Supervisor"]
@@ -341,7 +341,7 @@ but not eliminated. Worth it for a closed environment — not a drop-in free upg
 ## 10 · Stack
 
 `FastAPI` `LangGraph` `LangChain` `OpenAI API` `Ollama` `LightGBM` `scikit-learn`
-`Streamlit` `SQLite` `Chroma`
+`React / TypeScript` `SQLite` `Chroma`
 `HuggingFace sentence-transformers` `rank_bm25` `Model Context Protocol SDK`
 `LangSmith` `Docker / Docker Compose` `pytest / pytest-asyncio` `pytest-socket` `asyncio`
 `ruff` `mypy` `GitHub Actions`

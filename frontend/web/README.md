@@ -1,7 +1,7 @@
 # Uptime Copilot · React UI
 
-기존 FastAPI와 연결되는 로컬 운영 UI. 이전 Streamlit은 `frontend/streamlit_app.py`에
-유지하며 기본 Compose 동작을 변경하지 않는다.
+FastAPI와 연결되는 기본 운영 UI. Streamlit 병행 운영은 종료했으며, 기본 Compose는
+React와 백엔드를 실행한다.
 
 ## 개발
 
@@ -30,18 +30,22 @@ BACKEND_URL=http://127.0.0.1:8001 npm run dev
 저장소 루트에서:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.web.yml up -d --build web
+docker compose up -d --build
 ```
 
 http://127.0.0.1:3001 에서 확인한다. 다른 앱이 사용하는 3000 포트와 충돌하지 않도록
 기본값을 3001로 두었다. 필요하면 `UPTIME_WEB_PORT=3002`처럼 실행 시 변경할 수 있다.
 Nginx가 정적 파일을 제공하고 `/api/`를
 `backend:8000`으로 전달한다. API Host 헤더는 백엔드의 `ALLOWED_HOSTS=backend`와 맞춘다.
-Streamlit은 기존 명령으로 병행 실행할 수 있다. `web`만 중지하려면:
+`web`만 중지하려면:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.web.yml stop web
+docker compose stop web
 ```
+
+기존 설치에서 전환할 때는 `docker compose up -d --build` 후 남은 Streamlit 컨테이너만
+`docker rm -f uptime-copilot-frontend-1`로 제거한다. 데이터 볼륨을 삭제하지 않는다.
+별도 `docker-compose.web.yml`은 기본 파일에 통합되어 제거됐다.
 
 ## 확인
 

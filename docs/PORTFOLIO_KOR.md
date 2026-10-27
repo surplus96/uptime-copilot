@@ -12,7 +12,7 @@
 > **한화 공개 자료(TOMMS/HUMS)에서 착안한 독립 프로젝트** — 한화와 제휴·후원 관계가 없으며
 > 한화를 위해 만들어진 것도 아닙니다. 부품번호·재고·리드타임·단가·단종일은 합성값입니다.
 
-`FastAPI` · `LangGraph` · `Streamlit` · `RAG (Chroma)` · `SQLite` · `Model Context Protocol` · `Docker Compose` · `pytest`
+`FastAPI` · `LangGraph` · `React / TypeScript` · `RAG (Chroma)` · `SQLite` · `Model Context Protocol` · `Docker Compose` · `pytest`
 
 | | | | | |
 |---|---|---|---|---|
@@ -33,14 +33,14 @@ Azure Predictive Maintenance 데이터셋(설비 100대, 텔레메트리 약 87�
 
 ## 02 · Architecture — 시스템 아키텍처
 
-Streamlit 프론트엔드가 FastAPI 백엔드를 호출하고, 모든 모델 입출력은 Harness(결정론적
+React 프론트엔드가 Nginx `/api` 프록시로 FastAPI 백엔드를 호출하고, 모든 모델 입출력은 Harness(결정론적
 검증 계층)를 거쳐 LangGraph 슈퍼바이저와 RAG 서비스로 위임됩니다. 상태는 SQLite, 문서
 임베딩은 Chroma에 저장되며, 승인된 긴급 건은 Slack과 Atlas CMMS(MCP)로 전파되고
 백그라운드 스캔은 새로 감지한 이상도 Slack에 올립니다.
 
 ```mermaid
 flowchart LR
-    UI["Streamlit UI"]
+    UI["React UI"]
     subgraph BE["FastAPI Backend"]
         HN["Harness<br/>input / output 검증"]
         SV["LangGraph Supervisor"]
@@ -329,7 +329,7 @@ Desktop과 이 앱 자체 컨테이너만으로도 이미 빠듯하며, 메모�
 ## 10 · Stack — 기술 스택
 
 `FastAPI` `LangGraph` `LangChain` `OpenAI API` `Ollama` `LightGBM` `scikit-learn`
-`Streamlit` `SQLite` `Chroma`
+`React / TypeScript` `SQLite` `Chroma`
 `HuggingFace sentence-transformers` `rank_bm25` `Model Context Protocol SDK`
 `LangSmith` `Docker / Docker Compose` `pytest / pytest-asyncio` `pytest-socket` `asyncio`
 `ruff` `mypy` `GitHub Actions`

@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langsmith.anonymizer import create_anonymizer
@@ -168,17 +167,7 @@ allowed_hosts = ["localhost", "127.0.0.1"] + [
 ]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
-# Streamlit(로컬 개발 시 기본 8501 포트)에서의 요청을 허용
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8501",
-        "http://127.0.0.1:8501",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# React uses the same-origin /api proxy in both Vite and Nginx.
 
 
 @app.exception_handler(LLMAPIError)

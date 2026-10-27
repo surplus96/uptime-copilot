@@ -11,10 +11,8 @@ services:
       # 1로 두면 huggingface_hub이 평범한 HTTPS CDN 경로로 내려받는다(공식 지원 옵션,
       # huggingface_hub 1.31.0 기준 - 2026-09-22 build-doctor 실측·확인).
       HF_HUB_DISABLE_XET: "1"
-      # 도커로 띄울 땐 완전 로컬(Ollama) 우선 - backend/.env의 LLM_PROVIDER보다 이 값이
-      # 항상 이긴다(ALLOWED_HOSTS와 같은 이유). 호스트에서 `OLLAMA_HOST=0.0.0.0 ollama serve`로
-      # 켜져 있어야 컨테이너에서 붙을 수 있다 - localhost는 컨테이너 자신을 가리키므로
-      # host.docker.internal을 쓴다 (README "Ollama" 절 참고).
+      # Compose environment overrides backend/.env. Current provider is OpenAI.
+      # To use local Ollama, set LLM_PROVIDER to ollama; its URL below reaches the host.
       LLM_PROVIDER: openai
       OLLAMA_BASE_URL: http://host.docker.internal:11434/v1
     # 2026-09-30 build-doctor/security-reviewer: Linux Docker Engine에는 host.docker.internal이
@@ -44,12 +42,10 @@ services:
     stop_grace_period: 30s
 
 
-  frontend:
-    build: ./frontend
+  web:
+    build: ./frontend/web
     ports:
-      - "127.0.0.1:8501:8501"
-    environment:
-      BACKEND_URL: http://backend:8000
+      - "127.0.0.1:${UPTIME_WEB_PORT:-3001}:80"
     depends_on:
       backend:
         condition: service_healthy

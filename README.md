@@ -1,8 +1,8 @@
 # Uptime Copilot
 
-The React operations UI is being introduced alongside Streamlit. See the
+React is the default and only frontend in `frontend/web/`. See the
 [React UI guide](frontend/web/README.md) and [migration plan](docs/design/REACT_UI_MIGRATION_PLAN.md).
-The new app lives in `frontend/web/`; the default Compose entry point remains Streamlit.
+Run `docker compose up -d --build` and open http://localhost:3001.
 
 [![English](https://img.shields.io/badge/English-current-0c7c8c?style=for-the-badge)](README.md)
 [![한국어](https://img.shields.io/badge/한국어-switch-555555?style=for-the-badge)](README_KOR.md)
@@ -11,7 +11,7 @@ The new app lives in `frontend/web/`; the default Compose entry point remains St
 
 **Uptime Copilot — Predictive Maintenance & MRO Copilot**
 
-A RAG + multi-agent backend (FastAPI/LangGraph) with a Streamlit frontend, built around a
+A RAG + multi-agent backend (FastAPI/LangGraph) with a React/TypeScript frontend, built around a
 manufacturing maintenance example on the Azure Predictive Maintenance dataset. Extended with
 an MRO (parts/inventory/procurement) layer and closed-network security operations (offline
 mode, audit log) — see MRO Extension below.
@@ -62,7 +62,7 @@ plus offline mode and an audit log for closed-network deployment. Plan and decis
   retried call, and a RAG answer together with its faithfulness judge, each show as one
   row. Free
   text is PII-masked (national ID, card, phone, email — not names or addresses). Query via
-  `GET /audit_log` or the Streamlit app's 5th tab.
+  `GET /audit_log` or the React audit-log page.
 
 ## Folder Structure
 
@@ -82,7 +82,7 @@ uptime-copilot/
 │   ├── notify.py                 Slack alerting — optional, see Environment Variables
 │   ├── cmms_client.py             CMMS work-order push — optional, see docs/design/PHASE_7_PLAN.md
 │   └── Dockerfile
-├── frontend/                Streamlit chat UI
+├── frontend/web/            React + TypeScript operations UI (Vite, Nginx)
 │   └── Dockerfile
 ├── .github/workflows/       CI: ruff + mypy + pytest on pushes to main and on every PR
 └── docker-compose.yml       See "Running with Docker Compose" below
@@ -92,6 +92,7 @@ uptime-copilot/
 
 - Python 3.12 (what CI and Docker use; dependencies are unpinned and the current
   resolution needs ≥3.12 — untested on older versions)
+- Node.js 24 LTS for local React development
 - Docker + Docker Compose, if you'd rather skip the manual venv setup below
 
 ## Running with Docker Compose (recommended)
@@ -104,14 +105,14 @@ so "Data Setup" below applies regardless of which path you take.
 
 # 2) Configure
 cp backend/.env.example backend/.env
-# fill in backend/.env — an OpenAI key is NOT needed here (compose defaults to local
-# Ollama); see Environment Variables below
+# fill in backend/.env — compose currently selects OpenAI; set OPENAI_API_KEY
+# and OPENAI_MODEL. For local Ollama, also change LLM_PROVIDER in compose.
 
 # 3) Build and start both services
 docker compose up -d --build
 ```
 
-- Frontend: http://localhost:8501 — Backend: http://localhost:8000 (`/docs` for the API)
+- Frontend: http://localhost:3001 — Backend: http://localhost:8000 (`/docs` for the API)
 - **First cold boot can take ~10 minutes** (healthcheck allows `start_period: 600s`): the
   backend downloads the ~470MB embedding model inside the container. `docker compose logs -f
   backend` to watch; it's cached in the `hf_cache` volume afterward, so later builds are
@@ -137,14 +138,14 @@ docker compose up -d --build
 - Both services bind to `127.0.0.1` only — nothing is exposed on your LAN, except the Ollama
   setup below if you follow it.
 - `docker compose down` to stop.
-- **Compose defaults the backend to `LLM_PROVIDER=ollama`** (the plain code default is
+- **Compose currently selects `LLM_PROVIDER=openai`** (the plain code default is
   `openai`; compose's `environment:` block always wins over `.env` — see Evaluation
-  Baseline below for the accuracy/latency trade-off). For the container to reach it, start
+  Baseline below for the accuracy/latency trade-off). To use local Ollama, set
+  `LLM_PROVIDER: ollama` in Compose. For the container to reach it, start
   Ollama on the host with `OLLAMA_HOST=0.0.0.0 ollama serve` (its default is loopback-only,
   unreachable from the container) and pull the model once: `ollama pull qwen3:8b`. Compose
   already points `OLLAMA_BASE_URL` at `host.docker.internal` (with `extra_hosts` for Linux
-  Docker Engine, unverified on Linux). Set `LLM_PROVIDER: openai` in `docker-compose.yml`
-  instead to use the cloud model.
+  Docker Engine, unverified on Linux).
   **Security note:** `OLLAMA_HOST=0.0.0.0` exposes an unauthenticated API on every network
   interface — restrict it with a firewall (Docker bridge / loopback only), since it defeats
   an "offline" deployment otherwise. Whether Docker Desktop can reach an Ollama bound only
@@ -197,11 +198,10 @@ already sets this).
 
 ```bash
 # Frontend (separate terminal)
-cd frontend
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-streamlit run streamlit_app.py
+cd frontend/web
+npm ci
+npm run dev
+# Open http://localhost:5173; /api is proxied to backend port 8000.
 ```
 
 ## Running the Checks
@@ -261,9 +261,9 @@ artifact; eval result JSONs are gitignored — re-run `pytest -m eval` to re-che
 
 | Variable | Required | Effect if unset |
 |---|---|---|
-| `LLM_PROVIDER` | No | Code default `openai`; `ollama` runs entirely against a local Ollama server — no API key/internet needed, at an accuracy/latency cost (see Evaluation Baseline). **`docker-compose.yml` overrides this to `ollama`** regardless of `.env`. |
+| `LLM_PROVIDER` | No | Code default `openai`; `ollama` runs entirely against a local Ollama server — no API key/internet needed, at an accuracy/latency cost (see Evaluation Baseline). **`docker-compose.yml` currently sets this to `openai`** regardless of `.env`. |
 | `OFFLINE` | No | `1`/`true`/`yes`/`on` enables the offline guard (see MRO Extension); `0`/`false`/`no`/`off`/empty disables it; any other value refuses to start. Enabled (`main.py` entry point only): LangSmith off, Slack skipped, `HF_HUB_OFFLINE=1` forced (embedding model must already be cached), CMMS refused outside the allowlist. Also refuses to start with `LLM_PROVIDER=openai`, an endpoint outside the allowlist, or a proxy env var not excluded via `NO_PROXY` (env vars only, not OS-level proxy settings). |
-| `OPENAI_API_KEY` | **Yes, unless `LLM_PROVIDER=ollama`** | Backend refuses to start. Not needed for the Docker path (compose sets `ollama`). |
+| `OPENAI_API_KEY` | **Yes, unless `LLM_PROVIDER=ollama`** | Backend refuses to start. Also required for the current Docker configuration (compose selects `openai`). |
 | `OPENAI_MODEL` | No | Defaults to `gpt-5.6-luna`. Used only with `LLM_PROVIDER=openai` |
 | `OLLAMA_BASE_URL` | No | Defaults to `http://localhost:11434/v1`. Used only with `LLM_PROVIDER=ollama` |
 | `OLLAMA_MODEL` | No | Defaults to `qwen3:8b`. Pull it first: `ollama pull qwen3:8b` |
@@ -271,7 +271,8 @@ artifact; eval result JSONs are gitignored — re-run `pytest -m eval` to re-che
 | `SLACK_WEBHOOK_URL` | No | 긴급/주의 alerts are silently skipped (`backend/notify.py`) |
 | `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | No | CMMS work-order push on approval is silently skipped — needs a running Atlas-MCP + Atlas CMMS instance if set, see `docs/design/PHASE_7_PLAN.md` |
 | `ALLOWED_HOSTS` | No | Extra hostnames allowed past `TrustedHostMiddleware`, beyond `localhost`/`127.0.0.1`. Compose sets this to `backend` for you. |
-| `BACKEND_URL` (frontend, not `backend/.env`) | No | Where Streamlit looks for the backend. Defaults to `http://localhost:8000`; compose sets `http://backend:8000`. |
+| `BACKEND_URL` (Vite development server) | No | API proxy destination; defaults to `http://127.0.0.1:8000`. Docker Nginx uses `http://backend:8000`. |
+| `UPTIME_WEB_PORT` (Compose) | No | React host port; defaults to `3001` to avoid the Atlas CMMS port `3000`. |
 | `SIM_TICK_SECONDS` | No | Defaults to `60` — real seconds between simulator ticks |
 | `SIM_HOURS_PER_TICK` | No | Defaults to `1` — simulated hours advanced per tick |
 | `SIM_SEED` | No | Defaults to `42` — RNG seed; `POST /simulator/reset` restarts from it |

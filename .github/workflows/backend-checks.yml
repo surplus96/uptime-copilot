@@ -34,11 +34,6 @@ jobs:
       - name: ruff
         run: python -m ruff check .
 
-      - name: ruff (frontend)
-        # 백엔드의 규칙 세트를 그대로 쓴다. 프론트엔드는 테스트가 없어서 린트가 유일한 정적 검사다.
-        working-directory: .
-        run: python -m ruff check --config backend/pyproject.toml frontend/
-
       - name: mypy (data/ + cmms_client.py)
         run: python -m mypy
 

@@ -7,15 +7,15 @@
 
 **Uptime Copilot — Predictive Maintenance & MRO Copilot**
 
-RAG + 멀티에이전트 백엔드(FastAPI/LangGraph)와 Streamlit 프론트엔드로 구성된, 제조 설비
+RAG + 멀티에이전트 백엔드(FastAPI/LangGraph)와 React/TypeScript 프론트엔드로 구성된, 제조 설비
 정비 도메인 예제입니다(Azure Predictive Maintenance 데이터셋 기반). MRO(부품·재고·조달)
 계층과 폐쇄망 보안 운영(오프라인 모드, 감사 로그)까지 확장했습니다 — 아래 MRO 확장 참고.
 
 > 📄 **[포트폴리오 케이스 스터디 →](docs/PORTFOLIO_KOR.md)** — 아키텍처, 설계 결정, 엔지니어링 사례.
 
-React 운영 UI 전환을 시작했습니다. 기존 Streamlit과 병행 실행할 수 있으며,
+React를 기본이자 유일한 UI로 사용합니다. 소스는 `frontend/web/`에 있으며,
+`docker compose up -d --build` 후 http://localhost:3001 에서 접속합니다.
 [실행 안내](frontend/web/README.md)와 [전환 계획](docs/design/REACT_UI_MIGRATION_PLAN.md)을 참고하세요.
-새 UI는 `frontend/web/`에 있으며 기본 Compose 진입점은 아직 Streamlit입니다.
 
 > **한화의 TOMMS/HUMS 공개 자료에서 착안한 독립 프로젝트**입니다 — 한화와 제휴·후원 관계가
 > 없으며 한화를 위해 만들어진 것도 아닙니다. 부품번호·재고·리드타임·단가·단종일은 모두
@@ -57,7 +57,7 @@ React 운영 UI 전환을 시작했습니다. 기존 Streamlit과 병행 실행�
   시각·스레드ID·이벤트유형·결과로 기록합니다. **기록하지 않는 것**: 진단용 데이터 조회와
   백그라운드 스캔의 부품 조회이며, 재시도한 호출과 RAG 답변+판정은 각각 한 행으로 남습니다.
   자유 텍스트는 저장 전 개인정보를 마스킹합니다(주민번호·카드·휴대폰·국제전화·유선전화·
-  이메일 — 이름·주소는 불가). `GET /audit_log` 또는 Streamlit 5번째 탭에서 조회.
+  이메일 — 이름·주소는 불가). `GET /audit_log` 또는 React 감사 로그 화면에서 조회.
 
 ## 폴더 구조
 
@@ -77,7 +77,7 @@ uptime-copilot/
 │   ├── notify.py                 Slack 알림 — 선택 사항, "환경 변수" 참고
 │   ├── cmms_client.py             CMMS 작업지시서 전송 — 선택 사항, docs/design/PHASE_7_PLAN.md 참고
 │   └── Dockerfile
-├── frontend/                Streamlit 채팅 UI
+├── frontend/web/            React + TypeScript 운영 UI (Vite, Nginx)
 │   └── Dockerfile
 ├── .github/workflows/       CI: 모든 push/PR마다 ruff + mypy + pytest 실행
 └── docker-compose.yml       "Docker Compose로 실행" 참고
@@ -87,6 +87,7 @@ uptime-copilot/
 
 - Python 3.12 (CI와 Docker가 쓰는 버전. 의존성이 고정돼 있지 않고 현재 해석은 ≥3.12가
   필요한 numpy 2.x/scipy를 받습니다 — 그 이하는 검증하지 않았습니다)
+- Node.js 24 LTS (React 로컬 개발 시)
 - Docker + Docker Compose (수동 venv 설정을 건너뛰고 싶은 경우)
 
 ## Docker Compose로 실행 (권장)
@@ -99,14 +100,14 @@ uptime-copilot/
 
 # 2) 설정
 cp backend/.env.example backend/.env
-# backend/.env 채우기 — OpenAI 키는 여기선 필요 없습니다(compose가 기본으로 로컬 Ollama를
-# 씁니다). "환경 변수" 참고
+# backend/.env 채우기 — 현재 compose는 OpenAI를 선택하므로 OPENAI_API_KEY와
+# OPENAI_MODEL을 설정합니다. 로컬 Ollama 사용 시 compose의 LLM_PROVIDER도 변경합니다.
 
 # 3) 두 서비스 빌드 및 실행
 docker compose up -d --build
 ```
 
-- 프론트엔드: http://localhost:8501 — 백엔드: http://localhost:8000 (`/docs`에서 API 문서)
+- 프론트엔드: http://localhost:3001 — 백엔드: http://localhost:8000 (`/docs`에서 API 문서)
 - **완전 cold boot는 최대 10분 정도**(헬스체크가 `start_period: 600s`까지 허용): 백엔드가
   컨테이너 안에서 약 470MB 임베딩 모델을 내려받습니다. `docker compose logs -f backend`로
   진행 확인. 이후 `hf_cache` 볼륨에 캐시되어 재빌드 시 몇 초 만에 healthy가 됩니다.
@@ -125,13 +126,13 @@ docker compose up -d --build
 - 두 서비스 모두 `127.0.0.1`에만 바인딩 — 아래 Ollama 설정을 제외하면 LAN에 아무것도
   노출하지 않습니다.
 - 중지는 `docker compose down`.
-- **compose는 백엔드 기본값을 `LLM_PROVIDER=ollama`로 강제**합니다(코드 자체 기본값은
+- **현재 compose는 `LLM_PROVIDER=openai`로 설정**합니다(코드 자체 기본값은
   `openai`; compose의 `environment:` 블록이 `.env`보다 항상 우선 — 트레이드오프는 아래
-  평가 기준선 참고). 컨테이너가 접근하려면 호스트에서 `OLLAMA_HOST=0.0.0.0 ollama serve`로
+  평가 기준선 참고). 로컬 Ollama를 쓰려면 compose를 `LLM_PROVIDER: ollama`로 변경합니다.
+  컨테이너가 접근하려면 호스트에서 `OLLAMA_HOST=0.0.0.0 ollama serve`로
   Ollama를 켜고(기본값인 루프백 바인딩은 컨테이너에서 접근 불가) `ollama pull qwen3:8b`로
   모델을 받으세요. compose가 `OLLAMA_BASE_URL`을 `host.docker.internal`로 이미 맞춰뒀습니다
-  (Linux Docker Engine용 `extra_hosts`도 포함, Linux 호스트에서는 검증하지 못함). 클라우드
-  모델을 쓰려면 `docker-compose.yml`의 `LLM_PROVIDER: openai`로 바꾸세요.
+  (Linux Docker Engine용 `extra_hosts`도 포함, Linux 호스트에서는 검증하지 못함).
   **보안 주의:** `OLLAMA_HOST=0.0.0.0`은 인증 없는 API를 모든 네트워크 인터페이스에
   노출합니다 — 방화벽으로 Docker 브리지/루프백만 허용하세요(그렇지 않으면 "오프라인"
   배포 취지와 어긋납니다). Docker Desktop이 루프백에만 바인딩된 Ollama에 대신 접근할 수
@@ -181,11 +182,10 @@ uvicorn main:app --reload --port 8000
 
 ```bash
 # 프론트엔드 (별도 터미널)
-cd frontend
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-streamlit run streamlit_app.py
+cd frontend/web
+npm ci
+npm run dev
+# http://localhost:5173 접속. /api는 백엔드 8000 포트로 프록시됩니다.
 ```
 
 ## 검사 실행
@@ -243,9 +243,9 @@ pytest tests/eval/test_golden.py -m eval -v -s
 
 | 변수 | 필수 | 미설정 시 동작 |
 |---|---|---|
-| `LLM_PROVIDER` | 선택 | 코드 기본값 `openai`; `ollama`면 완전히 로컬 서버로 동작 — API 키·인터넷 불필요, 정확도/지연 손실 있음("평가 기준선" 참고). **`docker-compose.yml`이 이 값을 `ollama`로 강제**(`.env`보다 우선). |
+| `LLM_PROVIDER` | 선택 | 코드 기본값 `openai`; `ollama`면 완전히 로컬 서버로 동작 — API 키·인터넷 불필요, 정확도/지연 손실 있음("평가 기준선" 참고). **현재 `docker-compose.yml`은 이 값을 `openai`로 설정**(`.env`보다 우선). |
 | `OFFLINE` | 선택 | `1`/`true`/`yes`/`on`이면 오프라인 가드 켜짐(위 MRO 확장 참고), `0`/`false`/`no`/`off`/빈 값이면 꺼짐, 그 외 값은 기동 거부. 켜지면(`main.py` 진입점에 한해 성립): LangSmith 끔, Slack 스킵, `HF_HUB_OFFLINE=1` 강제(임베딩 모델이 이미 캐시에 있어야 함), 허용 목록 밖 CMMS 거부. `LLM_PROVIDER=openai`, 허용 목록 밖 엔드포인트, `NO_PROXY`로 제외 안 된 프록시(환경변수만 검사, OS 수준 설정은 검사 안 함)에서도 기동 거부. |
-| `OPENAI_API_KEY` | **`LLM_PROVIDER=ollama`가 아니면 필수** | 백엔드가 시작되지 않음. 도커 경로는 불필요(compose가 `ollama` 설정). |
+| `OPENAI_API_KEY` | **`LLM_PROVIDER=ollama`가 아니면 필수** | 백엔드가 시작되지 않음. 현재 도커 경로에서도 필요(compose가 `openai` 설정). |
 | `OPENAI_MODEL` | 선택 | 기본값 `gpt-5.6-luna`. `LLM_PROVIDER=openai`일 때만 사용 |
 | `OLLAMA_BASE_URL` | 선택 | 기본값 `http://localhost:11434/v1`. `LLM_PROVIDER=ollama`일 때만 사용 |
 | `OLLAMA_MODEL` | 선택 | 기본값 `qwen3:8b` — 먼저 `ollama pull qwen3:8b`로 받아야 함 |
@@ -253,7 +253,8 @@ pytest tests/eval/test_golden.py -m eval -v -s
 | `SLACK_WEBHOOK_URL` | 선택 | 긴급/주의 Slack 알림을 조용히 건너뜀 (`backend/notify.py`) |
 | `CMMS_MCP_URL` + `CMMS_MCP_TOKEN` | 선택 | CMMS 작업지시서 전송을 조용히 건너뜀 — 설정 시 Atlas-MCP + Atlas CMMS 인스턴스 필요, `docs/design/PHASE_7_PLAN.md` 참고 |
 | `ALLOWED_HOSTS` | 선택 | `localhost`/`127.0.0.1` 외에 `TrustedHostMiddleware`를 통과시킬 추가 호스트. compose가 `backend`로 자동 설정. |
-| `BACKEND_URL` (프론트엔드용) | 선택 | Streamlit이 백엔드를 찾는 주소. 기본값 `http://localhost:8000`, compose는 `http://backend:8000`. |
+| `BACKEND_URL` (Vite 개발 서버용) | 선택 | API 프록시 대상. 기본값 `http://127.0.0.1:8000`. Docker Nginx는 `http://backend:8000` 사용. |
+| `UPTIME_WEB_PORT` (Compose) | 선택 | React 호스트 포트. Atlas CMMS의 3000과 겹치지 않도록 기본값 `3001`. |
 | `SIM_TICK_SECONDS` | 선택 | 기본값 `60` — 시뮬레이터가 실제 몇 초마다 전진할지 |
 | `SIM_HOURS_PER_TICK` | 선택 | 기본값 `1` — 한 번에 시뮬레이션 몇 시간을 진행할지 |
 | `SIM_SEED` | 선택 | 기본값 `42` — 시뮬레이터 난수 시드. `POST /simulator/reset`으로 재시작 |

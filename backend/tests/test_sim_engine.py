@@ -274,7 +274,7 @@ def test_drift_size_follows_measured_mean_per_signal(monkeypatch):
 
 def test_signature_hour_marks_fault_and_counts_its_errors(monkeypatch):
     """서명 오류가 난 시간에 상태가 FAULT가 되고 errors_emitted가 서명 개수만큼 늘어야 한다 - 화면의
-    '전조 오류 발생'/'전조 오류 N건' 표시(streamlit_app)가 이 두 값만 본다. 잡음 오류를 끄면 서명이
+    '전조 오류 발생'/'전조 오류 N건' 표시(UI)가 이 두 값만 본다. 잡음 오류를 끄면 서명이
     유일한 오류 출처라, 이 줄들을 지우면 열화가 고장까지 '열화 중·오류 0건'으로만 보인다."""
     monkeypatch.setattr(E, "P_PRECURSOR_ERROR", 0.0)
     monkeypatch.setattr(E, "P_BG_ERROR", 0.0)

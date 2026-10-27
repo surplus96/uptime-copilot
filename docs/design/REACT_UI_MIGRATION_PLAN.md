@@ -1,6 +1,9 @@
 # React 프론트엔드 전환 계획
 
-작성: 2026-10-19 · 상태: Docker·조회 API 통합 검증 완료, 브라우저 시각 검증 대기
+작성: 2026-10-19 · 갱신: 2026-10-27 · 상태: 사용자 브라우저 검증 완료, React 기본 UI 전환·Streamlit 제거
+
+2026-10-27 사용자 결정으로 React만 운영한다. 아래 초기 계획과 당시 검증 기록의
+Streamlit 병행 구성은 과거 이력이며, 현재 실행 방법은 저장소 README를 따른다.
 
 ## 목표와 범위
 
@@ -185,3 +188,22 @@ FastAPI·LangGraph·SQLite를 유지하면서 Streamlit UI를 React 운영 화�
   모델은 `gpt-5.6-luna` 유지. 실제 신규 진단·승인·외부 전송은 실행하지 않았다.
 - 브라우저 렌더링은 이번 검증에 포함하지 않았다. 새로고침 후 이벤트의 시뮬레이션 단계,
   AI 화면의 현재 상태 영역, 새 진단 초안 이동을 사용자 환경에서 확인할 수 있다.
+
+### React 기본 전환 및 Streamlit 제거 (2026-10-27)
+
+- 사용자 결정: React 기본 진입, Streamlit 병행 종료 및 소스 제거.
+- 기본 Compose에 `web` 서비스를 통합하고 `frontend`(8501) 서비스를 제거한다.
+  React 주소는 기존 3001을 유지하며 CMMS 3000과 충돌하지 않는다.
+- Streamlit 앱·테마·Python requirements·Dockerfile과 별도 Compose overlay를 제거한다.
+  React 소스 경로 `frontend/web/`과 진단 URL은 유지한다.
+- React의 Vite/Nginx 동일 출처 프록시를 사용하며 백엔드의 Streamlit 전용 CORS를 제거한다.
+- Python 프론트 lint CI를 제거하고 React CI 경로 필터를 기본 Compose에 맞춘다.
+- README·포트폴리오를 현재 구성으로 갱신하고 이전 설계·결정 기록은 보존한다.
+- 기존 Streamlit 컨테이너만 제거하며 백엔드 저장소·모델 캐시·Atlas CMMS는 유지한다.
+- 검증 완료: 기본 Compose 서비스는 `backend`, `web`이며 config 검사 통과.
+  백엔드 Ruff·326개 테스트(기존 RAG dedup 제외, 3개 deselected), 프론트 27개 테스트·
+  TypeScript·production build, `git diff --check` 통과.
+- 기본 명령으로 Docker 반영 후 `/`, `/agent`, `/approvals`, 프록시 health·events·
+  simulator/status HTTP 200 확인. Streamlit 컨테이너 `uptime-copilot-frontend-1` 제거 완료.
+- 전환 직전/직후 시뮬레이터는 정지, 데이터 기준은 `2026-10-08 09:00:00`으로 동일.
+  모델은 `gpt-5.6-luna` 유지. 실제 진단·승인·전송 및 브라우저 조작 검증은 실행하지 않았다.
