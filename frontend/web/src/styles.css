@@ -17,3 +17,5 @@ label { display: flex; flex-direction: column; gap: 7px; font-size: 12px; font-w
 @media(max-width:800px) { .sensor-grid { grid-template-columns:minmax(0,1fr); }.telemetry-summary { gap:17px; }.pagination { flex-wrap:wrap; } }
 .diagnosis-context { margin-top:22px; padding:18px; border:1px solid #e2e8f0; border-radius:9px; background:#fbfcfe; }.diagnosis-context .section-label:not(:first-child) { margin-top:23px; }.diagnosis-context .button { margin-top:15px; }.diagnosis-context .inline-dl dd { overflow-wrap:anywhere; }
 @media(max-width:800px) { .diagnosis-context .inline-dl { grid-template-columns:minmax(0,1fr); gap:6px; }.diagnosis-context .inline-dl dd { text-align:left; margin-bottom:10px; } }
+
+.simulator-run-actions { margin-top: 12px; }

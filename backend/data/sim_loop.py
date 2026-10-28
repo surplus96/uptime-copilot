@@ -79,14 +79,26 @@ def is_running() -> bool:
     return _get_control("running", "0") == "1"
 
 
-def start() -> None:
-    _set_control("running", "1")
-    _set_control("started_at", str(time.time()))
+def start(machine_id: int | None = None) -> None:
+    """Use one scheduler/clock; a single-machine run requires an injected episode."""
+    with _LOCK:
+        if machine_id is not None and (type(machine_id) is not int or not 1 <= machine_id <= 100):
+            raise ValueError("설비 번호는 1~100이어야 합니다.")
+        mode = "single" if machine_id is not None else "all"
+        if is_running():
+            if _get_control("mode", "all") == mode and _get_control("machine_id", "") == (str(machine_id) if machine_id else ""):
+                return
+            raise ValueError("다른 실행 범위가 동작 중입니다. 먼저 정지하세요.")
+        if machine_id is not None and sim_store.load_states()[machine_id].state == "HEALTHY":
+            raise ValueError("선택 설비에 먼저 열화를 주입하세요.")
+        _set_controls({"running": "1", "mode": mode, "machine_id": str(machine_id) if machine_id else "",
+                       "started_at": str(time.time()), "stop_reason": ""})
 
 
 
 def stop() -> None:
-    _set_control("running", "0")
+    with _LOCK:
+        _set_controls({"running": "0", "stop_reason": "manual"})
 
 
 def reset() -> None:
@@ -133,6 +145,9 @@ def status() -> dict:
     last_tick_at = _get_control("last_tick_at")
     return {
         "running": running,
+        "mode": _get_control("mode", "all"),
+        "machine_id": int(_get_control("machine_id") or "0") or None,
+        "stop_reason": _get_control("stop_reason") or None,
         "sim_now": sim_query.sim_only_now(),
         "dataset_now": reference,
         "recent_failures": recent_failures,
@@ -188,6 +203,8 @@ def _age_component_for_injection(machine_id: int, comp: str) -> None:
 def inject(machine_id: int, signal: str | None = None) -> dict:
     """데모용: 특정 설비를 강제로 강한 열화 상태로 만들어 곧 감지되게 한다."""
     with _LOCK:
+        if is_running():
+            raise ValueError("열화 주입 전에 실행 중인 시뮬레이터를 정지하세요.")
         rng = _load_rng()
         states = sim_store.load_states()
         m = states.get(machine_id)
@@ -307,6 +324,12 @@ def _tick_once() -> None:
         # (interface-reviewer가 지적, 2026-10-01).
         rng = _load_rng()
         states = sim_store.load_states()
+        # A stop may arrive between the scheduler's check and acquiring this lock.
+        if _get_control("running") == "0":
+            return
+        target = int(_get_control("machine_id") or "0") if _get_control("mode", "all") == "single" else None
+        active = {target: states[target]} if target else states
+        failure_reached = False
         sim_last = sim_query.sim_only_now()
         base_ts = pd.Timestamp(sim_last) if sim_last else pd.Timestamp(runtime_dataset.local_now()).floor("h")
         year = sim_query.runtime_year()
@@ -315,16 +338,16 @@ def _tick_once() -> None:
             if anchor:
                 base_ts = max(base_ts, pd.Timestamp(anchor))
             if (base_ts + pd.Timedelta(hours=SIM_HOURS_PER_TICK)).year != year:
-                stop()
+                _set_controls({"running": "0", "stop_reason": "year_limit"})
                 raise ValueError(f"{year}년 테스트 범위를 넘어 시뮬레이터를 정지했습니다.")
         conn = sqlite3.connect(DB_PATH)
         try:
-            _seed_maintenance_history(conn, base_ts, states.keys(), states)
+            _seed_maintenance_history(conn, base_ts, active.keys(), active)
             last_maint = _load_last_maint(conn)
             for h in range(1, SIM_HOURS_PER_TICK + 1):
                 ts = base_ts + pd.Timedelta(hours=h)
-                _preventive_maintenance(conn, ts, states, last_maint)
-                for m in states.values():
+                _preventive_maintenance(conn, ts, active, last_maint)
+                for m in active.values():
                     was_state = m.state
                     # 열화를 시작할 수 있는 상태(HEALTHY)일 때만 부품 나이가 쓰인다
                     ages = _comp_ages(last_maint, m.machine_id, ts) if m.state == "HEALTHY" else None
@@ -340,6 +363,7 @@ def _tick_once() -> None:
                             (str(ts), m.machine_id, err),
                         )
                     if r["failure"]:
+                        failure_reached = True
                         conn.execute(
                             'INSERT INTO sim_failures ("datetime", "machineID", "failure") VALUES (?, ?, ?)',
                             (str(ts), m.machine_id, r["failure"]),
@@ -358,6 +382,11 @@ def _tick_once() -> None:
                             last_maint[(m.machine_id, companion)] = ts
                     if r["errors"] or r["failure"] or m.state != was_state:
                         changed.add(m.machine_id)
+
+                if target and failure_reached:
+                    conn.executemany("INSERT OR REPLACE INTO sim_control VALUES (?, ?)",
+                                     [("running", "0"), ("stop_reason", "failure_reached")])
+                    break
 
             # 상태/난수/마지막 틱 시각까지 전부 같은 트랜잭션에 묶는다 - 텔레메트리는
             # 기록됐는데 상태 저장 직전에 죽어서 다음 재시작 때 그 시간이 중복 진행되는
@@ -378,7 +407,7 @@ def _tick_once() -> None:
         finally:
             conn.close()
 
-    scan_targets = {m.machine_id for m in states.values() if m.state != "HEALTHY"} | changed
+    scan_targets = {m.machine_id for m in active.values() if m.state != "HEALTHY"} | changed
     if scan_targets:
         detected, alerts = agent_service.scan_machines(sorted(scan_targets))
         if alerts:

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
@@ -31,6 +31,7 @@ beforeEach(() => {
   vi.spyOn(api, 'simulator').mockResolvedValue(simulator)
   vi.spyOn(operationsApi, 'currentStatus').mockResolvedValue(live)
 })
+afterEach(() => vi.unstubAllGlobals())
 describe('saved diagnosis and live observations', () => {
   it('updates the live view while preserving the completed diagnosis and never posting', async () => {
     vi.spyOn(api, 'status').mockResolvedValue(snapshot)
@@ -94,5 +95,51 @@ describe('saved diagnosis and live observations', () => {
     mount(<EventsPage />)
     await screen.findByText('전조 오류 발생')
     expect(screen.getByText('주의', { selector: '.badge' })).toBeTruthy()
+  })
+})
+
+
+describe('scoped simulator controls', () => {
+  it('posts the selected scope, displays it, and prevents a concurrent fleet run', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('{}'))
+    vi.stubGlobal('fetch', fetch)
+    const user = userEvent.setup()
+    mount(<SimulatorPage />)
+    await screen.findByText('전조 오류 발생')
+    await user.clear(screen.getByLabelText('설비 번호 (1~100)'))
+    await user.type(screen.getByLabelText('설비 번호 (1~100)'), '2')
+    vi.mocked(api.simulator).mockResolvedValue({ ...simulator, running: true, mode: 'single', machine_id: 2 })
+    await user.click(screen.getByRole('button', { name: '선택 설비 시작' }))
+    await screen.findByText('설비 #2만 진행 중입니다.')
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls[0][0]).toBe('/api/simulator/start')
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ mode: 'single', machine_id: 2 })
+    expect((screen.getByRole('button', { name: '전체 시작' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: '열화 주입' }) as HTMLButtonElement).disabled).toBe(true)
+    vi.mocked(api.simulator).mockResolvedValue({ ...simulator, mode: 'single', machine_id: 2 })
+    await user.click(screen.getByRole('button', { name: '선택 설비 정지' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    expect(fetch.mock.calls[1][0]).toBe('/api/simulator/stop')
+  })
+  it('injects without starting and enables the selected run after refreshed state arrives', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('{}'))
+    vi.stubGlobal('fetch', fetch)
+    const user = userEvent.setup()
+    mount(<SimulatorPage />)
+    await screen.findByText('전조 오류 발생')
+    expect((screen.getByRole('button', { name: '선택 설비 시작' }) as HTMLButtonElement).disabled).toBe(true)
+    vi.mocked(api.simulator).mockResolvedValue({ ...simulator, degrading: [...simulator.degrading, { ...simulator.degrading[0], machine_id: 64 }] })
+    await user.click(screen.getByRole('button', { name: '열화 주입' }))
+    await user.click(screen.getByRole('button', { name: '확인' }))
+    await screen.findByText('열화를 주입했습니다. 선택 설비 시작을 누르면 해당 설비만 진행됩니다.')
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls[0][0]).toBe('/api/simulator/inject')
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ machine_id: 64, signal: null })
+    await waitFor(() => expect((screen.getByRole('button', { name: '선택 설비 시작' }) as HTMLButtonElement).disabled).toBe(false))
+  })
+  it('shows the automatic stop reason from the server', async () => {
+    vi.mocked(api.simulator).mockResolvedValue({ ...simulator, mode: 'single', machine_id: 2, stop_reason: 'failure_reached' })
+    mount(<SimulatorPage />)
+    await screen.findByText('선택 설비의 고장·자동 정비 기록을 생성하고 정지했습니다. 아래 고장 이력에서 진단으로 이동할 수 있습니다.')
   })
 })

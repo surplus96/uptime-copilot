@@ -42,6 +42,7 @@ from core.harness import (
 )
 from data import audit_log, event_store, runtime_dataset, sim_loop, sim_store
 from rag import rag_service
+from simulator_routes import router as simulator_router
 from ui_routes import router as ui_router
 
 logging.basicConfig(
@@ -151,6 +152,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=f"AI Agent RAG Backend ({llm_provider.get_provider_name()})", lifespan=lifespan)
 
 app.include_router(ui_router)
+app.include_router(simulator_router)
 
 # ---------- 커스텀 예외 ---------------
 
@@ -317,40 +319,6 @@ def trigger_scan():
     """전체 설비를 스캔해서 긴급/주의로 판정된 설비를 이벤트 저장소에 적재한다."""
     detected = agent_service.scan_all_machines()
     return {"detected_count": len(detected), "events": detected}
-
-@app.post("/simulator/start")
-def simulator_start():
-    sim_loop.start()
-    return {"running": True}
-
-
-@app.post("/simulator/stop")
-def simulator_stop():
-    sim_loop.stop()
-    return {"running": False}
-
-
-@app.get("/simulator/status")
-def simulator_status():
-    return sim_loop.status()
-
-
-class SimulatorInjectRequest(BaseModel):
-    machine_id: int
-    signal: Literal["volt", "rotate", "pressure", "vibration"] | None = None
-
-
-@app.post("/simulator/inject")
-def simulator_inject(req: SimulatorInjectRequest):
-    return sim_loop.inject(req.machine_id, req.signal)
-
-
-@app.post("/simulator/reset")
-def simulator_reset():
-    sim_loop.reset()
-    return {"status": "reset"}
-
-
 
 class EventIdsRequest(BaseModel):
     machine_ids: list[int]

@@ -2,6 +2,7 @@ export interface Health { status: string; llm_provider: string; llm_model: strin
 export interface EventRow { machine_id: number; severity: string; diagnosis: string; detected_at: string; evidence_at: string | null }
 export interface Events { total: number; events: EventRow[]; offset?: number; limit?: number; summary?: { total: number; urgent: number; warning: number } }
 export interface Simulator {
+  mode?: 'all' | 'single'; machine_id?: number | null; stop_reason?: 'manual' | 'failure_reached' | 'year_limit' | null;
   running: boolean; dataset_now: string | null; sim_now: string | null; timezone: string;
   hours_per_tick: number; tick_seconds: number; last_error: string | null;
   consecutive_failures: number; has_stale_events: boolean;
