@@ -20,15 +20,7 @@ docker exec -i atlas_db sh -c 'psql -U "$POSTGRES_USER" -d atlas' < scripts/atla
 ```
 
 DB 컨테이너 이름과 DB명은 배포 환경에 맞춘다. 스크립트는 트랜잭션과 lock timeout을
-사용하며 반복 적용할 수 있다. 이번 변경은 Copilot `backend`와 Atlas의 메모 공백 정규화에
-맞춘 `atlas-mcp`를 재빌드한다. Atlas CMMS 이미지는 그대로 사용할 수 있다.
-
-```bash
-cd /Users/surplus96/projects/atlas-mcp
-docker compose up -d --build atlas-mcp
-cd /Users/surplus96/projects/uptime-copilot
-docker compose up -d --build backend frontend
-```
+사용하며 반복 적용할 수 있다.
 
 `backend/.env`의 `CMMS_MCP_URL`, `CMMS_MCP_TOKEN`을 설정한다. 실제 Atlas 자산 ID를 확인한 경우 `CMMS_ASSET_MAP`에 JSON을 넣을 수 있다. 예: `CMMS_ASSET_MAP={"84":1}`. 기존 기본 매핑은 84번 설비 → Atlas 자산 1이다. 매핑이 없는 설비는 자산 없이 생성한다.
 
@@ -58,5 +50,3 @@ Content-Type: application/json
 명시적인 retry는 기존 `sent` 건의 상세 메모도 다시 저장·검증한다. 승인된 항목 목록이
 같을 때만 체크포인트의 절차·근거로 표현을 갱신한다. 일반적인 반복 전송은 여전히
 기존 성공을 반환한다. MCP는 기존 현장 메모 뒤에 빠진 내용만 추가하며 완료값을 보존한다.
-
-신규 승인 건부터 적용된다. 기존 Atlas 작업지시서는 자동 변경하지 않으며 생성 결과 미확인의 자동 복구·전체 매뉴얼 파일 첨부·실제 부품 소비는 별도 구현 범위다.
